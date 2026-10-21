@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -208,8 +209,10 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		{"an empty step", func(e *journal.Entry) { e.Step = "" }, "the step is not 1 to 40 lower-case letters and underscores that start with a letter"},
 		{"a step of 41", func(e *journal.Entry) { e.Step = strings.Repeat("a", 41) }, "the step is not 1 to 40 lower-case letters and underscores that start with a letter"},
 		{"a step with a line feed", func(e *journal.Entry) { e.Step = "explore\nx" }, "the step is not 1 to 40 lower-case letters and underscores that start with a letter"},
-		{"a step with qrk_", func(e *journal.Entry) { e.Step = "qrk_abc" }, "the step contains qak_ or qrk_, the start of a secret"},
-		{"a step with qak_", func(e *journal.Entry) { e.Step = "x_qak_abc" }, "the step contains qak_ or qrk_, the start of a secret"},
+		{"a step with qrk_", func(e *journal.Entry) { e.Step = "qrk_abc" }, "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
+		{"a step with qak_", func(e *journal.Entry) { e.Step = "x_qak_abc" }, "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
+		{"a step with qecr_", func(e *journal.Entry) { e.Step = "qecr_abc" }, "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
+		{"a step with qecp_", func(e *journal.Entry) { e.Step = "x_qecp_abc" }, "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
 		{"an unknown phase", func(e *journal.Entry) { e.Phase = "started" }, "the phase is not claimed, dispatched, handover, handed_over, created or stopped"},
 		{"created with no instance id", func(e *journal.Entry) { e.Phase = journal.PhaseCreated }, "the instance id is not i- and 8 or 17 hex digits"},
 		{"stopped with -", func(e *journal.Entry) { e.Phase, e.InstanceID = journal.PhaseStopped, "-" }, "the instance id is not i- and 8 or 17 hex digits"},
@@ -371,10 +374,15 @@ func TestAnEntryHasOnlyItsFiveFields(t *testing.T) {
 // the journal file, in the folder or in any error.
 func TestNoSecretReachesTheJournal(t *testing.T) {
 	const (
-		runKey  = "qrk_MARKERrunkey000000000000"
-		runCode = "MARKERruncode0000000000000"
+		runKey = "qrk_MARKERrunkey000000000000"
+		// runCode has the shape of a run code: qecr_, 26 Crockford base32 characters
+		// and one or two parts of 22 base64url characters.
+		runCode = "qecr_MARKER00000000000000000000.MARKERruncode000000000"
 		inputs  = `{"MARKERinput":"MARKERvalue"}`
 	)
+	if !regexp.MustCompile(`^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$`).MatchString(runCode) {
+		t.Fatalf("the run code marker %q is not in the shape of a run code", runCode)
+	}
 	markers := []string{"MARKER", runKey, runCode, inputs}
 	dir := t.TempDir()
 	j := open(t, dir)
@@ -394,6 +402,8 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 				func(x *journal.Entry) { x.RunID = m },
 				func(x *journal.Entry) { x.Step = m },
 				func(x *journal.Entry) { x.Step = "qrk_marker" },
+				func(x *journal.Entry) { x.Step = "qecr_marker" },
+				func(x *journal.Entry) { x.Step = "qecp_marker" },
 				func(x *journal.Entry) { x.Phase = m },
 				func(x *journal.Entry) { x.Phase, x.InstanceID = journal.PhaseCreated, m },
 				func(x *journal.Entry) { x.Phase, x.InstanceID = journal.PhaseCreated, "i-"+m },

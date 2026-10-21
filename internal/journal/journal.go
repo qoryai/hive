@@ -5,8 +5,8 @@
 // The journal never contains a run key, a run code or the inputs of a run. An entry has
 // five fields, a dispatch id, a run id, a step, a phase and an instance id, and no
 // field for a secret. Each field is checked against a fixed shape before it is written
-// and after it is read. A step that contains qak_ or qrk_, the start of an access key
-// secret or a run key, is out of shape.
+// and after it is read. A step that contains qak_, qrk_, qecr_ or qecp_, the start of
+// an access key secret, a run key, a run code or an enrolment code, is out of shape.
 package journal
 
 import (
@@ -50,6 +50,10 @@ const (
 	PhaseStopped = "stopped"
 )
 
+// secretPrefixes are the starts of an access key secret, a run key, a run code and an
+// enrolment code. A step that contains one is out of shape.
+var secretPrefixes = []string{"qak_", "qrk_", "qecr_", "qecp_"}
+
 // phases is every phase, in order.
 var phases = []string{PhaseClaimed, PhaseDispatched, PhaseHandover, PhaseHandedOver, PhaseCreated, PhaseStopped}
 
@@ -90,8 +94,8 @@ func (e Entry) check() string {
 		return "the run id is not a lower-case UUID"
 	case !stepShape.MatchString(e.Step):
 		return "the step is not 1 to 40 lower-case letters and underscores that start with a letter"
-	case strings.Contains(e.Step, "qak_") || strings.Contains(e.Step, "qrk_"):
-		return "the step contains qak_ or qrk_, the start of a secret"
+	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.Step, p) }):
+		return "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	case !slices.Contains(phases, e.Phase):
 		return "the phase is not claimed, dispatched, handover, handed_over, created or stopped"
 	}
