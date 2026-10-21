@@ -74,21 +74,25 @@ type Error struct {
 	Err error
 }
 
-// Error starts with what to do, then the cause.
+// Error starts with what the operator does, then the cause.
 func (e *Error) Error() string {
 	switch {
 	case e.Kind == KindRetried:
-		return fmt.Sprintf("Call %s again after a pause: the call failed with an error that the SDK retries: %v", e.Op, e.Err)
+		var maxAttempts *retry.MaxAttemptsError
+		if errors.As(e.Err, &maxAttempts) {
+			return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
+		}
+		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed with an error that the SDK retries: %v", e.Op, e.Err)
 	case e.Kind == KindLimit:
 		return fmt.Sprintf("Wait until machines end, or raise the account's EC2 instance or vCPU quota: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Kind == KindTokenMismatch:
-		return fmt.Sprintf("Release the run, and send no second %s for its dispatch: the client token was used before with different parameters: %v", e.Op, e.Err)
+		return fmt.Sprintf("Report this defect in the provisioner: it sent %s for one dispatch twice with different parameters, and EC2 returned %s: %v", e.Op, e.Code, e.Err)
 	case e.Kind == KindTokenTerminated:
-		return fmt.Sprintf("Release the run: the machine started with this client token is terminated, and EC2 starts no second machine for it: %v", e.Err)
+		return fmt.Sprintf("No action needed: the machine started with this client token is terminated, and EC2 starts no second machine for the token: %v", e.Err)
 	case e.Code == codeUnauthorized:
 		return fmt.Sprintf("Give the instance role the provisioner's EC2 rights: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code != "":
-		return fmt.Sprintf("Fix the cause of EC2 error %s: %s failed: %v", e.Code, e.Op, e.Err)
+		return fmt.Sprintf("Look up EC2 error code %s in the EC2 API reference, and check the provisioner's settings and the instance role against it: %s failed: %v", e.Code, e.Op, e.Err)
 	case errors.Is(e.Err, context.Canceled), errors.Is(e.Err, context.DeadlineExceeded):
 		return fmt.Sprintf("No action needed: %s stopped when its context ended: %v", e.Op, e.Err)
 	default:

@@ -112,7 +112,7 @@ func (c *Client) Console(ctx context.Context, id string) (string, error) {
 	}
 	text, err := base64.StdEncoding.DecodeString(aws.ToString(out.Output))
 	if err != nil {
-		return "", fmt.Errorf("Read the console output of %s again: GetConsoleOutput returned output that is not base64: %w", id, err)
+		return "", fmt.Errorf("If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for %s that is not base64: %w", id, err)
 	}
 	return string(text), nil
 }

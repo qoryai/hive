@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
@@ -58,7 +59,9 @@ func NewFromConfig(cfg aws.Config) *Client {
 
 // LoadConfig loads the AWS configuration from the SDK's default chain. The region
 // comes from AWS_REGION or AWS_DEFAULT_REGION, then the shared config file, then the
-// instance metadata. On the host, the credentials come from the instance role.
+// instance metadata. LoadConfig then retrieves the credentials once, and returns an
+// error unless they come from the host's instance role: the provisioner stores no
+// AWS key.
 func LoadConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
 	if err != nil {
@@ -66,6 +69,13 @@ func LoadConfig(ctx context.Context) (aws.Config, error) {
 	}
 	if cfg.Region == "" {
 		return aws.Config{}, fmt.Errorf("Set AWS_REGION: the environment has no region, and the instance metadata returned none")
+	}
+	creds, err := cfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("Attach an instance role to the host, and run the provisioner with IMDSv2 reachable: retrieving the AWS credentials failed: %w", err)
+	}
+	if creds.Source != ec2rolecreds.ProviderName {
+		return aws.Config{}, fmt.Errorf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the provisioner's container, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)
 	}
 	return cfg, nil
 }

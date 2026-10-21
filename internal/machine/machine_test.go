@@ -116,7 +116,7 @@ func TestCreateUserDataBound(t *testing.T) {
 	}
 	spec.UserData = []byte(strings.Repeat("a", MaxUserData+1))
 	_, err := c.Create(context.Background(), spec)
-	const want = "Shorten the user data to 16384 bytes or less: it has 16385 bytes"
+	const want = "Report this defect in the provisioner: the user data has 16385 bytes, and EC2 accepts at most 16384"
 	if err == nil || err.Error() != want {
 		t.Errorf("16385 bytes: error %v, want %q", err, want)
 	}
@@ -131,16 +131,16 @@ func TestCreateRefusesSpec(t *testing.T) {
 		edit func(*Spec)
 		want string
 	}{
-		{func(s *Spec) { s.DispatchID = "" }, "Use a dispatch id of 1 to 64 characters as the client token: the id has 0 bytes"},
-		{func(s *Spec) { s.DispatchID = strings.Repeat("d", 65) }, "Use a dispatch id of 1 to 64 characters as the client token: the id has 65 bytes"},
-		{func(s *Spec) { s.DispatchID = "dsp 1" }, "Use a dispatch id of ASCII letters, digits and punctuation as the client token: byte 3 of the id is 0x20"},
-		{func(s *Spec) { s.RunID = "" }, "Set the run id in the machine spec: it is empty"},
-		{func(s *Spec) { s.PoolID = "" }, "Set the pool id in the machine spec: it is empty"},
-		{func(s *Spec) { s.InstanceType = "" }, "Set the instance type in the machine spec: it is empty"},
-		{func(s *Spec) { s.ImageID = "" }, "Set the image id in the machine spec: it is empty"},
-		{func(s *Spec) { s.RootDevice = "" }, "Set the root device name in the machine spec: it is empty"},
-		{func(s *Spec) { s.SubnetID = "" }, "Set the subnet id in the machine spec: it is empty"},
-		{func(s *Spec) { s.SecurityGroupID = "" }, "Set the security group id in the machine spec: it is empty"},
+		{func(s *Spec) { s.DispatchID = "" }, "Report this defect in the provisioner: the dispatch id has 0 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.DispatchID = strings.Repeat("d", 65) }, "Report this defect in the provisioner: the dispatch id has 65 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.DispatchID = "dsp 1" }, "Report this defect in the provisioner: byte 3 of the dispatch id is 0x20, and a client token has only ASCII letters, digits and punctuation"},
+		{func(s *Spec) { s.RunID = "" }, "Report this defect in the provisioner: the machine spec has no the run id"},
+		{func(s *Spec) { s.PoolID = "" }, "Report this defect in the provisioner: the machine spec has no the pool id"},
+		{func(s *Spec) { s.InstanceType = "" }, "Report this defect in the provisioner: the machine spec has no the instance type"},
+		{func(s *Spec) { s.ImageID = "" }, "Report this defect in the provisioner: the machine spec has no the image id"},
+		{func(s *Spec) { s.RootDevice = "" }, "Report this defect in the provisioner: the machine spec has no the root device name"},
+		{func(s *Spec) { s.SubnetID = "" }, "Report this defect in the provisioner: the machine spec has no the subnet id"},
+		{func(s *Spec) { s.SecurityGroupID = "" }, "Report this defect in the provisioner: the machine spec has no the security group id"},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{}
@@ -166,7 +166,7 @@ func TestCreateRefusesSpec(t *testing.T) {
 // TestCreateCountMismatch pins the error when RunInstances returns no instance.
 func TestCreateCountMismatch(t *testing.T) {
 	_, err := New(&fakeAPI{}).Create(context.Background(), testSpec())
-	const want = "Look up the machine by its client token dsp-0f3a9c2e-1b7d-4e55-8a10-6c2d9e4b7a01: RunInstances returned 0 instances, not 1"
+	const want = "If this repeats, check EC2's service health in this region: RunInstances for client token dsp-0f3a9c2e-1b7d-4e55-8a10-6c2d9e4b7a01 returned 0 instances, not 1"
 	if err == nil || err.Error() != want {
 		t.Errorf("error %v, want %q", err, want)
 	}
@@ -182,11 +182,11 @@ func TestCreateErrorKinds(t *testing.T) {
 	}{
 		{apiError("InstanceLimitExceeded"), KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
 		{apiError("VcpuLimitExceeded"), KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
-		{apiError("IdempotentParameterMismatch"), KindTokenMismatch, "Release the run, and send no second RunInstances for its dispatch: the client token was used before with different parameters: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
-		{apiError("IdempotentInstanceTerminated"), KindTokenTerminated, "Release the run: the machine started with this client token is terminated, and EC2 starts no second machine for it: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
-		{apiError("RequestLimitExceeded"), KindRetried, "Call RunInstances again after a pause: the call failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, KindRetried, "Call RunInstances again after a pause: the call failed with an error that the SDK retries: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
-		{apiError("InvalidAMIID.NotFound"), KindOther, "Fix the cause of EC2 error InvalidAMIID.NotFound: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{apiError("IdempotentParameterMismatch"), KindTokenMismatch, "Report this defect in the provisioner: it sent RunInstances for one dispatch twice with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
+		{apiError("IdempotentInstanceTerminated"), KindTokenTerminated, "No action needed: the machine started with this client token is terminated, and EC2 starts no second machine for the token: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
+		{apiError("RequestLimitExceeded"), KindRetried, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, KindRetried, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
+		{apiError("InvalidAMIID.NotFound"), KindOther, "Look up EC2 error code InvalidAMIID.NotFound in the EC2 API reference, and check the provisioner's settings and the instance role against it: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
 		{apiError("UnauthorizedOperation"), KindOther, "Give the instance role the provisioner's EC2 rights: RunInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
 		{context.Canceled, KindOther, "No action needed: RunInstances stopped when its context ended: context canceled"},
 		{errors.New("failed to refresh cached credentials"), KindOther, "Check the instance role and the network path to EC2: RunInstances failed: failed to refresh cached credentials"},
@@ -446,7 +446,7 @@ func TestConsole(t *testing.T) {
 
 	out = aws.String("not base64!")
 	_, err = c.Console(context.Background(), id)
-	const want = "Read the console output of i-0123456789abcdef0 again: GetConsoleOutput returned output that is not base64: illegal base64 data at input byte 3"
+	const want = "If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for i-0123456789abcdef0 that is not base64: illegal base64 data at input byte 3"
 	if err == nil || err.Error() != want {
 		t.Errorf("error %v, want %q", err, want)
 	}
@@ -498,8 +498,42 @@ func TestRootDevice(t *testing.T) {
 
 	n := len(f.images)
 	_, err = c.RootDevice(context.Background(), "")
-	const wantEmpty = "Set the image id for the root device lookup: it is empty"
+	const wantEmpty = "Report this defect in the provisioner: the root device lookup has no image id"
 	if err == nil || err.Error() != wantEmpty || len(f.images) != n {
 		t.Errorf("empty id: error %v, want %q with no call", err, wantEmpty)
 	}
+}
+
+// TestCreateErrorsHideUserData pins that no Create error contains the user data or
+// its base64, for each error class and for user data over the bound.
+func TestCreateErrorsHideUserData(t *testing.T) {
+	const marker = "run-code-marker-4f2a9e"
+	data := []byte(`{"version": 1, "run_code": "` + marker + `"}`)
+	encoded := base64.StdEncoding.EncodeToString(data)
+	check := func(err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("no error")
+		}
+		if strings.Contains(err.Error(), marker) || strings.Contains(err.Error(), encoded) {
+			t.Errorf("the error contains the user data: %v", err)
+		}
+	}
+	for _, code := range []string{"VcpuLimitExceeded", "IdempotentParameterMismatch", "IdempotentInstanceTerminated", "RequestLimitExceeded", "UnauthorizedOperation", "InvalidParameterValue"} {
+		f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, apiError(code) }}
+		spec := testSpec()
+		spec.UserData = data
+		_, err := New(f).Create(context.Background(), spec)
+		check(err)
+	}
+	spec := testSpec()
+	spec.UserData = []byte(marker + strings.Repeat("a", MaxUserData))
+	_, err := New(&fakeAPI{}).Create(context.Background(), spec)
+	check(err)
+
+	c, _ := newWireClient(t, reply{400, errorXML("InvalidParameterValue")})
+	spec = testSpec()
+	spec.UserData = data
+	_, err = c.Create(context.Background(), spec)
+	check(err)
 }

@@ -110,19 +110,57 @@ func isolateAWSEnv(t *testing.T, endpoint string) {
 	t.Setenv("AWS_EC2_METADATA_V1_DISABLED", "true")
 }
 
-// TestLoadConfigRegion pins the order: AWS_REGION when it is set, with no metadata
-// read, and the region from the instance metadata when it is not.
+// The instance role's test credentials. The key id and the secret are markers that
+// no error may contain.
+const (
+	roleKeyID  = "ASIAROLEMARKER0001"
+	roleSecret = "role-secret-marker-7d1c"
+	roleToken  = "role-token-marker-55aa"
+)
+
+// rolePaths are the metadata paths that give the SDK's role provider the role
+// test-role and its credentials.
+func rolePaths() map[string]string {
+	return map[string]string{
+		"/latest/meta-data/iam/security-credentials/":          "test-role",
+		"/latest/meta-data/iam/security-credentials/test-role": `{"Code": "Success", "AccessKeyId": "` + roleKeyID + `", "SecretAccessKey": "` + roleSecret + `", "Token": "` + roleToken + `", "Expiration": "2099-01-01T00:00:00Z"}`,
+	}
+}
+
+// documentReads returns how many times the identity document, which has the region,
+// was read.
+func (s *imdsServer) documentReads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, p := range s.gets {
+		if p == "/latest/dynamic/instance-identity/document" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestLoadConfigRegion pins the order: AWS_REGION when it is set, with no read of the
+// region from the metadata, and the region from the instance metadata when it is
+// not. Both take the credentials from the instance role.
 func TestLoadConfigRegion(t *testing.T) {
-	srv, s := newIMDS(t, map[string]string{"/latest/dynamic/instance-identity/document": `{"region": "test-region-2", "instanceId": "i-0123456789abcdef0"}`})
+	paths := rolePaths()
+	paths["/latest/dynamic/instance-identity/document"] = `{"region": "test-region-2", "instanceId": "i-0123456789abcdef0"}`
+	srv, s := newIMDS(t, paths)
 	isolateAWSEnv(t, srv.URL)
 
 	t.Setenv("AWS_REGION", "test-region-1")
 	cfg, err := LoadConfig(context.Background())
 	if err != nil || cfg.Region != "test-region-1" {
-		t.Errorf("with AWS_REGION: region %q, error %v", cfg.Region, err)
+		t.Fatalf("with AWS_REGION: region %q, error %v", cfg.Region, err)
 	}
-	if len(s.gets) != 0 {
-		t.Errorf("with AWS_REGION: metadata reads %v, want none", s.gets)
+	if n := s.documentReads(); n != 0 {
+		t.Errorf("with AWS_REGION: %d reads of the region from the metadata, want 0", n)
+	}
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	if err != nil || creds.Source != "EC2RoleProvider" || creds.AccessKeyID != roleKeyID {
+		t.Errorf("credentials from %q, error %v", creds.Source, err)
 	}
 
 	t.Setenv("AWS_REGION", "")
@@ -130,8 +168,57 @@ func TestLoadConfigRegion(t *testing.T) {
 	if err != nil || cfg.Region != "test-region-2" {
 		t.Errorf("without AWS_REGION: region %q, error %v", cfg.Region, err)
 	}
-	if len(s.gets) != 1 || s.gets[0] != "/latest/dynamic/instance-identity/document" {
-		t.Errorf("without AWS_REGION: metadata reads %v", s.gets)
+	if n := s.documentReads(); n != 1 {
+		t.Errorf("without AWS_REGION: %d reads of the region from the metadata, want 1", n)
+	}
+}
+
+// TestLoadConfigRefusesOtherCredentials pins that credentials from the environment
+// or a shared credentials file are refused, with an error that starts with the fix
+// and contains none of the keys, even when the instance role is there too.
+func TestLoadConfigRefusesOtherCredentials(t *testing.T) {
+	const keyID, secret = "AKIAENVMARKER00001", "env-secret-marker-93be"
+	const prefix = "Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the provisioner's container, so the AWS SDK uses the instance role: the credentials came from "
+	for name, set := range map[string]func(t *testing.T){
+		"environment": func(t *testing.T) {
+			t.Setenv("AWS_ACCESS_KEY_ID", keyID)
+			t.Setenv("AWS_SECRET_ACCESS_KEY", secret)
+		},
+		"credentials file": func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "credentials")
+			if err := os.WriteFile(file, []byte("[default]\naws_access_key_id = "+keyID+"\naws_secret_access_key = "+secret+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", file)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := newIMDS(t, rolePaths())
+			isolateAWSEnv(t, srv.URL)
+			t.Setenv("AWS_REGION", "test-region-1")
+			set(t)
+			_, err := LoadConfig(context.Background())
+			if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), ", not EC2RoleProvider") {
+				t.Fatalf("error %v, want the prefix %q", err, prefix)
+			}
+			for _, marker := range []string{keyID, secret, roleKeyID, roleSecret, roleToken} {
+				if strings.Contains(err.Error(), marker) {
+					t.Errorf("the error contains the marker %q", marker)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadConfigNoRole pins the error when the metadata has no instance role.
+func TestLoadConfigNoRole(t *testing.T) {
+	srv, _ := newIMDS(t, nil)
+	isolateAWSEnv(t, srv.URL)
+	t.Setenv("AWS_REGION", "test-region-1")
+	_, err := LoadConfig(context.Background())
+	const prefix = "Attach an instance role to the host, and run the provisioner with IMDSv2 reachable: retrieving the AWS credentials failed: "
+	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
 }
 

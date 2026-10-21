@@ -53,7 +53,7 @@ func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 		return Machine{}, wrap("RunInstances", err)
 	}
 	if len(out.Instances) != 1 {
-		return Machine{}, fmt.Errorf("Look up the machine by its client token %s: RunInstances returned %d instances, not 1", spec.DispatchID, len(out.Instances))
+		return Machine{}, fmt.Errorf("If this repeats, check EC2's service health in this region: RunInstances for client token %s returned %d instances, not 1", spec.DispatchID, len(out.Instances))
 	}
 	return fromInstance(out.Instances[0]), nil
 }
@@ -144,11 +144,11 @@ func validate(spec Spec, withToken bool) error {
 		{"the security group id", spec.SecurityGroupID},
 	} {
 		if f.value == "" {
-			return fmt.Errorf("Set %s in the machine spec: it is empty", f.name)
+			return fmt.Errorf("Report this defect in the provisioner: the machine spec has no %s", f.name)
 		}
 	}
 	if len(spec.UserData) > MaxUserData {
-		return fmt.Errorf("Shorten the user data to %d bytes or less: it has %d bytes", MaxUserData, len(spec.UserData))
+		return fmt.Errorf("Report this defect in the provisioner: the user data has %d bytes, and EC2 accepts at most %d", len(spec.UserData), MaxUserData)
 	}
 	return nil
 }
@@ -156,11 +156,11 @@ func validate(spec Spec, withToken bool) error {
 // validToken checks that id is a client token EC2 accepts.
 func validToken(id string) error {
 	if id == "" || len(id) > maxClientToken {
-		return fmt.Errorf("Use a dispatch id of 1 to %d characters as the client token: the id has %d bytes", maxClientToken, len(id))
+		return fmt.Errorf("Report this defect in the provisioner: the dispatch id has %d bytes, and a client token has 1 to %d characters", len(id), maxClientToken)
 	}
 	for i := 0; i < len(id); i++ {
 		if id[i] < 0x21 || id[i] > 0x7e {
-			return fmt.Errorf("Use a dispatch id of ASCII letters, digits and punctuation as the client token: byte %d of the id is 0x%02x", i, id[i])
+			return fmt.Errorf("Report this defect in the provisioner: byte %d of the dispatch id is 0x%02x, and a client token has only ASCII letters, digits and punctuation", i, id[i])
 		}
 	}
 	return nil

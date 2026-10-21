@@ -15,7 +15,7 @@ const codeImageNotFound = "InvalidAMIID.NotFound"
 // one DescribeImages call for that image id. Spec.RootDevice is set from it.
 func (c *Client) RootDevice(ctx context.Context, imageID string) (string, error) {
 	if imageID == "" {
-		return "", fmt.Errorf("Set the image id for the root device lookup: it is empty")
+		return "", fmt.Errorf("Report this defect in the provisioner: the root device lookup has no image id")
 	}
 	out, err := c.api.DescribeImages(ctx, &ec2.DescribeImagesInput{ImageIds: []string{imageID}})
 	if errorCode(err) == codeImageNotFound {
