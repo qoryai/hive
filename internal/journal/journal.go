@@ -259,7 +259,8 @@ func (j *Journal) write(entries []Entry) error {
 }
 
 // writeSynced writes s to the new file path, mode 0600, and syncs it. A file left at
-// path by an earlier write is removed first. On an error, no file is left at path.
+// path by an earlier write is removed first. On an error after the file is created,
+// the file is removed.
 func writeSynced(path, s string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

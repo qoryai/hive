@@ -16,8 +16,8 @@ const (
 	// restarted, and its run has no machine.
 	ReasonNoMachine = "the provisioner restarted, and the run has no machine"
 	// ReasonTerminated is a dispatch released with retry false: the provisioner
-	// restarted, and its run's machine was terminated.
-	ReasonTerminated = "the provisioner restarted, and the run's machine was terminated"
+	// restarted, and its run's machine was terminated or is being terminated.
+	ReasonTerminated = "the provisioner restarted, and the run's machine was terminated or is being terminated"
 )
 
 // Lookup is the result of the lookup of a dispatch's machine by its client token, the
