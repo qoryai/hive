@@ -308,3 +308,18 @@ func TestWireTerminate(t *testing.T) {
 		t.Errorf("describe\n%v\nwant\n%v", s.forms[1], want)
 	}
 }
+
+// TestWireRootDevice pins the DescribeImages request on the wire and the root device
+// name from its reply.
+func TestWireRootDevice(t *testing.T) {
+	c, s := newWireClient(t, reply{200, `<DescribeImagesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
+<imagesSet><item><imageId>ami-0123456789abcdef0</imageId><rootDeviceName>/dev/sda1</rootDeviceName><rootDeviceType>ebs</rootDeviceType></item></imagesSet></DescribeImagesResponse>`})
+	name, err := c.RootDevice(context.Background(), "ami-0123456789abcdef0")
+	if err != nil || name != "/dev/sda1" {
+		t.Errorf("name %q, error %v", name, err)
+	}
+	want := url.Values{"Action": {"DescribeImages"}, "Version": {"2016-11-15"}, "ImageId.1": {"ami-0123456789abcdef0"}}
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
+	}
+}

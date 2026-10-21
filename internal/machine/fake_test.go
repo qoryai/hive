@@ -16,11 +16,13 @@ type fakeAPI struct {
 	describes []*ec2.DescribeInstancesInput
 	consoles  []*ec2.GetConsoleOutputInput
 	kills     []*ec2.TerminateInstancesInput
+	images    []*ec2.DescribeImagesInput
 
 	run       func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error)
 	describe  func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error)
 	console   func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error)
 	terminate func(*ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error)
+	image     func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error)
 }
 
 var _ API = (*fakeAPI)(nil)
@@ -64,6 +66,16 @@ func (f *fakeAPI) TerminateInstances(_ context.Context, in *ec2.TerminateInstanc
 		return &ec2.TerminateInstancesOutput{}, nil
 	}
 	return f.terminate(in)
+}
+
+func (f *fakeAPI) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput, _ ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
+	f.mu.Lock()
+	f.images = append(f.images, in)
+	f.mu.Unlock()
+	if f.image == nil {
+		return &ec2.DescribeImagesOutput{}, nil
+	}
+	return f.image(in)
 }
 
 // apiError returns an EC2 error with code.

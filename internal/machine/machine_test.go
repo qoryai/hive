@@ -458,3 +458,48 @@ func TestConsole(t *testing.T) {
 		t.Errorf("error %v", err)
 	}
 }
+
+// TestRootDevice pins the DescribeImages input, the root device name, and the errors
+// for an empty id, a missing image and an image with no root device name.
+func TestRootDevice(t *testing.T) {
+	const id = "ami-0123456789abcdef0"
+	var reply *ec2.DescribeImagesOutput
+	var replyErr error
+	f := &fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) { return reply, replyErr }}
+	c := New(f)
+
+	reply = &ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id), RootDeviceName: aws.String("/dev/sda1")}}}
+	name, err := c.RootDevice(context.Background(), id)
+	if err != nil || name != "/dev/sda1" {
+		t.Errorf("name %q, error %v", name, err)
+	}
+	if want := (&ec2.DescribeImagesInput{ImageIds: []string{id}}); !reflect.DeepEqual(f.images[0], want) {
+		t.Errorf("input %+v, want %+v", f.images[0], want)
+	}
+
+	cases := []struct {
+		reply *ec2.DescribeImagesOutput
+		err   error
+		want  string
+	}{
+		{&ec2.DescribeImagesOutput{}, nil, "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
+		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String("ami-0fedcba9876543210"), RootDeviceName: aws.String("/dev/xvda")}}}, nil, "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
+		{nil, apiError("InvalidAMIID.NotFound"), "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id)}}}, nil, "Use an image with a root device: image ami-0123456789abcdef0 has no root device name"},
+		{nil, apiError("UnauthorizedOperation"), "Give the instance role the provisioner's EC2 rights: DescribeImages failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
+	}
+	for _, tc := range cases {
+		reply, replyErr = tc.reply, tc.err
+		_, err := c.RootDevice(context.Background(), id)
+		if err == nil || err.Error() != tc.want {
+			t.Errorf("error %v, want %q", err, tc.want)
+		}
+	}
+
+	n := len(f.images)
+	_, err = c.RootDevice(context.Background(), "")
+	const wantEmpty = "Set the image id for the root device lookup: it is empty"
+	if err == nil || err.Error() != wantEmpty || len(f.images) != n {
+		t.Errorf("empty id: error %v, want %q with no call", err, wantEmpty)
+	}
+}

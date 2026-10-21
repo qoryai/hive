@@ -29,8 +29,8 @@ type Spec struct {
 	InstanceType string
 	// ImageID is the machine image, such as ami-0123456789abcdef0.
 	ImageID string
-	// RootDevice is the image's root device name, such as /dev/sda1. Create marks
-	// the volume on that device encrypted.
+	// RootDevice is the image's root device name, such as /dev/sda1, as
+	// Client.RootDevice returns it. Create marks the volume on that device encrypted.
 	RootDevice string
 	// SubnetID and SecurityGroupID place the machine in the run subnet.
 	SubnetID, SecurityGroupID string
