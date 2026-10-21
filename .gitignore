@@ -1,0 +1,5 @@
+.DS_Store
+/dist/
+/qory-provisioner
+go.work
+go.work.sum
