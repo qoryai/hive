@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -224,6 +225,7 @@ func TestParseRefusesASecretOrACode(t *testing.T) {
 	const (
 		secret  = "Remove the access key secret (qak_) from the settings file: the provisioner stores its access key in the state folder."
 		runKey  = "Remove the run key (qrk_) from the settings file: a run key belongs in no file."
+		runCode = "Remove the run code (qecr_) from the settings file: a run code belongs in no file."
 		code    = "Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE."
 		marker  = "MARKER0123456789ABCDEFGHJK"
 		escaped = `q`
@@ -234,6 +236,11 @@ func TestParseRefusesASecretOrACode(t *testing.T) {
 		{escaped + "ak_" + marker, secret},
 		{"qrk_" + marker, runKey},
 		{"qrk_" + marker + " qak_", secret},
+		{"qecr_" + marker + ".0123456789abcdefghijkl", runCode},
+		{"QECR_" + marker, runCode},
+		{escaped + "ecr_" + marker, runCode},
+		{"qecr_" + marker + " qrk_", runKey},
+		{"qecp_" + marker + " qecr_", runCode},
 		{"qecp_" + marker, code},
 		{"QECN_" + marker, code},
 		{"qecg_" + marker, code},
@@ -287,6 +294,18 @@ func TestReadReadsTheFile(t *testing.T) {
 		t.Errorf("%+v %v", s, err)
 	}
 	if _, err := Read(filepath.Join(t.TempDir(), "none.json")); err == nil || !strings.HasPrefix(err.Error(), "Create the settings file: open ") {
+		t.Errorf("%v", err)
+	}
+	unreadable := filepath.Join(t.TempDir(), "unreadable.json")
+	if err := os.WriteFile(unreadable, b, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(unreadable); err == nil || !strings.HasPrefix(err.Error(), "Make the settings file readable by uid "+strconv.Itoa(os.Geteuid())+": open ") {
+		t.Errorf("%v", err)
+	}
+	// A folder opens, and reading it fails, on Linux and on macOS.
+	folder := t.TempDir()
+	if _, err := Read(folder); err == nil || !strings.HasPrefix(err.Error(), "Fix the settings file, then start the provisioner again: reading it failed: read "+folder+": ") {
 		t.Errorf("%v", err)
 	}
 	large := filepath.Join(t.TempDir(), "large.json")

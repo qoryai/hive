@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -101,12 +102,12 @@ var (
 func Read(path string) (Settings, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return Settings{}, fmt.Errorf("Create the settings file: %w", err)
+		return Settings{}, fileError(err, "opening")
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, maxFile+1))
 	if err != nil {
-		return Settings{}, fmt.Errorf("Make the settings file readable: %w", err)
+		return Settings{}, fileError(err, "reading")
 	}
 	if len(b) > maxFile {
 		return Settings{}, fmt.Errorf("Shorten the settings file %s to at most 64 KiB.", path)
@@ -114,9 +115,22 @@ func Read(path string) (Settings, error) {
 	return Parse(b)
 }
 
+// fileError is the error of opening or reading the settings file, op, that failed with
+// err: a missing file is to be created, a permission error is to be fixed for the uid the
+// provisioner runs as, and any other error is given with its operation.
+func fileError(err error, op string) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("Create the settings file: %w", err)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("Make the settings file readable by uid %d: %w", os.Geteuid(), err)
+	}
+	return fmt.Errorf("Fix the settings file, then start the provisioner again: %s it failed: %w", op, err)
+}
+
 // Parse reads the settings document b: one JSON object, each member once, every member
 // known, each value of its type and within its bounds. Settings that contain what looks
-// like an access key secret, a run key or an enrolment code, in a value or a member's
+// like an access key secret, a run key, a run code or an enrolment code, in a value or a member's
 // name, are refused before anything else. An error starts with the fix, and never
 // quotes a value; it quotes a member's name only after the check for a secret.
 func Parse(b []byte) (Settings, error) {
@@ -196,24 +210,29 @@ var codePrefixes = []string{accesskey.CodePrefixNode, accesskey.CodePrefixPool, 
 // runKeyPrefix starts a run key.
 const runKeyPrefix = "qrk_"
 
+// runCodePrefix starts a run code, which a machine redeems for its run key.
+const runCodePrefix = "qecr_"
+
 var (
-	errSecret = errors.New("Remove the access key secret (qak_) from the settings file: the provisioner stores its access key in the state folder.")
-	errRunKey = errors.New("Remove the run key (qrk_) from the settings file: a run key belongs in no file.")
-	errCode   = errors.New("Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE.")
+	errSecret  = errors.New("Remove the access key secret (qak_) from the settings file: the provisioner stores its access key in the state folder.")
+	errRunKey  = errors.New("Remove the run key (qrk_) from the settings file: a run key belongs in no file.")
+	errRunCode = errors.New("Remove the run code (qecr_) from the settings file: a run code belongs in no file.")
+	errCode    = errors.New("Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE.")
 )
 
 // secretIn is the error of settings b that contain what looks like an access key
-// secret, a run key or an enrolment code, in any case, in their bytes or in a member's
+// secret, a run key, a run code or an enrolment code, in any case, in their bytes or in a member's
 // name or a string value as JSON decodes it, or nil. The decoded strings are checked
 // too, since a JSON escape such as \u0071 hides a prefix from the bytes. The token
 // reader takes duplicate members and invalid UTF-8, so the check reads every string
 // up to the first syntax error, before the strict decoder refuses the document.
 func secretIn(b []byte) error {
-	var secret, runKey, code bool
+	var secret, runKey, runCode, code bool
 	check := func(v string) {
 		lower := strings.ToLower(v)
 		secret = secret || strings.Contains(lower, accesskey.SecretPrefix)
 		runKey = runKey || strings.Contains(lower, runKeyPrefix)
+		runCode = runCode || strings.Contains(lower, runCodePrefix)
 		code = code || HasCode(v)
 	}
 	check(string(b))
@@ -232,6 +251,8 @@ func secretIn(b []byte) error {
 		return errSecret
 	case runKey:
 		return errRunKey
+	case runCode:
+		return errRunCode
 	case code:
 		return errCode
 	}
@@ -331,9 +352,9 @@ var errOrigin = errors.New("not an https origin, or for a test an http origin on
 // 127.0.0.1 or [::1], with nothing after. A host is taken in ASCII alone, an
 // international name in its xn-- form. It returns the origin with its scheme and the
 // ASCII letters of its host in lower case, an IPv6 zone kept as it is. An origin that
-// contains what looks like a secret or an enrolment code is refused.
+// contains what looks like a secret, a run code or an enrolment code is refused.
 func CheckOrigin(server string) (string, error) {
-	if accesskey.ContainsSecret(server) || HasCode(server) {
+	if accesskey.ContainsSecret(server) || HasCode(server) || strings.Contains(strings.ToLower(server), runCodePrefix) {
 		return "", errOrigin
 	}
 	u, err := url.Parse(server)
