@@ -1,7 +1,8 @@
 // Package state is the provisioner's state folder: the access key's secret, the record
 // of the enrolment that made the key, and the instance id. The folder and each file in
 // it belong to the user the provisioner runs as and grant group and others no
-// permission. Each file is written to a new file, synced and renamed.
+// permission. Each file is written to a new file, synced and renamed; a new file that a
+// crash left before its rename is removed by [RemoveTemporary].
 package state
 
 import (
@@ -130,7 +131,40 @@ func HasKey(dir string) (bool, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
 	}
-	return false, fmt.Errorf("Make the state folder %s readable: %w", dir, err)
+	return false, opError(dir, "Make the state folder "+dir+" readable", "checking for "+KeyFile, err)
+}
+
+// tempShape is the name of a new file writeFile makes: a dot, the name of a state
+// file, a dot and 16 hexadecimal digits.
+var tempShape = regexp.MustCompile(`^\.(` + regexp.QuoteMeta(KeyFile) + `|` + regexp.QuoteMeta(EnrolmentFile) + `|` + regexp.QuoteMeta(InstanceFile) + `)\.[0-9a-f]{16}$`)
+
+// RemoveTemporary removes from the state folder dir, which [CheckDir] took, each new
+// file that writeFile made and a crash left before its rename, so the secret in a new
+// key file does not stay in the folder. A folder of such a name is left as it is.
+func RemoveTemporary(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return opError(dir, "Make the state folder "+dir+" readable", "listing the state folder", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !tempShape.MatchString(e.Name()) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return opError(dir, "Make the state folder "+dir+" writable", "removing "+e.Name(), err)
+		}
+	}
+	return nil
+}
+
+// opError is the error of the operation op in the state folder dir that failed with
+// err. A permission error says perm, such as "Make the state folder /x writable", for
+// the uid the provisioner runs as; any other error says op and err.
+func opError(dir, perm, op string, err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("%s by uid %d: %w", perm, os.Geteuid(), err)
+	}
+	return fmt.Errorf("Fix the state folder %s, then start the provisioner again: %s failed: %w", dir, op, err)
 }
 
 // Save writes the enrolment e and its key to the state folder dir, which [CheckDir]
@@ -251,12 +285,12 @@ func readFile(dir, name string, max int, holds string) ([]byte, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, err
 	case err != nil:
-		return nil, fmt.Errorf("Make %s readable: %w", path, err)
+		return nil, opError(dir, "Make "+path+" readable", "opening "+name, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("Make %s readable: %w", path, err)
+		return nil, opError(dir, "Make "+path+" readable", "reading the mode of "+name, err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("Remove %s from the state folder: it is not a regular file.", path)
@@ -266,7 +300,7 @@ func readFile(dir, name string, max int, holds string) ([]byte, error) {
 	}
 	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
 	if err != nil {
-		return nil, fmt.Errorf("Make %s readable: %w", path, err)
+		return nil, opError(dir, "Make "+path+" readable", "reading "+name, err)
 	}
 	if len(b) > max {
 		return nil, damaged(dir, name+" is larger than "+holds+".")
@@ -276,32 +310,37 @@ func readFile(dir, name string, max int, holds string) ([]byte, error) {
 
 // writeFile writes b to the file name in the state folder dir: to a new file of a
 // random name, 0600, which is synced and closed, then renamed over name, and the folder
-// is synced. A write that does not finish removes the new file and leaves name as it
-// was. A filesystem that cannot sync a file, see [syncUnsupported], keeps the file
-// unsynced. No error contains b.
+// is synced. A write that fails before the rename leaves name as it was and removes the
+// new file, unless that removal fails too; a new file left by a failed removal or a
+// crash is removed by [RemoveTemporary] at the next start. A filesystem that cannot
+// sync a file, see [syncUnsupported], keeps the file unsynced. No error contains b.
 func writeFile(dir, name string, b []byte) error {
 	random := make([]byte, 8)
 	rand.Read(random)
 	tmp := filepath.Join(dir, "."+name+"."+hex.EncodeToString(random))
+	writable := "Make the state folder " + dir + " writable"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return fmt.Errorf("Make the state folder %s writable: %w", dir, err)
+		return opError(dir, writable, "creating a new "+name, err)
 	}
+	op := "writing a new " + name
 	_, err = f.Write(b)
 	if err == nil {
+		op = "syncing a new " + name
 		if err = f.Sync(); syncUnsupported(err) {
 			err = nil
 		}
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if cerr := f.Close(); err == nil && cerr != nil {
+		op, err = "closing a new "+name, cerr
 	}
 	if err == nil {
+		op = "renaming a new file to " + name
 		err = os.Rename(tmp, filepath.Join(dir, name))
 	}
 	if err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("Make the state folder %s writable: %w", dir, err)
+		return opError(dir, writable, op, err)
 	}
 	// The folder's entry for the file is synced where the system can sync a folder;
 	// where it cannot, the file itself is on disk all the same.

@@ -46,7 +46,8 @@ type Config struct {
 	Client *http.Client
 }
 
-// Start checks the state folder and returns its state. When the folder has no access
+// Start checks the state folder, removes the new files a crash left in it, see
+// [state.RemoveTemporary], and returns its state. When the folder has no access
 // key, Start enrols one first: it reads a node pool's code from QORY_ENROLMENT_CODE,
 // refuses a code of another kind before any request, makes the key pair, posts the
 // enrolment, checks the signed 201, and writes the state. When the folder has a key and
@@ -63,6 +64,9 @@ func Start(ctx context.Context, c Config) (state.State, error) {
 		c.Hostname = os.Hostname
 	}
 	if err := state.CheckDir(c.Dir); err != nil {
+		return state.State{}, err
+	}
+	if err := state.RemoveTemporary(c.Dir); err != nil {
 		return state.State{}, err
 	}
 	has, err := state.HasKey(c.Dir)
@@ -96,7 +100,7 @@ func Start(ctx context.Context, c Config) (state.State, error) {
 	}
 	e := state.Enrolment{ApiaryURL: c.ApiaryURL, AccessKeyID: ans.AccessKeyID, PoolID: ans.NodeID, Pin: ans.Pin}
 	if err := state.Save(c.Dir, e, key); err != nil {
-		return state.State{}, fmt.Errorf("Make a new enrolment code, set %s to it, and start the provisioner again after you fix the state folder, and have %s revoke the key %s: the key is enrolled, and the state was not written: %w", Variable, admin, ans.AccessKeyID, err)
+		return state.State{}, fmt.Errorf("Make a new enrolment code, set %s to it, and start the provisioner again after you fix the state folder, and have %s revoke the key %s: the key is enrolled, and the state folder has no key file for it: %w", Variable, admin, ans.AccessKeyID, err)
 	}
 	c.Log.Info("enrolled the access key", slog.String("access_key_id", ans.AccessKeyID), slog.String("pool_id", ans.NodeID), slog.String("fingerprint", key.Fingerprint()), slog.String("apiary_url", c.ApiaryURL))
 	return state.Load(c.Dir, c.ApiaryURL)
@@ -188,7 +192,7 @@ func failed(err error, server, fingerprint string) error {
 	}
 	switch ref.Code {
 	case accesskey.CodeUnauthorized:
-		return fmt.Errorf("Make a new enrolment code on the node pool's Access key tab, set %s to it, and start the provisioner again: the server at %s returned HTTP 401. Qory Apiary returns 401 for a code that was used, has expired, was cancelled or is from another Qory Apiary, and when this host's clock is more than 5 minutes off. A server in front of Qory Apiary can also return 401.", Variable, server)
+		return fmt.Errorf("Make a new enrolment code on the node pool's Access key tab, set %s to it, and start the provisioner again: the server at %s returned HTTP 401: Qory Apiary did not accept this code, or a server in front of Qory Apiary returned the 401.", Variable, server)
 	case accesskey.CodeKeyInvalid:
 		return errors.New("Start the provisioner again within the code's 15 minutes, and it makes a new key: Qory Apiary returned key_invalid for the key, and the code is not used.")
 	case accesskey.CodeKeyLimit:

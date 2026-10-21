@@ -1,9 +1,11 @@
 package state
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -355,10 +357,66 @@ func TestWriteFileReplacesByRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o700) })
-	if err := writeFile(dir, InstanceFile, []byte("three\n")); err == nil || !strings.HasPrefix(err.Error(), "Make the state folder "+dir+" writable: ") {
+	if err := writeFile(dir, InstanceFile, []byte("three\n")); err == nil || !strings.HasPrefix(err.Error(), "Make the state folder "+dir+" writable by uid "+strconv.Itoa(os.Geteuid())+": open ") {
 		t.Errorf("%v", err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != "two\n" {
 		t.Errorf("%q", b)
+	}
+}
+
+// TestWriteFileSaysTheOperationThatFailed pins that a failure other than a permission
+// error says the operation and its error, and leaves no new file.
+func TestWriteFileSaysTheOperationThatFailed(t *testing.T) {
+	dir := stateDir(t)
+	if err := CheckDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	// A folder at the file's path makes the rename over it fail.
+	if err := os.Mkdir(filepath.Join(dir, EnrolmentFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := writeFile(dir, EnrolmentFile, []byte("{}"))
+	if err == nil || !strings.HasPrefix(err.Error(), "Fix the state folder "+dir+", then start the provisioner again: renaming a new file to enrolment.json failed: rename ") {
+		t.Errorf("%v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("%d entries", len(entries))
+	}
+}
+
+// TestRemoveTemporaryRemovesTheNewFilesACrashLeft pins that the new files of the state
+// files' names are removed, and every other entry is left as it is.
+func TestRemoveTemporaryRemovesTheNewFilesACrashLeft(t *testing.T) {
+	dir, e, k := saved(t)
+	left := []string{".access-key-secret.0123456789abcdef", ".enrolment.json.fedcba9876543210", ".instance-id.00112233445566aa"}
+	kept := []string{".access-key-secret.0123", ".other.0123456789abcdef", ".access-key-secret.0123456789abcdeg", ".access-key-secret.0123456789abcdef0", "notes", KeyFile, EnrolmentFile}
+	for _, name := range append(left, kept...) {
+		if name == KeyFile || name == EnrolmentFile {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(k.Secret()+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	folder := filepath.Join(dir, ".instance-id.ffffffffffffffff")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveTemporary(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range left {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s was left: %v", name, err)
+		}
+	}
+	for _, name := range append(kept, filepath.Base(folder)) {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was removed: %v", name, err)
+		}
+	}
+	if _, err := Load(dir, e.ApiaryURL); err != nil {
+		t.Errorf("%v", err)
 	}
 }

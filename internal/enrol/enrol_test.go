@@ -287,7 +287,7 @@ func TestStartKeepsNoKeyItCannotTrust(t *testing.T) {
 		rp   reply
 		want string
 	}{
-		{reply{status: http.StatusUnauthorized}, "Make a new enrolment code on the node pool's Access key tab, set QORY_ENROLMENT_CODE to it, and start the provisioner again: the server at "},
+		{reply{status: http.StatusUnauthorized}, "Make a new enrolment code on the node pool's Access key tab, set QORY_ENROLMENT_CODE to it, and start the provisioner again: the server at http://127.0.0.1:"},
 		{reply{status: http.StatusConflict, refusal: accesskey.CodeKeyInvalid}, "Start the provisioner again within the code's 15 minutes, and it makes a new key: Qory Apiary returned key_invalid for the key, and the code is not used."},
 		{reply{status: http.StatusConflict, refusal: accesskey.CodeKeyLimit}, "Have a workspace admin of Qory Apiary revoke one of the node pool's two access keys, then start the provisioner again within the code's 15 minutes: the node pool has two keys already."},
 		{reply{status: http.StatusTooManyRequests, refusal: accesskey.CodeRateLimited}, "Start the provisioner again later, within the code's 15 minutes: Qory Apiary returned rate_limited, because this code was tried too often."},
@@ -321,7 +321,7 @@ func TestStartSaysAStateItCouldNotWrite(t *testing.T) {
 	}
 	code := poolCode(f)
 	r := start(t, f, dir, code)
-	want := "Make a new enrolment code, set QORY_ENROLMENT_CODE to it, and start the provisioner again after you fix the state folder, and have a workspace admin of Qory Apiary revoke the key ak_0123456789abcdef: the key is enrolled, and the state was not written: Make the state folder " + dir + " writable: "
+	want := "Make a new enrolment code, set QORY_ENROLMENT_CODE to it, and start the provisioner again after you fix the state folder, and have a workspace admin of Qory Apiary revoke the key ak_0123456789abcdef: the key is enrolled, and the state folder has no key file for it: Fix the state folder " + dir + ", then start the provisioner again: renaming a new file to enrolment.json failed: rename "
 	if r.err == nil || !strings.HasPrefix(r.err.Error(), want) || f.requests.Load() != 1 {
 		t.Errorf("%v", r.err)
 	}
@@ -363,4 +363,30 @@ func TestStartSaysAQoryApiaryItCannotReach(t *testing.T) {
 	}
 	noKey(t, dir)
 	noLeak(t, r, dir, code)
+}
+
+// TestStartRemovesANewKeyFileACrashLeft pins that a new key file that a crash left
+// before its rename is removed at the next start, before the code is read.
+func TestStartRemovesANewKeyFileACrashLeft(t *testing.T) {
+	f := newFakeApiary(t, poolEnrolled)
+	dir := stateDir(t)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	left, err := accesskey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, ".access-key-secret.0123456789abcdef")
+	if err := os.WriteFile(tmp, []byte(left.Secret()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := start(t, f, dir, "")
+	if r.err == nil || !strings.HasPrefix(r.err.Error(), "Set QORY_ENROLMENT_CODE ") {
+		t.Errorf("%v", r.err)
+	}
+	if _, err := os.Lstat(tmp); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the new key file was left: %v", err)
+	}
+	noKey(t, dir)
 }
