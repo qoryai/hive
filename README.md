@@ -38,6 +38,6 @@ The image runs `qory-provisioner serve` as uid 65532 and gid 65532, with the vol
 
 `.github/workflows/prerelease.yml` builds the image for linux/amd64 and linux/arm64
 when you push to the branch `prerelease`, or when you run the workflow from the
-**Actions** tab. It publishes the image to `ghcr.io/qoryai/hive` by digest, tags it
-`sha-` and the commit's first 7 characters, and writes the digest in the run's
-summary.
+**Actions** tab once the workflow file is on the default branch. It publishes the
+image to `ghcr.io/qoryai/hive` by digest, tags it `sha-` and the commit's first 7
+characters, and writes the digest in the run's summary.

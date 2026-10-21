@@ -73,9 +73,9 @@ jobs:
           driver-opts: image=ghcr.io/qoryai/ci-images:buildkit-buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       # Both platforms in one image index, pushed by digest alone: no tag names the image
-      # until both are built. The program reports sha-<7> as its version. The labels give
-      # the image's revision and source, and no version, as no release names the image;
-      # the build uses the GitHub Actions cache in the scope provisioner-image.
+      # until both are built. The build sets the program's version to sha-<7>. The labels
+      # give the image's revision and source, and no version, as no release names the
+      # image; the build uses the GitHub Actions cache in the scope provisioner-image.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7

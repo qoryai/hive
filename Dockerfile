@@ -32,8 +32,8 @@ COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
 
-# The version the program reports: sha-<the commit's first 7 characters> for a
-# pre-release image, and dev when none is given.
+# The build sets the program's version to this value: sha-<the commit's first 7
+# characters> for a pre-release image, and dev when none is given.
 ARG VERSION=dev
 # The platform of the image, which docker buildx sets from --platform, or to the platform
 # of the machine that builds when no --platform is given.
