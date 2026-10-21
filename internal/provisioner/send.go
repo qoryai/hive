@@ -18,49 +18,34 @@ import (
 	"time"
 
 	"github.com/qoryai/forager/accesskey"
-	foragercontracts "github.com/qoryai/forager/contracts"
 	"github.com/qoryai/integrations/contracts"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // request is one request of the client: what it is, as an error states it, the
-// refusals that apply, its URL, the contract revision it implements, the schema its
-// body must pass before it is sent, and of which contract, the bound of its answer's
-// 200, its timeout, and its body with the time set. A request with get set is a GET
-// with no body and no schema, its time the X-Qory-Timestamp it is signed with; any
-// other is a POST.
+// refusals that apply, its path under the config's URL, the schema its body must pass
+// before it is sent, the bound of its answer's 200, its timeout, and its body with the
+// time set. Every request is a POST.
 type request struct {
-	what     string
-	kind     kind
-	url      string
-	revision int
-	schema   string
-	forager  bool
-	get      bool
-	limit    int64
-	timeout  time.Duration
-	body     func(time string) any
-}
-
-func (r request) method() string {
-	if r.get {
-		return http.MethodGet
-	}
-	return http.MethodPost
+	what    string
+	kind    kind
+	path    string
+	schema  string
+	limit   int64
+	timeout time.Duration
+	body    func(time string) any
 }
 
 // answer is the answer to one try: its status, its body, whether its signature
-// verified under the pin, its Retry-After, the X-Qory-Configuration of an answer that
-// verified, and whether it was over its bound, limit bytes, in which case the client
-// read neither its body nor its signature.
+// verified under the pin, its Retry-After, and whether it was over its bound, limit
+// bytes, in which case the client read neither its body nor its signature.
 type answer struct {
-	status        int
-	body          []byte
-	signed        bool
-	retryAfter    string
-	configuration string
-	tooLarge      bool
-	limit         int64
+	status     int
+	body       []byte
+	signed     bool
+	retryAfter string
+	tooLarge   bool
+	limit      int64
 	// resent is whether the try followed one whose answer was lost, see
 	// [Refusal.Resent].
 	resent bool
@@ -79,14 +64,11 @@ const retryLine = "a try failed, so the client sends the request again after the
 // error is the error, and the client logs and sends nothing more. The body of every
 // answer that do does not return is cleared.
 func (c *Client) do(ctx context.Context, req request) (*answer, error) {
-	var b []byte
-	if !req.get {
-		var err error
-		if b, err = json.Marshal(req.body("")); err != nil {
-			return nil, fmt.Errorf("%s: the client could not build the request", req.what)
-		}
+	b, err := json.Marshal(req.body(""))
+	if err != nil {
+		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
 	}
-	id := req.method() + " " + req.url + "\n" + string(b)
+	id := http.MethodPost + " " + c.cfg.URL + req.path + "\n" + string(b)
 	if accesskey.ContainsSecret(id) {
 		return nil, fmt.Errorf("%s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
 	}
@@ -100,7 +82,7 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 		if err != nil {
 			return nil, err
 		}
-		ans, err := c.send(ctx, req, body, t)
+		ans, err := c.send(ctx, req, body)
 		if ans != nil {
 			ans.resent = try > 1
 		}
@@ -144,12 +126,9 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 }
 
 // build is req's body with the time t, checked for what looks like a secret and
-// against its schema before it is sent; a GET has none. Its error contains the request
-// and the schema, never a value.
+// against its schema before it is sent. Its error contains the request and the
+// schema, never a value.
 func (c *Client) build(req request, t time.Time) ([]byte, error) {
-	if req.get {
-		return nil, nil
-	}
 	b, err := json.Marshal(req.body(contracts.FormatTime(t)))
 	if err != nil {
 		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
@@ -157,11 +136,7 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	if accesskey.ContainsSecret(string(b)) {
 		return nil, fmt.Errorf("%s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
 	}
-	compile := provisionerSchema
-	if req.forager {
-		compile = foragerSchema
-	}
-	s, err := compile(req.schema)
+	s, err := schema(req.schema)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", req.what, err)
 	}
@@ -172,38 +147,28 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	return b, nil
 }
 
-// send signs one try and sends it, a POST of body or a GET whose X-Qory-Timestamp,
-// signed with it, is t, then reads the answer: a 200's body up to req.limit, any other
+// send signs one try, a POST of body, and sends it, then reads the answer: a 200's body up to req.limit, any other
 // up to [MaxAnswer]. A larger answer, whatever its status, is marked too large, and its
 // body and its signature are not read. A 401 is never signed; the signature of any
 // other answer is checked under the pin, bound to this try's signature, with each
 // signed header sent at most once. An error is no answer, [ErrUnreachable]; it contains
 // the request and never a header, a body or a secret.
-func (c *Client) send(ctx context.Context, req request, body []byte, t time.Time) (*answer, error) {
-	var content io.Reader
-	if !req.get {
-		content = bytes.NewReader(body)
-	}
-	hr, err := http.NewRequestWithContext(ctx, req.method(), req.url, content)
+func (c *Client) send(ctx context.Context, req request, body []byte) (*answer, error) {
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.URL+req.path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
 	}
-	signed := accesskey.Request{AccessKeyID: c.cfg.KeyID, InstanceID: c.cfg.InstanceID, Method: req.method(), Target: hr.URL.RequestURI()}
-	if req.get {
-		signed.Timestamp = accesskey.Timestamp(t)
-		hr.Header.Set(accesskey.HeaderTimestamp, signed.Timestamp)
-	} else {
-		signed.Body = body
-		hr.Header.Set("Content-Type", "application/json")
-	}
-	sig, err := c.cfg.Key.SignRequest(signed)
+	sig, err := c.cfg.Key.SignRequest(accesskey.Request{
+		AccessKeyID: c.cfg.KeyID, InstanceID: c.cfg.InstanceID, Method: http.MethodPost, Target: hr.URL.RequestURI(), Body: body,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: the client could not sign the request", req.what)
 	}
+	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("User-Agent", UserAgent)
 	hr.Header.Set(accesskey.HeaderAccessKeyID, c.cfg.KeyID)
 	hr.Header.Set(accesskey.HeaderInstanceID, c.cfg.InstanceID)
-	hr.Header.Set(headerContractVersion, strconv.Itoa(req.revision))
+	hr.Header.Set(headerContractVersion, strconv.Itoa(Revision))
 	hr.Header.Set(accesskey.HeaderSignature, sig)
 	hc := http.Client{}
 	if c.HTTP != nil {
@@ -242,9 +207,6 @@ func (c *Client) send(ctx context.Context, req request, body []byte, t time.Time
 	ans.signed = ok1 && ok2 && ok3 && c.cfg.Pin.VerifyAnswer(accesskey.Answer{
 		Status: resp.StatusCode, RequestSignature: sig, Body: b, Configuration: conf, RunConfiguration: run,
 	}, signature)
-	if ans.signed {
-		ans.configuration = conf
-	}
 	return ans, nil
 }
 
@@ -287,14 +249,13 @@ func readLimited(r io.Reader, length, limit int64) (b []byte, tooLarge bool, err
 var errNotOneDocument = errors.New("it is not one JSON document with valid UTF-8 and no member twice")
 
 // readAnswer reads body, a signed answer's, into out: one JSON document with valid
-// UTF-8 and no member twice in any object, which passes the schema name that compile
-// compiles. With out nil it checks body alone. Its error contains the schema, never a
-// value of body.
-func readAnswer(compile func(string) (*jsonschema.Schema, error), name string, body []byte, out any) error {
+// UTF-8 and no member twice in any object, which passes the schema name of
+// provisioner/v1. Its error contains the schema, never a value of body.
+func readAnswer(name string, body []byte, out any) error {
 	if !jsontext.Value(body).IsValid() {
 		return errNotOneDocument
 	}
-	s, err := compile(name)
+	s, err := schema(name)
 	if err != nil {
 		return err
 	}
@@ -302,39 +263,26 @@ func readAnswer(compile func(string) (*jsonschema.Schema, error), name string, b
 	if err != nil || s.Validate(doc) != nil {
 		return fmt.Errorf("it fails %s", name)
 	}
-	if out == nil {
-		return nil
-	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("it fails %s", name)
 	}
 	return nil
 }
 
-// schemaCache keeps each compiled schema by its contract and name.
-var schemaCache sync.Map
+// schemas keeps each compiled schema of provisioner/v1 by its name.
+var schemas sync.Map
 
-// cached compiles the schema name with compile once, and keeps it under key.
-func cached(key, name string, compile func(string) (*jsonschema.Schema, error)) (*jsonschema.Schema, error) {
-	if s, ok := schemaCache.Load(key); ok {
+// schema is the schema name of provisioner/v1, compiled once.
+func schema(name string) (*jsonschema.Schema, error) {
+	if s, ok := schemas.Load(name); ok {
 		return s.(*jsonschema.Schema), nil
 	}
-	s, err := compile(name)
+	s, err := contracts.CompileProvisioner(name)
 	if err != nil {
 		return nil, fmt.Errorf("the contract's schema %s does not compile", name)
 	}
-	schemaCache.Store(key, s)
+	schemas.Store(name, s)
 	return s, nil
-}
-
-// provisionerSchema is a schema of provisioner/v1, compiled once.
-func provisionerSchema(name string) (*jsonschema.Schema, error) {
-	return cached("provisioner/"+name, name, contracts.CompileProvisioner)
-}
-
-// foragerSchema is a schema of Forager's contract, compiled once.
-func foragerSchema(name string) (*jsonschema.Schema, error) {
-	return cached("forager/"+name, name, foragercontracts.Compile)
 }
 
 // shown is s, or [hidden] when s contains what looks like a secret, for a value logged.

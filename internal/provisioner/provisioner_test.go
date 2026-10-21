@@ -183,8 +183,7 @@ func TestNewChecksTheConfig(t *testing.T) {
 }
 
 // TestARunGoesThroughEveryRequest claims an explore run, posts dispatched, takes its
-// handover, fetches the configuration document, posts the outcome and releases a
-// second run, each request signed with the pool's key, with the headers the contract
+// handover, releases it, and releases a second run before its handover, each request signed with the pool's key, with the headers the contract
 // lists, a body that passes its schema and the clock's time, and each answer's
 // signature verified under the pin.
 func TestARunGoesThroughEveryRequest(t *testing.T) {
@@ -211,18 +210,11 @@ func TestARunGoesThroughEveryRequest(t *testing.T) {
 	if written(t, h.RunKey) != d.Run.RunKey || written(t, h.WorkItem.Title) != d.Run.WorkItem.Title {
 		t.Error("the run key or the title is not the one handed over")
 	}
-	conf, err := c.Configuration(ctx)
-	if err != nil {
+	if err := c.Release(ctx, cl.DispatchID, "The machine stopped.", false); err != nil {
 		t.Fatal(err)
 	}
-	if conf.NodeID != provisionertest.PoolID || conf.RunURL != srv.URL+provisionertest.RunPath || !slices.Equal(conf.Workspaces, []string{provisionertest.WorkspaceID}) {
-		t.Errorf("the configuration %+v", conf)
-	}
-	if err := c.PostOutcome(ctx, conf.RunURL, cl.RunID, provisioner.Outcome{State: provisioner.StateFailed, Reason: "time_limit"}); err != nil {
-		t.Fatal(err)
-	}
-	if o := srv.Outcomes()[cl.RunID]; o.State != "failed" || o.Reason != "time_limit" || o.Time != contracts.FormatTime(clk.read()) {
-		t.Errorf("the outcome %+v", o)
+	if d, _ := srv.Dispatch(cl.DispatchID); d.State != provisionertest.StateEnded || d.Release == nil || d.Release.Retry {
+		t.Errorf("after the release: %+v", d)
 	}
 
 	other := claimed(t, srv, c, provisionertest.Run{})
@@ -235,26 +227,18 @@ func TestARunGoesThroughEveryRequest(t *testing.T) {
 
 	for _, call := range srv.Calls() {
 		h := call.Header
-		revision := "3"
-		if call.Route == provisionertest.RouteConfiguration || call.Route == provisionertest.RouteOutcome {
-			revision = "1"
-		}
 		switch {
 		case !call.Verified || call.Replayed || !call.Signed:
 			t.Errorf("%s: verified %v, replayed %v, answer signed %v", call.Route, call.Verified, call.Replayed, call.Signed)
 		case h.Get(accesskey.HeaderAccessKeyID) != provisionertest.KeyID || h.Get(accesskey.HeaderInstanceID) != provisionertest.InstanceID:
 			t.Errorf("%s: the key's headers %v", call.Route, h)
-		case h.Get("X-Qory-Contract-Version") != revision || h.Get("User-Agent") != "qory-provisioner":
+		case h.Get("X-Qory-Contract-Version") != "3" || h.Get("Content-Type") != "application/json" || h.Get("User-Agent") != "qory-provisioner":
 			t.Errorf("%s: the headers %v", call.Route, h)
-		case call.Route != provisionertest.RouteConfiguration && h.Get("Content-Type") != "application/json":
-			t.Errorf("%s: the content type %v", call.Route, h)
-		case call.Route == provisionertest.RouteConfiguration && (len(call.Body) != 0 || h.Get(accesskey.HeaderTimestamp) == ""):
-			t.Errorf("the GET: body %q, timestamp %q", call.Body, h.Get(accesskey.HeaderTimestamp))
 		case call.Time.Before(testTime) || call.Time.After(clk.read()) || call.Time.Nanosecond() != 0:
 			t.Errorf("%s: the time %s", call.Route, call.Time)
 		}
 	}
-	want := []provisionertest.Route{"claim", "dispatched", "handover", "configuration", "outcome", "claim", "release"}
+	want := []provisionertest.Route{"claim", "dispatched", "handover", "release", "claim", "release"}
 	if got := srv.Routes(); !slices.Equal(got, want) {
 		t.Errorf("routes %v, want %v", got, want)
 	}
@@ -608,22 +592,20 @@ func TestTheSameBytesAreNeverSentTwice(t *testing.T) {
 // errors.Is matches the code's error only for a request whose schema lists it, and
 // never an unsigned answer of the same status and body.
 func TestRefusalsMatchTheirRequest(t *testing.T) {
-	all := []provisionertest.Route{"claim", "dispatched", "handover", "release", "configuration", "outcome"}
+	all := []provisionertest.Route{"claim", "dispatched", "handover", "release"}
 	codes := []struct {
 		err    error
 		status int
 		code   string
 		on     []provisionertest.Route
 	}{
-		{provisioner.ErrForbidden, 403, "forbidden", []provisionertest.Route{"claim", "dispatched", "handover", "release"}},
-		{provisioner.ErrNotFound, 404, "not_found", []provisionertest.Route{"claim", "dispatched", "handover", "release"}},
-		{provisioner.ErrRunNotFound, 404, "not_found", []provisionertest.Route{"outcome"}},
+		{provisioner.ErrForbidden, 403, "forbidden", all},
+		{provisioner.ErrNotFound, 404, "not_found", all},
 		{provisioner.ErrGone, 410, "gone", []provisionertest.Route{"dispatched", "handover", "release"}},
 		{provisioner.ErrHandedOver, 409, "handed_over", []provisionertest.Route{"handover"}},
 		{provisioner.ErrLeaseExpired, 409, "lease_expired", []provisionertest.Route{"dispatched", "handover", "release"}},
 		{provisioner.ErrNotDispatched, 409, "not_dispatched", []provisionertest.Route{"handover"}},
 		{provisioner.ErrNoGateway, 409, "no_gateway", []provisionertest.Route{"claim", "handover"}},
-		{provisioner.ErrOutcomeGiven, 409, "outcome_given", []provisionertest.Route{"outcome"}},
 		{provisioner.ErrUnavailable, 503, "unavailable", []provisionertest.Route{"handover"}},
 		{provisioner.ErrRateLimited, 429, "rate_limited", all},
 	}
@@ -633,7 +615,7 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 			cl, h := handed(t, srv, c, provisionertest.Run{})
 			h.RunKey.Clear()
 			srv.Script(route, provisionertest.Reply{Status: code.status, Code: code.code})
-			err := send(c, srv, route, cl)
+			err := send(c, route, cl)
 			if want := slices.Contains(code.on, route); errors.Is(err, code.err) != want {
 				t.Errorf("%s to %s: %v, matches %v, want %v", code.code, route, err, !want, want)
 			}
@@ -642,7 +624,7 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 			}
 			unsigned := provisionertest.Reply{Status: code.status, Code: code.code, Unsigned: true}
 			srv.Script(route, unsigned, unsigned, unsigned, unsigned, unsigned)
-			if err := send(c, srv, route, cl); errors.Is(err, code.err) || !errors.Is(err, provisioner.ErrUnsigned) {
+			if err := send(c, route, cl); errors.Is(err, code.err) || !errors.Is(err, provisioner.ErrUnsigned) {
 				t.Errorf("an unsigned %s to %s: %v", code.code, route, err)
 			}
 		}
@@ -650,7 +632,7 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 }
 
 // send sends route's request for the claimed run.
-func send(c *provisioner.Client, srv *provisionertest.Server, route provisionertest.Route, cl provisioner.Claimed) error {
+func send(c *provisioner.Client, route provisionertest.Route, cl provisioner.Claimed) error {
 	ctx := context.Background()
 	switch route {
 	case "claim":
@@ -662,11 +644,6 @@ func send(c *provisioner.Client, srv *provisionertest.Server, route provisionert
 		h, err := c.Handover(ctx, cl.DispatchID, cl.RunID)
 		h.RunKey.Clear()
 		return err
-	case "configuration":
-		_, err := c.Configuration(ctx)
-		return err
-	case "outcome":
-		return c.PostOutcome(ctx, srv.URL+provisionertest.RunPath, cl.RunID, provisioner.Outcome{State: provisioner.StateSucceeded})
 	}
 	return c.Release(ctx, cl.DispatchID, "a reason", true)
 }
@@ -720,10 +697,9 @@ func TestTheModelsRefusals(t *testing.T) {
 }
 
 // TestARetryAfterIsBounded reads a signed 429's Retry-After from a second to an hour,
-// in seconds or as a date, on a provisioner/v1 request, the configuration document and
-// an outcome; an unsigned 429's is not read.
+// in seconds or as a date, on a claim and a release.
 func TestARetryAfterIsBounded(t *testing.T) {
-	for _, route := range []provisionertest.Route{"claim", "configuration", "outcome"} {
+	for _, route := range []provisionertest.Route{"claim", "release"} {
 		for _, rc := range []struct {
 			header string
 			want   time.Duration
@@ -735,7 +711,7 @@ func TestARetryAfterIsBounded(t *testing.T) {
 			cl, h := handed(t, srv, c, provisionertest.Run{})
 			h.RunKey.Clear()
 			srv.Script(route, provisionertest.Reply{Status: 429, Code: "rate_limited", RetryAfter: rc.header})
-			err := send(c, srv, route, cl)
+			err := send(c, route, cl)
 			var r *provisioner.Refusal
 			if !errors.Is(err, provisioner.ErrRateLimited) || !errors.As(err, &r) || r.RetryAfter != rc.want || !strings.Contains(err.Error(), "with a wait of") {
 				t.Errorf("%s, Retry-After %s: %v", route, rc.header, err)
@@ -872,7 +848,6 @@ func TestARequestThatBreaksItsSchemaIsNotSent(t *testing.T) {
 		"a NUL":            c.Release(ctx, dp, "a\x00b", true),
 		"a dispatch id":    c.Dispatched(ctx, "dp_../../v1/pools/claim"),
 		"a secret as id":   c.Release(ctx, "qrk_abc.def", "a reason", true),
-		"a run id":         c.PostOutcome(ctx, srv.URL+provisionertest.RunPath, "../x", provisioner.Outcome{}),
 		"a handover's run": func() error { _, err := c.Handover(ctx, dp, "x"); return err }(),
 	} {
 		if err == nil || accesskey.ContainsSecret(err.Error()) || strings.Contains(err.Error(), "../") {

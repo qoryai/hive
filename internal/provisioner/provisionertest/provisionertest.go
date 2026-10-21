@@ -1,16 +1,13 @@
 // Package provisionertest is a fake Qory Apiary for the provisioner's tests: an
-// httptest server of provisioner/v1, claim, dispatched, handover and release, and of
-// Forager's configuration document and a run's outcome.
+// httptest server of provisioner/v1: claim, dispatched, handover and release.
 //
 // It checks every request as Qory Apiary does, in the contract's order: a body over a
 // mebibyte gets an unsigned 413, a POST of another content type an unsigned 415, a
 // signing header sent twice an unsigned 400 bad_request; then the signature is checked
 // under the pool's key, and a signature that fails, or that the fake has seen before,
-// gets the unsigned 401. An outcome's same bytes again get the answer they got before,
-// as Forager's contract requires. After those checks the fake signs every answer under
+// gets the unsigned 401. After those checks the fake signs every answer under
 // [Server.Signer]: an instance id outside its pattern gets a signed 400 bad_request;
-// another revision than 3 on provisioner/v1, or than Forager's on its routes, a signed
-// 400 unsupported_contract_version; a body that fails its schema, a signed 400
+// another revision than 3 a signed 400 unsupported_contract_version; a body that fails its schema, a signed 400
 // invalid_request; a time more than 300 seconds from [Server.Now], the unsigned 401.
 // Then a reply that [Server.Script] queued for the route is sent, else the model's.
 //
@@ -20,17 +17,14 @@
 // dispatch's refusals follow the contract's order: 403 for an unknown dispatch, 410 for
 // one that ended, 409 handed_over for a second handover, 409 lease_expired once its
 // lease lapsed before its handover or [Server.Expire] made it stale, and 409
-// not_dispatched for a handover before dispatched. A release ends the dispatch. A run
-// handed over may get its outcome once; the same one again gets the answer it got
-// before, and another one 409 outcome_given. The fake records every request in order,
-// [Server.Calls].
+// not_dispatched for a handover before dispatched. A release ends the dispatch. The
+// fake records every request in order, [Server.Calls].
 package provisionertest
 
 import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -49,7 +43,6 @@ import (
 	"time"
 
 	"github.com/qoryai/forager/accesskey"
-	foragercontracts "github.com/qoryai/forager/contracts"
 	"github.com/qoryai/integrations/contracts"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -57,12 +50,11 @@ import (
 )
 
 // The ids of the fake's node pool: its access key's id, the instance id
-// [Server.Client] signs with, the node pool and its workspace.
+// [Server.Client] signs with, and the node pool.
 const (
-	KeyID       = "ak_f1xt0re000000000"
-	InstanceID  = "i_0123456789abcdefghjkmnpqrs"
-	PoolID      = "np_f1xt0re000000000"
-	WorkspaceID = "ws_f1xt0re000000000"
+	KeyID      = "ak_f1xt0re000000000"
+	InstanceID = "i_0123456789abcdefghjkmnpqrs"
+	PoolID     = "np_f1xt0re000000000"
 )
 
 // Lease is a dispatch's lease when its [Run] has none, Qory Apiary's.
@@ -79,22 +71,13 @@ type Route string
 
 // The fake's routes.
 const (
-	RouteClaim         Route = "claim"
-	RouteDispatched    Route = "dispatched"
-	RouteHandover      Route = "handover"
-	RouteRelease       Route = "release"
-	RouteConfiguration Route = "configuration"
-	RouteOutcome       Route = "outcome"
+	RouteClaim      Route = "claim"
+	RouteDispatched Route = "dispatched"
+	RouteHandover   Route = "handover"
+	RouteRelease    Route = "release"
 	// RouteUnknown is any other path, which gets a signed 404 not_found once its
 	// signature verifies.
 	RouteUnknown Route = "unknown"
-)
-
-// The run endpoint's path, under which an outcome is posted, and the events
-// endpoint's, which is in the configuration document and which the fake does not serve.
-const (
-	RunPath    = "/v1/runs"
-	EventsPath = "/v1/events"
 )
 
 // Run is a run waiting in the queue, as [Server.Offer] puts it there. Each member left
@@ -129,8 +112,8 @@ type Reply struct {
 	// Code is a refusal's code, the body {"error": Code} when Body is empty.
 	Code string
 	Body string
-	// Edit changes the model's 200 answer, a claim's, a handover's or the configuration
-	// document, before it is signed: another revision, step or run id, say.
+	// Edit changes the model's 200 answer, a claim's or a handover's, before it is
+	// signed: another revision, step or run id, say.
 	Edit func(doc map[string]any)
 	// Unsigned leaves the answer unsigned, and WrongKey signs it under a key that is not
 	// pinned.
@@ -154,14 +137,12 @@ type Reply struct {
 // Call is one request the fake received, and the answer it sent.
 type Call struct {
 	Route Route
-	// Target is the request's path and query, and DispatchID the dispatch in the path,
-	// or for an outcome RunID the run.
+	// Target is the request's path and query, and DispatchID the dispatch in the path.
 	Target     string
 	DispatchID string
-	RunID      string
 	Header     http.Header
 	Body       []byte
-	// Time is the body's time, or a GET's X-Qory-Timestamp; zero when it has none.
+	// Time is the body's time; zero when it has none.
 	Time time.Time
 	// Verified is whether the signature verified under the pool's key, and Replayed
 	// whether the fake had seen it before.
@@ -196,11 +177,6 @@ type Dispatch struct {
 	Release *contracts.Release
 }
 
-// Outcome is a run's outcome as the fake recorded it.
-type Outcome struct {
-	RunID, State, Reason, Time string
-}
-
 // Server is the fake Qory Apiary. Set its fields before the first request.
 type Server struct {
 	// URL is the server's origin.
@@ -227,13 +203,6 @@ type Server struct {
 	scripts    map[Route][]Reply
 	calls      []Call
 	seen       map[string]bool
-	outcomes   map[string]outcome
-}
-
-// outcome is a run's outcome and the SHA-256 of the body that gave it.
-type outcome struct {
-	Outcome
-	sum [sha256.Size]byte
 }
 
 // New starts a fake with a new pool key and a new signing key, holding empty claims up
@@ -243,7 +212,7 @@ func New(t testing.TB) *Server {
 	s := &Server{
 		Pool: newKey(t), Signer: newKey(t), Hold: time.Second,
 		other: newKey(t), closing: make(chan struct{}), wake: make(chan struct{}),
-		dispatches: map[string]*Dispatch{}, scripts: map[Route][]Reply{}, seen: map[string]bool{}, outcomes: map[string]outcome{},
+		dispatches: map[string]*Dispatch{}, scripts: map[Route][]Reply{}, seen: map[string]bool{},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	s.URL = s.srv.URL
@@ -370,17 +339,6 @@ func (s *Server) Dispatch(id string) (Dispatch, bool) {
 	return *d, true
 }
 
-// Outcomes are the outcomes the fake recorded, by run id.
-func (s *Server) Outcomes() map[string]Outcome {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[string]Outcome{}
-	for id, o := range s.outcomes {
-		out[id] = o.Outcome
-	}
-	return out
-}
-
 func (s *Server) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -395,7 +353,6 @@ var (
 	fixtureInputs     = map[string]json.RawMessage{}
 	fixtureDomain     = map[string]string{}
 	dispatchPathShape = regexp.MustCompile(`^/v1/dispatches/([^/]+)/(dispatched|handover|release)$`)
-	outcomePathShape  = regexp.MustCompile(`^` + RunPath + `/([^/]+)/outcome$`)
 )
 
 // withoutTarget is the fixture of an explore run with no target.
@@ -493,12 +450,10 @@ func newDispatchID() string {
 	return string(id)
 }
 
-// answer is the fake's answer: a status, a body, the configuration digest its
-// signature covers, and more headers.
+// answer is the fake's answer: a status, a body and more headers.
 type answer struct {
 	status int
 	body   []byte
-	conf   string
 	header http.Header
 }
 
@@ -510,18 +465,13 @@ func refusal(status int, code string) answer {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	route, id := routeOf(r)
-	c := Call{Route: route, Target: r.URL.RequestURI(), Header: r.Header.Clone(), Body: body}
-	if route == RouteOutcome {
-		c.RunID = id
-	} else {
-		c.DispatchID = id
-	}
+	c := Call{Route: route, Target: r.URL.RequestURI(), DispatchID: id, Header: r.Header.Clone(), Body: body}
 	sig := r.Header.Get(accesskey.HeaderSignature)
 	c.Verified = r.Header.Get(accesskey.HeaderAccessKeyID) == KeyID && s.Pool.PublicKey().VerifyRequest(accesskey.Request{
 		AccessKeyID: KeyID, InstanceID: r.Header.Get(accesskey.HeaderInstanceID), Method: r.Method,
-		Target: r.URL.RequestURI(), Body: body, Timestamp: r.Header.Get(accesskey.HeaderTimestamp),
+		Target: r.URL.RequestURI(), Body: body,
 	}, sig)
-	c.Time = timeOf(r, body)
+	c.Time = timeOf(body)
 	s.mu.Lock()
 	c.Replayed = s.seen[sig]
 	if c.Verified {
@@ -563,15 +513,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	if rep.RetryAfter != "" {
 		w.Header().Set("Retry-After", rep.RetryAfter)
 	}
-	if ans.conf != "" {
-		w.Header().Set(accesskey.HeaderConfiguration, ans.conf)
-	}
 	if signed && !rep.Unsigned {
 		k := s.Signer
 		if rep.WrongKey {
 			k = s.other
 		}
-		w.Header().Set(accesskey.HeaderSignature, k.SignAnswer(accesskey.Answer{Status: ans.status, RequestSignature: sig, Body: b, Configuration: ans.conf}))
+		w.Header().Set(accesskey.HeaderSignature, k.SignAnswer(accesskey.Answer{Status: ans.status, RequestSignature: sig, Body: b}))
 	}
 	if len(b) > 0 {
 		w.Header().Set("Content-Type", "application/json")
@@ -595,22 +542,18 @@ func (s *Server) decide(r *http.Request, c *Call, route Route, id string, body [
 		return refusal(http.StatusUnsupportedMediaType, "unsupported_media_type"), Reply{}, false
 	case twice(r.Header):
 		return refusal(http.StatusBadRequest, "bad_request"), Reply{}, false
-	case !c.Verified || c.Replayed && route != RouteOutcome:
+	case !c.Verified || c.Replayed:
 		return refusal(http.StatusUnauthorized, "unauthorized"), Reply{}, false
 	case accesskey.CheckInstanceID(r.Header.Get(accesskey.HeaderInstanceID)) != nil:
 		return refusal(http.StatusBadRequest, "bad_request"), Reply{}, true
 	}
-	revision := strconv.Itoa(provisioner.Revision)
-	if route == RouteConfiguration || route == RouteOutcome {
-		revision = strconv.Itoa(foragercontracts.Revision)
-	}
-	if v := r.Header.Values("X-Qory-Contract-Version"); len(v) != 1 || v[0] != revision {
+	if v := r.Header.Values("X-Qory-Contract-Version"); len(v) != 1 || v[0] != strconv.Itoa(provisioner.Revision) {
 		return refusal(http.StatusBadRequest, "unsupported_contract_version"), Reply{}, true
 	}
-	if route == RouteUnknown || r.Method != methodOf(route) {
+	if route == RouteUnknown || r.Method != http.MethodPost {
 		return refusal(http.StatusNotFound, "not_found"), Reply{}, true
 	}
-	if r.Method == http.MethodPost && !validBody(route, body) {
+	if !validBody(route, body) {
 		return refusal(http.StatusBadRequest, "invalid_request"), Reply{}, true
 	}
 	if c.Time.IsZero() || c.Time.Sub(s.now()).Abs() > Window {
@@ -650,42 +593,21 @@ func twice(h http.Header) bool {
 	return false
 }
 
-// routeOf is the route of r's path, whatever its method, and the dispatch or the run
-// in the path.
+// routeOf is the route of r's path, whatever its method, and the dispatch in the path.
 func routeOf(r *http.Request) (Route, string) {
 	p := r.URL.Path
 	switch {
 	case p == "/v1/pools/claim":
 		return RouteClaim, ""
-	case p == "/.well-known/qory-configuration":
-		return RouteConfiguration, ""
 	}
 	if m := dispatchPathShape.FindStringSubmatch(p); m != nil {
 		return Route(m[2]), m[1]
 	}
-	if m := outcomePathShape.FindStringSubmatch(p); m != nil {
-		return RouteOutcome, m[1]
-	}
 	return RouteUnknown, ""
 }
 
-// methodOf is the method a route is served for.
-func methodOf(route Route) string {
-	if route == RouteConfiguration {
-		return http.MethodGet
-	}
-	return http.MethodPost
-}
-
-// timeOf is a POST body's time, or a GET's X-Qory-Timestamp; zero when it has none.
-func timeOf(r *http.Request, body []byte) time.Time {
-	if r.Method == http.MethodGet {
-		sec, err := strconv.ParseInt(r.Header.Get(accesskey.HeaderTimestamp), 10, 64)
-		if err != nil {
-			return time.Time{}
-		}
-		return time.Unix(sec, 0).UTC()
-	}
+// timeOf is a body's time; zero when it has none.
+func timeOf(body []byte) time.Time {
 	var doc struct {
 		Time string `json:"time"`
 	}
@@ -696,13 +618,12 @@ func timeOf(r *http.Request, body []byte) time.Time {
 	return t
 }
 
-// schemaOf is the schema each POST route's body must pass.
+// schemaOf is the schema each route's body must pass.
 var schemaOf = map[Route]func() (*jsonschema.Schema, error){
 	RouteClaim:      sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("claim.schema.json") }),
 	RouteDispatched: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("dispatched.schema.json") }),
 	RouteHandover:   sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("handover.schema.json") }),
 	RouteRelease:    sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("release.schema.json") }),
-	RouteOutcome:    sync.OnceValues(func() (*jsonschema.Schema, error) { return foragercontracts.Compile("run-outcome.schema.json") }),
 }
 
 // validBody reports whether body is one JSON document with no member twice, with its
@@ -747,13 +668,8 @@ func hasFraction(doc any) bool {
 
 // model is the model's answer to a request that passed every check.
 func (s *Server) model(ctx context.Context, route Route, id string, body []byte) answer {
-	switch route {
-	case RouteClaim:
+	if route == RouteClaim {
 		return s.claim(ctx, body)
-	case RouteConfiguration:
-		return s.configuration()
-	case RouteOutcome:
-		return s.outcome(id, body)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -835,43 +751,6 @@ func (s *Server) claim(ctx context.Context, body []byte) answer {
 			return answer{status: http.StatusNoContent}
 		}
 	}
-}
-
-// configuration is the configuration document of the pool's key, with its digest.
-func (s *Server) configuration() answer {
-	doc := map[string]any{
-		"version": 1, "node_id": PoolID, "workspaces": []string{WorkspaceID},
-		"events":            map[string]any{"url": s.URL + EventsPath, "types": []string{"*"}},
-		"run":               map[string]any{"url": s.URL + RunPath},
-		"apiary_public_key": s.Pin(),
-	}
-	b, _ := json.Marshal(doc)
-	sum := sha256.Sum256(b)
-	return answer{status: http.StatusOK, body: b, conf: "sha256=" + hex.EncodeToString(sum[:])}
-}
-
-// outcome records the outcome of a run the fake handed over: the same one again gets
-// the answer it got before, another one 409 outcome_given, and a run the fake did not
-// hand over 404 not_found.
-func (s *Server) outcome(runID string, body []byte) answer {
-	var o struct{ State, Reason, Time string }
-	_ = json.Unmarshal(body, &o)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	handed := false
-	for _, d := range s.dispatches {
-		handed = handed || d.Run.RunID == runID && d.HandedOver
-	}
-	if !handed {
-		return refusal(http.StatusNotFound, "not_found")
-	}
-	given := outcome{Outcome: Outcome{RunID: runID, State: o.State, Reason: o.Reason, Time: o.Time}, sum: sha256.Sum256(body)}
-	if prev, ok := s.outcomes[runID]; ok && prev.sum != given.sum && (prev.State != given.State || prev.Reason != given.Reason) {
-		return refusal(http.StatusConflict, "outcome_given")
-	} else if !ok {
-		s.outcomes[runID] = given
-	}
-	return answer{status: http.StatusOK, body: []byte(`{"version":1}`)}
 }
 
 // String is the dispatch's id, step and state, never its run key.

@@ -2,16 +2,12 @@ package provisionertest_test
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/qoryai/forager/accesskey"
-	"github.com/qoryai/forager/server"
 
 	"github.com/qoryai/hive/internal/provisioner/provisionertest"
 )
@@ -103,69 +99,5 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 	}
 	if status, signed, _ := post(t, s, s.Pool, "/v1/elsewhere", claimAt(now), nil); status != 404 || !signed {
 		t.Errorf("an unknown route: %d signed %v", status, signed)
-	}
-}
-
-// TestTheFakeServesTheConfigurationAndTheOutcome fetches the fake's configuration
-// document and posts a run's outcome with Forager's client, a second implementation of
-// both: the document verifies and has the run endpoint, the fake records an outcome of
-// a run handed over, the same one again gets the answer it got before, another one
-// outcome_given, and a run never handed over not_found.
-func TestTheFakeServesTheConfigurationAndTheOutcome(t *testing.T) {
-	s := provisionertest.New(t)
-	ctx := context.Background()
-	runID := s.Offer(provisionertest.Run{})[0]
-	c := s.Client()
-	cl, _, err := c.Claim(ctx, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Dispatched(ctx, cl.DispatchID); err != nil {
-		t.Fatal(err)
-	}
-	h, err := c.Handover(ctx, cl.DispatchID, cl.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.RunKey.Clear()
-	fc := &server.Client{
-		Config: &server.Config{Version: 1, URL: s.URL, AccessKeyID: provisionertest.KeyID, ApiaryPublicKey: s.Pin()},
-		Key:    s.Pool, InstanceID: provisionertest.InstanceID, UserAgent: "qory-test",
-	}
-	conf, digest, err := fc.Discover(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conf.NodeID != provisionertest.PoolID || conf.Run.URL != s.URL+provisionertest.RunPath || !strings.HasPrefix(digest, "sha256=") {
-		t.Errorf("the configuration %+v %s", conf, digest)
-	}
-	o := server.Outcome{State: "failed", Reason: "time_limit", Time: time.Now().UTC().Format(time.RFC3339)}
-	if err := fc.PostOutcome(ctx, conf.Run.URL, runID, o); err != nil {
-		t.Fatal(err)
-	}
-	if err := fc.PostOutcome(ctx, conf.Run.URL, runID, o); err != nil {
-		t.Errorf("the same outcome again: %v", err)
-	}
-	if got := s.Outcomes()[runID]; got.State != "failed" || got.Reason != "time_limit" {
-		t.Errorf("recorded %+v", got)
-	}
-	var r *accesskey.Refusal
-	if err := fc.PostOutcome(ctx, conf.Run.URL, runID, server.Outcome{State: "succeeded"}); !errors.As(err, &r) || r.Code != "outcome_given" {
-		t.Errorf("another outcome: %v", err)
-	}
-	if err := fc.PostOutcome(ctx, conf.Run.URL, "0192f0c1-7d4e-7a2b-8c3d-000000000000", o); !errors.As(err, &r) || r.Code != "not_found" {
-		t.Errorf("a run not handed over: %v", err)
-	}
-	var routes []string
-	for _, r := range s.Routes() {
-		routes = append(routes, string(r))
-	}
-	if got := strings.Join(routes, " "); got != "claim dispatched handover configuration outcome outcome outcome outcome" {
-		t.Errorf("routes %s", got)
-	}
-	for _, call := range s.Calls()[3:] {
-		if call.Header.Get("X-Qory-Contract-Version") != strconv.Itoa(1) || !call.Verified || !call.Signed {
-			t.Errorf("%s: %v %v %v", call.Route, call.Header, call.Verified, call.Signed)
-		}
 	}
 }

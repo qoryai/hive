@@ -78,7 +78,7 @@ func (c *Client) Handover(ctx context.Context, dispatchID, runID string) (Handed
 		return Handed{}, fmt.Errorf("%s: the run id is not a UUID in the canonical lower-case form", what)
 	}
 	ans, err := c.do(ctx, request{
-		what: what, kind: kindHandover, url: c.cfg.URL + routeDispatches + dispatchID + "/handover", revision: Revision,
+		what: what, kind: kindHandover, path: routeDispatches + dispatchID + "/handover",
 		schema: "handover.schema.json", limit: contracts.MaxHandoverAnswer, timeout: RequestTimeout,
 		body: func(t string) any { return contracts.Handover{Version: 1, Time: t} },
 	})
@@ -119,7 +119,7 @@ func readHandover(body []byte, runID string) (Handed, error) {
 	}
 	stood := slices.Concat(body[:start], standIn, body[end:])
 	var doc contracts.HandoverAnswer
-	err = readAnswer(provisionerSchema, name, stood, &doc)
+	err = readAnswer(name, stood, &doc)
 	clear(stood)
 	var inputs bytes.Buffer
 	switch {

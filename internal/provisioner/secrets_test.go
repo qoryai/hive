@@ -94,10 +94,6 @@ func TestNoSecretLeaks(t *testing.T) {
 	if err := c.Release(ctx, cl.DispatchID, "a reason", true); err != nil {
 		out.WriteString(err.Error() + "\n")
 	}
-	srv.Script(provisionertest.RouteOutcome, provisionertest.Reply{Status: 409, Body: body})
-	if err := c.PostOutcome(ctx, srv.URL+provisionertest.RunPath, cl.RunID, provisioner.Outcome{}); err != nil {
-		out.WriteString(err.Error() + "\n")
-	}
 
 	slog.New(slog.NewTextHandler(&out, nil)).Info("x", "claimed", cl, "handed", h, "key", h.RunKey, "inputs", h.Inputs)
 	slog.New(slog.NewJSONHandler(&out, nil)).Info("x", "claimed", cl, "handed", h, "work_item", h.WorkItem, "title", h.WorkItem.Title)

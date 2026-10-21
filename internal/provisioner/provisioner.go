@@ -1,15 +1,13 @@
-// Package provisioner is the provisioner's client of Qory Apiary: of the provisioner
-// contract, provisioner/v1, at revision 3, to claim a run, post that its machine is on
-// the way, take the handover and release the run; and of Forager's configuration
-// document and run outcome, to post how a handed-over run ended.
+// Package provisioner is the provisioner's client of Qory Apiary's provisioner
+// contract, provisioner/v1, at revision 3: it claims a run, posts that the run's job
+// started, takes the handover and releases the run.
 //
 // The client signs every request with the node pool's access key as Forager's accesskey
 // signs one, with X-Qory-Access-Key-Id, X-Qory-Instance-Id, X-Qory-Signature-Ed25519 and
-// X-Qory-Contract-Version, and checks a POST's body against its schema before it sends
+// X-Qory-Contract-Version 3, and checks every body against its schema before it sends
 // it. It reads every answer up to its bound, checks its signature under the pin, then
 // checks it against its schema and its revision, before it uses anything in it. A
-// request's time, a POST's time member or a GET's X-Qory-Timestamp, is the clock's, in
-// whole seconds. A try sent again is built anew with a later time, since Qory Apiary
+// request's time is the clock's, in whole seconds. A try sent again is built anew with a later time, since Qory Apiary
 // returns 401 to a signature it has seen. The client follows no redirect and keeps no
 // cookie.
 //
@@ -35,7 +33,7 @@ import (
 )
 
 // Revision is the revision of the provisioner contract the client implements: the one
-// its provisioner/v1 requests send in X-Qory-Contract-Version, and the one a claim's or
+// its requests send in X-Qory-Contract-Version, and the one a claim's or
 // a handover's answer must have. Qory Apiary serves this revision alone.
 const Revision = contracts.ProvisionerRevision
 
@@ -57,9 +55,8 @@ const (
 
 // The bounds of Qory Apiary's answers. The client reads a claim's 200 up to
 // MaxClaimAnswer, far more than its members' limits add up to; a handover's 200 up to
-// contracts.MaxHandoverAnswer, the contract's bound; the configuration document's 200
-// up to server.MaxDocument, Forager's bound; every other answer, a refusal, a 204 or an
-// outcome's 200, up to MaxAnswer. The client drops a larger answer, whatever its
+// contracts.MaxHandoverAnswer, the contract's bound; every other answer, a refusal or a
+// 204, up to MaxAnswer. The client drops a larger answer, whatever its
 // status, before it reads the signature, uses nothing in it, and sends the request
 // again, built anew, as for an answer with no valid signature.
 const (
@@ -86,10 +83,9 @@ const (
 	routeDispatches = "/v1/dispatches/"
 )
 
-// headerContractVersion is set to the revision of the contract a request implements:
-// [Revision] on provisioner/v1, Forager's revision on an outcome and on the GET of the
-// configuration document. The signature does not cover it; the answers whose content
-// the revision bounds have it in their signed body.
+// headerContractVersion is set to [Revision], the revision a request implements. The
+// signature does not cover it; the answers whose content the revision bounds have it
+// in their signed body.
 const headerContractVersion = "X-Qory-Contract-Version"
 
 var (
@@ -224,7 +220,7 @@ func (c *Client) Claim(ctx context.Context, waitSeconds int) (claimed Claimed, o
 		return Claimed{}, false, fmt.Errorf("%s: set wait_seconds from 0 to %d; %d is outside", what, MaxWaitSeconds, waitSeconds)
 	}
 	ans, err := c.do(ctx, request{
-		what: what, kind: kindClaim, url: c.cfg.URL + routeClaim, revision: Revision, schema: "claim.schema.json",
+		what: what, kind: kindClaim, path: routeClaim, schema: "claim.schema.json",
 		limit: MaxClaimAnswer, timeout: ClaimTimeout,
 		body: func(t string) any { return contracts.Claim{Version: 1, Time: t, WaitSeconds: waitSeconds} },
 	})
@@ -252,7 +248,7 @@ func (c *Client) Claim(ctx context.Context, waitSeconds int) (claimed Claimed, o
 func readClaim(body []byte) (Claimed, error) {
 	const name = "claim-answer.schema.json"
 	var doc contracts.ClaimAnswer
-	if err := readAnswer(provisionerSchema, name, body, &doc); err != nil {
+	if err := readAnswer(name, body, &doc); err != nil {
 		return Claimed{}, err
 	}
 	if doc.Revision != Revision {
@@ -332,8 +328,7 @@ func ofDispatch(prefix, dispatchID string) (string, error) {
 // signed 204 as its answer.
 func (c *Client) toDispatch(ctx context.Context, what string, k kind, dispatchID, action, schema string, body func(string) any) error {
 	ans, err := c.do(ctx, request{
-		what: what, kind: k, url: c.cfg.URL + routeDispatches + dispatchID + "/" + action, revision: Revision,
-		schema: schema, limit: MaxAnswer, timeout: RequestTimeout, body: body,
+		what: what, kind: k, path: routeDispatches + dispatchID + "/" + action, schema: schema, limit: MaxAnswer, timeout: RequestTimeout, body: body,
 	})
 	if err != nil {
 		return err
