@@ -135,13 +135,13 @@ func validate(spec Spec, withToken bool) error {
 		}
 	}
 	for _, f := range []struct{ name, value string }{
-		{"the run id", spec.RunID},
-		{"the pool id", spec.PoolID},
-		{"the instance type", spec.InstanceType},
-		{"the image id", spec.ImageID},
-		{"the root device name", spec.RootDevice},
-		{"the subnet id", spec.SubnetID},
-		{"the security group id", spec.SecurityGroupID},
+		{"run id", spec.RunID},
+		{"pool id", spec.PoolID},
+		{"instance type", spec.InstanceType},
+		{"image id", spec.ImageID},
+		{"root device name", spec.RootDevice},
+		{"subnet id", spec.SubnetID},
+		{"security group id", spec.SecurityGroupID},
 	} {
 		if f.value == "" {
 			return fmt.Errorf("Report this defect in the provisioner: the machine spec has no %s", f.name)

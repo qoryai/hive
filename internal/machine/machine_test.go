@@ -134,13 +134,13 @@ func TestCreateRefusesSpec(t *testing.T) {
 		{func(s *Spec) { s.DispatchID = "" }, "Report this defect in the provisioner: the dispatch id has 0 bytes, and a client token has 1 to 64 characters"},
 		{func(s *Spec) { s.DispatchID = strings.Repeat("d", 65) }, "Report this defect in the provisioner: the dispatch id has 65 bytes, and a client token has 1 to 64 characters"},
 		{func(s *Spec) { s.DispatchID = "dsp 1" }, "Report this defect in the provisioner: byte 3 of the dispatch id is 0x20, and a client token has only ASCII letters, digits and punctuation"},
-		{func(s *Spec) { s.RunID = "" }, "Report this defect in the provisioner: the machine spec has no the run id"},
-		{func(s *Spec) { s.PoolID = "" }, "Report this defect in the provisioner: the machine spec has no the pool id"},
-		{func(s *Spec) { s.InstanceType = "" }, "Report this defect in the provisioner: the machine spec has no the instance type"},
-		{func(s *Spec) { s.ImageID = "" }, "Report this defect in the provisioner: the machine spec has no the image id"},
-		{func(s *Spec) { s.RootDevice = "" }, "Report this defect in the provisioner: the machine spec has no the root device name"},
-		{func(s *Spec) { s.SubnetID = "" }, "Report this defect in the provisioner: the machine spec has no the subnet id"},
-		{func(s *Spec) { s.SecurityGroupID = "" }, "Report this defect in the provisioner: the machine spec has no the security group id"},
+		{func(s *Spec) { s.RunID = "" }, "Report this defect in the provisioner: the machine spec has no run id"},
+		{func(s *Spec) { s.PoolID = "" }, "Report this defect in the provisioner: the machine spec has no pool id"},
+		{func(s *Spec) { s.InstanceType = "" }, "Report this defect in the provisioner: the machine spec has no instance type"},
+		{func(s *Spec) { s.ImageID = "" }, "Report this defect in the provisioner: the machine spec has no image id"},
+		{func(s *Spec) { s.RootDevice = "" }, "Report this defect in the provisioner: the machine spec has no root device name"},
+		{func(s *Spec) { s.SubnetID = "" }, "Report this defect in the provisioner: the machine spec has no subnet id"},
+		{func(s *Spec) { s.SecurityGroupID = "" }, "Report this defect in the provisioner: the machine spec has no security group id"},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{}
