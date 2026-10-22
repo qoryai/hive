@@ -110,9 +110,11 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 			HttpPutResponseHopLimit: aws.Int32(1),
 			HttpEndpoint:            types.InstanceMetadataEndpointStateEnabled,
 		},
+		// DeleteOnTermination: no volume with the run's data stays after the machine
+		// is terminated, whatever the image's mapping sets.
 		BlockDeviceMappings: []types.BlockDeviceMapping{{
 			DeviceName: aws.String(spec.RootDevice),
-			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true)},
+			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(true)},
 		}},
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},

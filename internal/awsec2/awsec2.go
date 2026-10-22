@@ -139,7 +139,8 @@ func spec(s Settings, instanceType, root, pool, key string, userData []byte) mac
 
 // List lists the pool's instances that are not terminated, with the key from the
 // qory:key tag and the start time from LaunchTime, in UTC and whole seconds. An
-// instance whose qory:key tag is not a key is left out, with a log line.
+// instance whose qory:key tag is not a key, and an instance that EC2 returns with no
+// LaunchTime, are left out, each with a log line.
 func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {
@@ -157,6 +158,10 @@ func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList
 		}
 		if adapterio.CheckKey(m.Key) != nil {
 			h.log.Warn("Set the instance's qory:key tag to the key of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:key tag is not a key", "instance", m.ID)
+			continue
+		}
+		if m.LaunchTime.IsZero() {
+			h.log.Warn("Check the instance in EC2: list leaves out an instance that DescribeInstances returned with no launch time", "instance", m.ID)
 			continue
 		}
 		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, Key: m.Key, State: state, Started: contracts.FormatTime(m.LaunchTime)})
