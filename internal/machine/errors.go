@@ -4,55 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/smithy-go"
+
+	"github.com/qoryai/hive/machines"
 )
-
-// Kind is the class of an EC2 call's error. It sets what the caller does next.
-type Kind int
-
-const (
-	// KindOther is every error that no other kind matches. The caller does not
-	// repeat the call with the same input.
-	KindOther Kind = iota
-	// KindRetried is an error that the SDK's standard retryer retries: throttling
-	// (RequestLimitExceeded), HTTP 500, 502, 503 and 504, a request timeout, and a
-	// connection error. When the caller receives it, the SDK's attempts or its retry
-	// quota ran out; the caller waits and calls again.
-	KindRetried
-	// KindLimit is InstanceLimitExceeded or VcpuLimitExceeded: the account has no room
-	// for another machine.
-	KindLimit
-	// KindTokenMismatch is IdempotentParameterMismatch: an earlier RunInstances used
-	// the same client token with different parameters.
-	KindTokenMismatch
-	// KindTokenTerminated is IdempotentInstanceTerminated: the machine started with
-	// this client token is terminated, and EC2 starts no second one for the token.
-	KindTokenTerminated
-)
-
-// String returns the kind's name for a log attribute.
-func (k Kind) String() string {
-	switch k {
-	case KindRetried:
-		return "retried"
-	case KindLimit:
-		return "limit"
-	case KindTokenMismatch:
-		return "token-mismatch"
-	case KindTokenTerminated:
-		return "token-terminated"
-	default:
-		return "other"
-	}
-}
 
 // The EC2 error codes this package acts on.
 const (
 	codeInstanceLimit      = "InstanceLimitExceeded"
 	codeVcpuLimit          = "VcpuLimitExceeded"
+	codeCapacity           = "InsufficientInstanceCapacity"
 	codeTokenMismatch      = "IdempotentParameterMismatch"
 	codeTokenTerminated    = "IdempotentInstanceTerminated"
 	codeDryRun             = "DryRunOperation"
@@ -65,8 +30,8 @@ const (
 type Error struct {
 	// Op is the EC2 operation, such as RunInstances.
 	Op string
-	// Kind is the class of Err.
-	Kind Kind
+	// Kind is the kind of failure that the adapter writes in its error document.
+	Kind machines.Kind
 	// Code is the EC2 error code, such as VcpuLimitExceeded; empty when the call
 	// returned no EC2 error.
 	Code string
@@ -74,26 +39,34 @@ type Error struct {
 	Err error
 }
 
+// settingsFile is how an error refers to the adapter's settings file.
+const settingsFile = "the EC2 adapter's settings file aws-ec2.json"
+
 // Error starts with what the operator does, then the cause.
 func (e *Error) Error() string {
+	var maxAttempts *retry.MaxAttemptsError
 	switch {
-	case e.Kind == KindRetried:
-		var maxAttempts *retry.MaxAttemptsError
-		if errors.As(e.Err, &maxAttempts) {
-			return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
-		}
-		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed with an error that the SDK retries: %v", e.Op, e.Err)
-	case e.Kind == KindLimit:
+	case e.Code == codeCapacity:
+		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s, because EC2 has no capacity for the instance type in the subnet's availability zone: %v", settingsFile, e.Op, e.Code, e.Err)
+	case e.Kind == machines.KindLimit:
 		return fmt.Sprintf("Wait until machines end, or raise the account's EC2 instance or vCPU quota: %s failed with %s: %v", e.Op, e.Code, e.Err)
-	case e.Kind == KindTokenMismatch:
-		return fmt.Sprintf("Report this defect in the provisioner: it sent %s for one dispatch twice with different parameters, and EC2 returned %s: %v", e.Op, e.Code, e.Err)
-	case e.Kind == KindTokenTerminated:
-		return fmt.Sprintf("No action needed: the machine started with this client token is terminated, and EC2 starts no second machine for the token: %v", e.Err)
 	case e.Code == codeUnauthorized:
-		return fmt.Sprintf("Give the instance role the provisioner's EC2 rights: %s failed with %s: %v", e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Give the instance role the EC2 rights that the EC2 machine adapter needs: %s failed with %s: %v", e.Op, e.Code, e.Err)
+	case e.Code == codeTokenMismatch:
+		return fmt.Sprintf("Report this defect in the provisioner, unless %s changed after the first make for this key: %s was sent twice for one key with different parameters, and EC2 returned %s: %v", settingsFile, e.Op, e.Code, e.Err)
+	case e.Code == codeTokenTerminated:
+		return fmt.Sprintf("No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: %v", e.Err)
+	case e.Kind == machines.KindRetry && errors.As(e.Err, &maxAttempts):
+		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
+	case e.Kind == machines.KindRetry && errors.Is(e.Err, context.DeadlineExceeded):
+		return fmt.Sprintf("If this repeats, check the network path to EC2: %s did not finish within its time limit: %v", e.Op, e.Err)
+	case e.Kind == machines.KindRetry:
+		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed with an error that the SDK retries: %v", e.Op, e.Err)
+	case e.Code == codeInstanceIDNotFound:
+		return fmt.Sprintf("Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return %s for an instance that exists: %s failed: %v", e.Code, e.Op, e.Err)
 	case e.Code != "":
-		return fmt.Sprintf("Look up EC2 error code %s in the EC2 API reference, and check the provisioner's settings and the instance role against it: %s failed: %v", e.Code, e.Op, e.Err)
-	case errors.Is(e.Err, context.Canceled), errors.Is(e.Err, context.DeadlineExceeded):
+		return fmt.Sprintf("Look up EC2 error code %s in the EC2 API reference, and check %s and the instance role against it: %s failed: %v", e.Code, settingsFile, e.Op, e.Err)
+	case errors.Is(e.Err, context.Canceled):
 		return fmt.Sprintf("No action needed: %s stopped when its context ended: %v", e.Op, e.Err)
 	default:
 		return fmt.Sprintf("Check the instance role and the network path to EC2: %s failed: %v", e.Op, e.Err)
@@ -103,39 +76,42 @@ func (e *Error) Error() string {
 // Unwrap returns the SDK's error.
 func (e *Error) Unwrap() error { return e.Err }
 
-// Classify returns the kind of err: the Kind of an *Error in its chain, or else the
-// kind that follows from err's EC2 error code and the SDK's standard retry rules.
-func Classify(err error) Kind {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Kind
-	}
-	return classify(err)
-}
-
-// classify reads the kind from the error code first, because the limit and token codes
-// are client errors that the SDK does not retry.
-func classify(err error) Kind {
-	switch errorCode(err) {
-	case codeInstanceLimit, codeVcpuLimit:
-		return KindLimit
-	case codeTokenMismatch:
-		return KindTokenMismatch
-	case codeTokenTerminated:
-		return KindTokenTerminated
+// classify returns the kind of err. It reads the error code first, because the limit
+// codes are client errors that the SDK does not retry, and a capacity error that the
+// SDK retried is still a limit.
+func classify(err error) machines.Kind {
+	code := errorCode(err)
+	switch {
+	case code == codeInstanceLimit || code == codeVcpuLimit || code == codeCapacity:
+		return machines.KindLimit
+	case defectCode(code):
+		return machines.KindDefect
 	}
 	var maxAttempts *retry.MaxAttemptsError
-	if errors.As(err, &maxAttempts) {
-		return KindRetried
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &maxAttempts):
+		return machines.KindRetry
+	case errors.Is(err, context.Canceled):
+		// The caller's context ended; a retry inside that context fails at once.
+		return machines.KindOther
+	case retry.IsErrorRetryables(retry.DefaultRetryables).IsErrorRetryable(err) == aws.TrueTernary:
+		return machines.KindRetry
 	}
-	// The caller's context ended; a retry inside that context fails at once.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return KindOther
+	return machines.KindOther
+}
+
+// defectCode reports whether the EC2 error code means that the request, the settings
+// or the instance role's rights are wrong, so a retry fails the same way. An unknown
+// instance id is not a defect: right after RunInstances, EC2 can return
+// InvalidInstanceID.NotFound for an instance that exists.
+func defectCode(code string) bool {
+	switch {
+	case code == codeUnauthorized, code == codeTokenMismatch, code == "MissingParameter", code == "UnknownParameter":
+		return true
+	case code == codeInstanceIDNotFound:
+		return false
 	}
-	if retry.IsErrorRetryables(retry.DefaultRetryables).IsErrorRetryable(err) == aws.TrueTernary {
-		return KindRetried
-	}
-	return KindOther
+	return strings.HasPrefix(code, "Invalid") || strings.HasPrefix(code, "Unsupported")
 }
 
 // errorCode returns the EC2 error code in err's chain, or "".
@@ -147,10 +123,27 @@ func errorCode(err error) string {
 	return ""
 }
 
+// TokenTerminated reports whether err is IdempotentInstanceTerminated: the machine
+// that RunInstances made for the client token is terminated, and EC2 makes no second
+// machine for the token.
+func TokenTerminated(err error) bool {
+	return errorCode(err) == codeTokenTerminated
+}
+
 // wrap returns err as an *Error for op, or nil when err is nil.
 func wrap(op string, err error) error {
 	if err == nil {
 		return nil
 	}
 	return &Error{Op: op, Kind: classify(err), Code: errorCode(err), Err: err}
+}
+
+// defect returns a failure of the kind defect with message.
+func defect(message string) error {
+	return &machines.Error{Kind: machines.KindDefect, Message: message}
+}
+
+// other returns a failure of the kind other with message.
+func other(message string) error {
+	return &machines.Error{Kind: machines.KindOther, Message: message}
 }

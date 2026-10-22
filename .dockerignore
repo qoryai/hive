@@ -2,5 +2,6 @@
 .DS_Store
 /dist/
 /qory-provisioner
+/qory-machines-aws-ec2
 go.work
 go.work.sum

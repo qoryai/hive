@@ -17,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+
+	"github.com/qoryai/hive/machines"
 )
 
 // testSecret is the static test credentials' secret key. It never appears on the wire.
@@ -94,12 +96,12 @@ const runReply = `<?xml version="1.0" encoding="UTF-8"?>
   <instancesSet><item>
     <instanceId>i-0123456789abcdef0</instanceId>
     <instanceState><code>0</code><name>pending</name></instanceState>
-    <clientToken>dsp-0f3a9c2e-1b7d-4e55-8a10-6c2d9e4b7a01</clientToken>
+    <clientToken>dp_0123456789abcdef</clientToken>
     <launchTime>2026-10-22T10:00:00.000Z</launchTime>
     <tagSet>
       <item><key>qory:managed</key><value>true</value></item>
-      <item><key>qory:pool</key><value>pool-7</value></item>
-      <item><key>qory:run</key><value>run-41</value></item>
+      <item><key>qory:pool</key><value>np_0123456789abcdef</value></item>
+      <item><key>qory:key</key><value>dp_0123456789abcdef</value></item>
     </tagSet>
   </item></instancesSet>
 </RunInstancesResponse>`
@@ -108,21 +110,23 @@ const runReply = `<?xml version="1.0" encoding="UTF-8"?>
 // the client token, every field as the EC2 Query protocol writes it.
 func wantRunForm() url.Values {
 	f := url.Values{
-		"Action":                            {"RunInstances"},
-		"Version":                           {"2016-11-15"},
-		"MinCount":                          {"1"},
-		"MaxCount":                          {"1"},
-		"ImageId":                           {"ami-0123456789abcdef0"},
-		"InstanceType":                      {"m7g.large"},
-		"SubnetId":                          {"subnet-0123456789abcdef0"},
-		"SecurityGroupId.1":                 {"sg-0123456789abcdef0"},
-		"InstanceInitiatedShutdownBehavior": {"stop"},
-		"MetadataOptions.HttpTokens":        {"required"},
-		"MetadataOptions.HttpPutResponseHopLimit": {"1"},
-		"MetadataOptions.HttpEndpoint":            {"enabled"},
-		"BlockDeviceMapping.1.DeviceName":         {"/dev/sda1"},
-		"BlockDeviceMapping.1.Ebs.Encrypted":      {"true"},
-		"UserData":                                {base64.StdEncoding.EncodeToString(testSpec().UserData)},
+		"Action":                         {"RunInstances"},
+		"Version":                        {"2016-11-15"},
+		"MinCount":                       {"1"},
+		"MaxCount":                       {"1"},
+		"ImageId":                        {"ami-0123456789abcdef0"},
+		"InstanceType":                   {"m7g.large"},
+		"NetworkInterface.1.DeviceIndex": {"0"},
+		"NetworkInterface.1.AssociatePublicIpAddress": {"false"},
+		"NetworkInterface.1.SubnetId":                 {"subnet-0123456789abcdef0"},
+		"NetworkInterface.1.SecurityGroupId.1":        {"sg-0123456789abcdef0"},
+		"InstanceInitiatedShutdownBehavior":           {"stop"},
+		"MetadataOptions.HttpTokens":                  {"required"},
+		"MetadataOptions.HttpPutResponseHopLimit":     {"1"},
+		"MetadataOptions.HttpEndpoint":                {"enabled"},
+		"BlockDeviceMapping.1.DeviceName":             {"/dev/sda1"},
+		"BlockDeviceMapping.1.Ebs.Encrypted":          {"true"},
+		"UserData":                                    {base64.StdEncoding.EncodeToString(testSpec().UserData)},
 	}
 	for i, rt := range []string{"instance", "volume"} {
 		p := fmt.Sprintf("TagSpecification.%d.", i+1)
@@ -130,26 +134,28 @@ func wantRunForm() url.Values {
 		f.Set(p+"Tag.1.Key", "qory:managed")
 		f.Set(p+"Tag.1.Value", "true")
 		f.Set(p+"Tag.2.Key", "qory:pool")
-		f.Set(p+"Tag.2.Value", "pool-7")
-		f.Set(p+"Tag.3.Key", "qory:run")
-		f.Set(p+"Tag.3.Value", "run-41")
+		f.Set(p+"Tag.2.Value", "np_0123456789abcdef")
+		f.Set(p+"Tag.3.Key", "qory:key")
+		f.Set(p+"Tag.3.Value", "dp_0123456789abcdef")
 	}
 	return f
 }
 
 // TestWireCreate pins the whole RunInstances request on the wire: every parameter,
-// the base64 user data, the tags and the client token, and nothing else.
+// the network interface with no public address, the base64 user data, the tags and
+// the client token, and nothing else. The subnet and the security group are only on
+// the network interface.
 func TestWireCreate(t *testing.T) {
 	c, s := newWireClient(t, reply{200, runReply})
 	m, err := c.Create(context.Background(), testSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.RunID != "run-41" || m.PoolID != "pool-7" || m.DispatchID != testSpec().DispatchID {
+	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.Key != testSpec().Key || m.PoolID != testSpec().PoolID {
 		t.Errorf("machine %+v", m)
 	}
 	want := wantRunForm()
-	want.Set("ClientToken", testSpec().DispatchID)
+	want.Set("ClientToken", testSpec().Key)
 	if !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
 	}
@@ -172,7 +178,7 @@ func TestWireCreateRetrySameToken(t *testing.T) {
 		t.Fatalf("%d requests, want 3", len(s.forms))
 	}
 	for i, f := range s.forms {
-		if f.Get("ClientToken") != testSpec().DispatchID {
+		if f.Get("ClientToken") != testSpec().Key {
 			t.Errorf("attempt %d: ClientToken %q", i+1, f.Get("ClientToken"))
 		}
 	}
@@ -184,24 +190,25 @@ func TestWireCreateErrors(t *testing.T) {
 	cases := []struct {
 		status   int
 		code     string
-		kind     Kind
+		kind     machines.Kind
 		attempts int
 	}{
-		{503, "RequestLimitExceeded", KindRetried, 3},
-		{500, "InternalError", KindRetried, 3},
-		{500, "InsufficientInstanceCapacity", KindRetried, 3},
-		{400, "InstanceLimitExceeded", KindLimit, 1},
-		{400, "VcpuLimitExceeded", KindLimit, 1},
-		{400, "IdempotentParameterMismatch", KindTokenMismatch, 1},
-		{400, "IdempotentInstanceTerminated", KindTokenTerminated, 1},
-		{400, "InvalidAMIID.NotFound", KindOther, 1},
-		{403, "UnauthorizedOperation", KindOther, 1},
+		{503, "RequestLimitExceeded", machines.KindRetry, 3},
+		{500, "InternalError", machines.KindRetry, 3},
+		{500, "InsufficientInstanceCapacity", machines.KindLimit, 3},
+		{400, "InstanceLimitExceeded", machines.KindLimit, 1},
+		{400, "VcpuLimitExceeded", machines.KindLimit, 1},
+		{400, "IdempotentParameterMismatch", machines.KindDefect, 1},
+		{400, "IdempotentInstanceTerminated", machines.KindOther, 1},
+		{400, "InvalidAMIID.NotFound", machines.KindDefect, 1},
+		{400, "InvalidParameterValue", machines.KindDefect, 1},
+		{403, "UnauthorizedOperation", machines.KindDefect, 1},
 	}
 	for _, tc := range cases {
 		c, s := newWireClient(t, reply{tc.status, errorXML(tc.code)})
 		_, err := c.Create(context.Background(), testSpec())
-		if Classify(err) != tc.kind || errorCode(err) != tc.code {
-			t.Errorf("%s: kind %v, code %q, want %v", tc.code, Classify(err), errorCode(err), tc.kind)
+		if kindOf(err) != tc.kind || errorCode(err) != tc.code {
+			t.Errorf("%s: kind %v, code %q, want %v", tc.code, kindOf(err), errorCode(err), tc.kind)
 		}
 		if len(s.forms) != tc.attempts {
 			t.Errorf("%s: %d attempts, want %d", tc.code, len(s.forms), tc.attempts)
@@ -218,7 +225,7 @@ func TestWireCheckRights(t *testing.T) {
 	}
 	got := s.forms[0]
 	token := got.Get("ClientToken")
-	if token == "" || token == testSpec().DispatchID {
+	if token == "" || token == testSpec().Key {
 		t.Errorf("ClientToken %q, want one the SDK sets", token)
 	}
 	got.Del("ClientToken")
@@ -230,7 +237,7 @@ func TestWireCheckRights(t *testing.T) {
 
 	c, _ = newWireClient(t, reply{403, errorXML("UnauthorizedOperation")})
 	err := c.CheckRights(context.Background(), testSpec())
-	const prefix = "Give the instance role the provisioner's EC2 rights: RunInstances dry run failed with UnauthorizedOperation: "
+	const prefix = "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
@@ -243,15 +250,15 @@ func TestWireListAndConsole(t *testing.T) {
 		return `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
 <reservationSet><item><reservationId>r-1</reservationId><instancesSet><item>
 <instanceId>` + id + `</instanceId><instanceState><code>80</code><name>stopped</name></instanceState>
-<clientToken>dsp-1</clientToken><tagSet><item><key>qory:run</key><value>run-41</value></item></tagSet>
+<clientToken>dp_0123456789abcdef</clientToken><tagSet><item><key>qory:key</key><value>dp_0123456789abcdef</value></item></tagSet>
 </item></instancesSet></item></reservationSet>` + next + `</DescribeInstancesResponse>`
 	}
 	c, s := newWireClient(t, reply{200, page("i-0aaaaaaaaaaaaaaa0", "<nextToken>page-2</nextToken>")}, reply{200, page("i-0bbbbbbbbbbbbbbb0", "")})
-	ms, err := c.List(context.Background(), "pool-7", StateStopped)
+	ms, err := c.List(context.Background(), "np_0123456789abcdef", StateStopped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].RunID != "run-41" {
+	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].Key != "dp_0123456789abcdef" {
 		t.Errorf("machines %+v", ms)
 	}
 	want := url.Values{
@@ -261,7 +268,7 @@ func TestWireListAndConsole(t *testing.T) {
 		"Filter.1.Name":    {"tag:qory:managed"},
 		"Filter.1.Value.1": {"true"},
 		"Filter.2.Name":    {"tag:qory:pool"},
-		"Filter.2.Value.1": {"pool-7"},
+		"Filter.2.Value.1": {"np_0123456789abcdef"},
 		"Filter.3.Name":    {"instance-state-name"},
 		"Filter.3.Value.1": {"stopped"},
 	}
@@ -287,25 +294,23 @@ func TestWireListAndConsole(t *testing.T) {
 	}
 }
 
-// TestWireTerminate pins TerminateInstances and the confirming DescribeInstances by
-// id on the wire.
+// TestWireTerminate pins the TerminateInstances request on the wire and the state
+// read from its answer.
 func TestWireTerminate(t *testing.T) {
 	c, s := newWireClient(t,
-		reply{200, `<TerminateInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><currentState><code>32</code><name>shutting-down</name></currentState><previousState><code>80</code><name>stopped</name></previousState></item></instancesSet></TerminateInstancesResponse>`},
-		reply{200, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-2</requestId><reservationSet><item><reservationId>r-1</reservationId><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><instanceState><code>48</code><name>terminated</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`})
+		reply{200, `<TerminateInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId><instancesSet><item><instanceId>i-0123456789abcdef0</instanceId><currentState><code>32</code><name>shutting-down</name></currentState><previousState><code>80</code><name>stopped</name></previousState></item></instancesSet></TerminateInstancesResponse>`})
 	const id = "i-0123456789abcdef0"
-	if err := c.Terminate(context.Background(), id); err != nil {
-		t.Fatal(err)
-	}
-	done, err := c.Terminated(context.Background(), id)
-	if err != nil || !done {
-		t.Errorf("done %v, error %v", done, err)
+	state, found, err := c.Terminate(context.Background(), id)
+	if err != nil || !found || state != StateShuttingDown {
+		t.Errorf("state %q, found %v, error %v", state, found, err)
 	}
 	if want := (url.Values{"Action": {"TerminateInstances"}, "Version": {"2016-11-15"}, "InstanceId.1": {id}}); !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("terminate\n%v\nwant\n%v", s.forms[0], want)
 	}
-	if want := (url.Values{"Action": {"DescribeInstances"}, "Version": {"2016-11-15"}, "InstanceId.1": {id}}); !reflect.DeepEqual(s.forms[1], want) {
-		t.Errorf("describe\n%v\nwant\n%v", s.forms[1], want)
+
+	c, _ = newWireClient(t, reply{400, errorXML("InvalidInstanceID.NotFound")})
+	if state, found, err := c.Terminate(context.Background(), id); err != nil || found || state != "" {
+		t.Errorf("NotFound: state %q, found %v, error %v", state, found, err)
 	}
 }
 

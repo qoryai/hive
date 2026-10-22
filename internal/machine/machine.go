@@ -1,6 +1,6 @@
-// Package machine creates, lists, reads and terminates the EC2 instances that the
-// provisioner starts for runs, one instance per run. It calls EC2 with the host's
-// instance role, through the AWS SDK's default credential chain.
+// Package machine makes, lists, reads and terminates EC2 instances for the EC2 machine
+// adapter, qory-machines-aws-ec2: one instance per key of a make request. It calls EC2
+// with the host's instance role, through the AWS SDK's default credential chain.
 package machine
 
 import (
@@ -13,13 +13,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/qoryai/hive/machines"
 )
 
 // The tags on every machine and its volume. A machine has all three.
 const (
 	TagManaged = "qory:managed"
 	TagPool    = "qory:pool"
-	TagRun     = "qory:run"
+	TagKey     = "qory:key"
 )
 
 // The machine states that EC2 reports, as Machine.State has them.
@@ -42,7 +44,7 @@ type API interface {
 	DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
 }
 
-// Client creates, lists, reads and terminates machines through an API.
+// Client makes, lists, reads and terminates machines through an API.
 type Client struct {
 	api API
 }
@@ -60,22 +62,22 @@ func NewFromConfig(cfg aws.Config) *Client {
 // LoadConfig loads the AWS configuration from the SDK's default chain. The region
 // comes from AWS_REGION or AWS_DEFAULT_REGION, then the shared config file, then the
 // instance metadata. LoadConfig then retrieves the credentials once, and returns an
-// error unless they come from the host's instance role: the provisioner stores no
-// AWS key.
+// error unless they come from the host's instance role: the adapter uses no stored AWS
+// key. Its errors are *machines.Error.
 func LoadConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("Set AWS_REGION, or run the provisioner on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %w", err)
+		return aws.Config{}, &machines.Error{Kind: machines.KindOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
 	}
 	if cfg.Region == "" {
-		return aws.Config{}, fmt.Errorf("Set AWS_REGION: the environment has no region, and the instance metadata returned none")
+		return aws.Config{}, &machines.Error{Kind: machines.KindDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("Attach an instance role to the host, and run the provisioner with IMDSv2 reachable: retrieving the AWS credentials failed: %w", err)
+		return aws.Config{}, &machines.Error{Kind: machines.KindOther, Message: fmt.Sprintf("Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: %v", err)}
 	}
 	if creds.Source != ec2rolecreds.ProviderName {
-		return aws.Config{}, fmt.Errorf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the provisioner's container, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)
+		return aws.Config{}, &machines.Error{Kind: machines.KindDefect, Message: fmt.Sprintf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
 	}
 	return cfg, nil
 }
@@ -86,10 +88,8 @@ type Machine struct {
 	ID string
 	// State is one of the State constants.
 	State string
-	// DispatchID is the instance's client token, which Create sets to the dispatch id.
-	DispatchID string
-	// PoolID and RunID are the values of the qory:pool and qory:run tags.
-	PoolID, RunID string
+	// Key and PoolID are the values of the qory:key and qory:pool tags.
+	Key, PoolID string
 	// LaunchTime is the time EC2 started the instance; zero when EC2 returned none.
 	LaunchTime time.Time
 }
@@ -98,7 +98,6 @@ type Machine struct {
 func fromInstance(in types.Instance) Machine {
 	m := Machine{
 		ID:         aws.ToString(in.InstanceId),
-		DispatchID: aws.ToString(in.ClientToken),
 		LaunchTime: aws.ToTime(in.LaunchTime),
 	}
 	if in.State != nil {
@@ -108,8 +107,8 @@ func fromInstance(in types.Instance) Machine {
 		switch aws.ToString(t.Key) {
 		case TagPool:
 			m.PoolID = aws.ToString(t.Value)
-		case TagRun:
-			m.RunID = aws.ToString(t.Value)
+		case TagKey:
+			m.Key = aws.ToString(t.Value)
 		}
 	}
 	return m

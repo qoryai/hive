@@ -14,11 +14,11 @@ import (
 // accepts.
 const pageSize = 1000
 
-// FindByToken returns the machine whose client token is dispatchID, and false when
-// EC2 has none. A terminated machine stays visible for about one hour; when EC2
-// returns more than one machine, FindByToken returns one that is not terminated.
-func (c *Client) FindByToken(ctx context.Context, dispatchID string) (Machine, bool, error) {
-	ms, err := c.describe(ctx, []types.Filter{filter("client-token", dispatchID)})
+// FindByToken returns the machine whose client token is key, and false when EC2 has
+// none. A terminated machine stays visible for about one hour; when EC2 returns more
+// than one machine, FindByToken returns one that is not terminated.
+func (c *Client) FindByToken(ctx context.Context, key string) (Machine, bool, error) {
+	ms, err := c.describe(ctx, []types.Filter{filter("client-token", key)})
 	if err != nil {
 		return Machine{}, false, err
 	}
@@ -63,44 +63,26 @@ func (c *Client) describe(ctx context.Context, filters []types.Filter) ([]Machin
 	return ms, nil
 }
 
-// Describe returns the machine with instance id id, and false when EC2 returns
-// InvalidInstanceID.NotFound or no instance. Right after Create, EC2 can return
-// NotFound for a machine that exists.
-func (c *Client) Describe(ctx context.Context, id string) (Machine, bool, error) {
-	out, err := c.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
+// Terminate sends TerminateInstances for the one instance id, and returns the
+// instance's state after the call, as TerminateInstances returns it, or "" when the
+// answer has no state for the id. It returns false when EC2 returns
+// InvalidInstanceID.NotFound: EC2 has no instance with the id, or the instance was
+// terminated long enough ago that EC2 no longer returns it. EC2 accepts the call again
+// for an instance that is already terminated.
+func (c *Client) Terminate(ctx context.Context, id string) (string, bool, error) {
+	out, err := c.api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
 	if errorCode(err) == codeInstanceIDNotFound {
-		return Machine{}, false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return Machine{}, false, wrap("DescribeInstances", err)
+		return "", false, wrap("TerminateInstances", err)
 	}
-	for _, r := range out.Reservations {
-		for _, i := range r.Instances {
-			if aws.ToString(i.InstanceId) == id {
-				return fromInstance(i), true, nil
-			}
+	for _, change := range out.TerminatingInstances {
+		if aws.ToString(change.InstanceId) == id && change.CurrentState != nil {
+			return string(change.CurrentState.Name), true, nil
 		}
 	}
-	return Machine{}, false, nil
-}
-
-// Terminate sends TerminateInstances for the one instance id. EC2 accepts it again
-// for a machine that is already terminated. Terminated confirms the result.
-func (c *Client) Terminate(ctx context.Context, id string) error {
-	_, err := c.api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
-	return wrap("TerminateInstances", err)
-}
-
-// Terminated reports whether DescribeInstances on instance id id returns state
-// terminated. It reads by id, because EC2 removes the tags of a terminated machine.
-// A machine that EC2 does not return counts as not confirmed: EC2 documents that
-// NotFound after TerminateInstances does not mean the machine is terminated.
-func (c *Client) Terminated(ctx context.Context, id string) (bool, error) {
-	m, found, err := c.Describe(ctx, id)
-	if err != nil || !found {
-		return false, err
-	}
-	return m.State == StateTerminated, nil
+	return "", true, nil
 }
 
 // Console returns the machine's latest console output as text, or "" when EC2 has
@@ -112,7 +94,7 @@ func (c *Client) Console(ctx context.Context, id string) (string, error) {
 	}
 	text, err := base64.StdEncoding.DecodeString(aws.ToString(out.Output))
 	if err != nil {
-		return "", fmt.Errorf("If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for %s that is not base64: %w", id, err)
+		return "", other(fmt.Sprintf("If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for %s that is not base64: %v", id, err))
 	}
 	return string(text), nil
 }

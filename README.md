@@ -1,6 +1,13 @@
 # qory-provisioner
 
-This repository builds `qory-provisioner`, a program with one command, `serve`.
+This repository builds two programs:
+
+- `qory-provisioner`, a program with one command, `serve`.
+- `qory-machines-aws-ec2`, the EC2 machine adapter. The provisioner runs it as
+  `qory-machines-aws-ec2 <command> --settings FILE` to make, list, read and delete EC2
+  instances, as package `machines` states the protocol. FILE is the adapter's
+  settings file, `aws-ec2.json`.
+
 `serve` is not built in this commit: it prints one error line on standard error and
 exits with status 2.
 
@@ -10,6 +17,7 @@ Use Go 1.27.1, the version in `go.mod` and `mise.toml`.
 
 ```
 go build -o qory-provisioner ./cmd/qory-provisioner
+go build -o qory-machines-aws-ec2 ./cmd/qory-machines-aws-ec2
 ```
 
 ## Run the checks
@@ -34,7 +42,8 @@ docker build --build-arg VERSION=dev -t qory-provisioner .
 ```
 
 The image runs `qory-provisioner serve` as uid 65532 and gid 65532, with the volume
-`/var/lib/qory-provisioner`, 0700. It sets `AWS_EC2_METADATA_V1_DISABLED=true`.
+`/var/lib/qory-provisioner`, 0700. It sets `AWS_EC2_METADATA_V1_DISABLED=true`. The
+image also contains the EC2 machine adapter at `/usr/local/bin/qory-machines-aws-ec2`.
 
 `.github/workflows/prerelease.yml` builds the image for linux/amd64 and linux/arm64
 when you push to the branch `prerelease`, or when you run the workflow from the

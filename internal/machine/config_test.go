@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/qoryai/hive/machines"
 )
 
 const testToken = "imds-token-marker"
@@ -58,36 +58,12 @@ func newIMDS(t *testing.T, paths map[string]string) (*httptest.Server, *imdsServ
 	return srv, s
 }
 
-// TestLocalIPv4 pins the read of local-ipv4 through the SDK's client with an IMDSv2
-// token, and the errors for an address that is not IPv4 and for a failed read.
-func TestLocalIPv4(t *testing.T) {
-	srv, s := newIMDS(t, map[string]string{"/latest/meta-data/local-ipv4": "10.0.1.25"})
-	md := imds.New(imds.Options{Endpoint: srv.URL})
-	addr, err := LocalIPv4(context.Background(), md)
-	if err != nil || addr.String() != "10.0.1.25" {
-		t.Errorf("address %v, error %v", addr, err)
-	}
-	if len(s.gets) != 1 || s.gets[0] != "/latest/meta-data/local-ipv4" {
-		t.Errorf("reads %v", s.gets)
-	}
-
-	for value, want := range map[string]string{
-		"fd00::1":   `Check the host's network interface: local-ipv4 in the instance metadata is "fd00::1", not an IPv4 address`,
-		"not-an-ip": `Check the host's network interface: local-ipv4 in the instance metadata is "not-an-ip", not an IPv4 address`,
-	} {
-		srv, _ := newIMDS(t, map[string]string{"/latest/meta-data/local-ipv4": value})
-		_, err := LocalIPv4(context.Background(), imds.New(imds.Options{Endpoint: srv.URL}))
-		if err == nil || err.Error() != want {
-			t.Errorf("%q: error %v, want %q", value, err, want)
-		}
-	}
-
-	srv, _ = newIMDS(t, nil)
-	md = imds.New(imds.Options{Endpoint: srv.URL, Retryer: aws.NopRetryer{}})
-	_, err = LocalIPv4(context.Background(), md)
-	const prefix = "Run the provisioner on an EC2 instance with IMDSv2 reachable from its container: reading local-ipv4 from the instance metadata failed: "
-	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
-		t.Errorf("error %v, want the prefix %q", err, prefix)
+// wantKind fails t unless err is a *machines.Error of kind.
+func wantKind(t *testing.T, err error, kind machines.Kind) {
+	t.Helper()
+	var e *machines.Error
+	if !errors.As(err, &e) || e.Kind != kind {
+		t.Errorf("error %#v, want a *machines.Error of kind %s", err, kind)
 	}
 }
 
@@ -178,7 +154,7 @@ func TestLoadConfigRegion(t *testing.T) {
 // and contains none of the keys, even when the instance role is there too.
 func TestLoadConfigRefusesOtherCredentials(t *testing.T) {
 	const keyID, secret = "AKIAENVMARKER00001", "env-secret-marker-93be"
-	const prefix = "Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the provisioner's container, so the AWS SDK uses the instance role: the credentials came from "
+	const prefix = "Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from "
 	for name, set := range map[string]func(t *testing.T){
 		"environment": func(t *testing.T) {
 			t.Setenv("AWS_ACCESS_KEY_ID", keyID)
@@ -201,6 +177,7 @@ func TestLoadConfigRefusesOtherCredentials(t *testing.T) {
 			if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), ", not EC2RoleProvider") {
 				t.Fatalf("error %v, want the prefix %q", err, prefix)
 			}
+			wantKind(t, err, machines.KindDefect)
 			for _, marker := range []string{keyID, secret, roleKeyID, roleSecret, roleToken} {
 				if strings.Contains(err.Error(), marker) {
 					t.Errorf("the error contains the marker %q", marker)
@@ -216,10 +193,11 @@ func TestLoadConfigNoRole(t *testing.T) {
 	isolateAWSEnv(t, srv.URL)
 	t.Setenv("AWS_REGION", "test-region-1")
 	_, err := LoadConfig(context.Background())
-	const prefix = "Attach an instance role to the host, and run the provisioner with IMDSv2 reachable: retrieving the AWS credentials failed: "
+	const prefix = "Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
+	wantKind(t, err, machines.KindOther)
 }
 
 // TestLoadConfigNoRegion pins the error when neither the environment nor the
@@ -228,10 +206,11 @@ func TestLoadConfigNoRegion(t *testing.T) {
 	srv, _ := newIMDS(t, nil)
 	isolateAWSEnv(t, srv.URL)
 	_, err := LoadConfig(context.Background())
-	const prefix = "Set AWS_REGION, or run the provisioner on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: "
+	const prefix = "Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
+	wantKind(t, err, machines.KindOther)
 }
 
 // TestLoadConfigEmptyRegion pins the error when the metadata returns an empty region.
@@ -239,7 +218,7 @@ func TestLoadConfigEmptyRegion(t *testing.T) {
 	srv, _ := newIMDS(t, map[string]string{"/latest/dynamic/instance-identity/document": `{"region": ""}`})
 	isolateAWSEnv(t, srv.URL)
 	_, err := LoadConfig(context.Background())
-	const prefix = "Set AWS_REGION, or run the provisioner on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: "
+	const prefix = "Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.Contains(err.Error(), "did not return a region value") {
 		t.Errorf("error %v, want the prefix %q and the SDK's cause", err, prefix)
 	}
