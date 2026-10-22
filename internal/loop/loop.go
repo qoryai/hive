@@ -112,9 +112,8 @@ type Apiary interface {
 	// Claim claims a request for one machine. It returns false and no error when no
 	// work could be claimed within the claim's wait.
 	Claim(ctx context.Context) (Claim, bool, error)
-	// Dispatched sends dispatched for the dispatch, with the machine id as the
-	// external ref. Its error wraps [ErrGone] or [ErrLeaseExpired] for those
-	// refusals.
+	// Dispatched sends dispatched for the dispatch, whose machine is machineID. Its
+	// error wraps [ErrGone] or [ErrLeaseExpired] for those refusals.
 	Dispatched(ctx context.Context, dispatchID, machineID string) error
 	// Release gives the dispatch back, with a reason of 1 to 200 characters. Its error
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.
