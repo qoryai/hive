@@ -51,6 +51,9 @@ type answer struct {
 	resent bool
 }
 
+// reachFix starts the error of a request with no answer.
+const reachFix = "check the route from this host to the Qory Apiary URL: "
+
 // retryLine is the line logged before a try is sent again.
 const retryLine = "a try failed, so the client sends the request again after the wait"
 
@@ -66,11 +69,11 @@ const retryLine = "a try failed, so the client sends the request again after the
 func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 	b, err := json.Marshal(req.body(""))
 	if err != nil {
-		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not build the request", req.what)
 	}
 	id := http.MethodPost + " " + c.cfg.URL + req.path + "\n" + string(b)
 	if accesskey.ContainsSecret(id) {
-		return nil, fmt.Errorf("%s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
 	}
 	wait := firstWait
 	for try := 1; ; try++ {
@@ -131,10 +134,10 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	b, err := json.Marshal(req.body(contracts.FormatTime(t)))
 	if err != nil {
-		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not build the request", req.what)
 	}
 	if accesskey.ContainsSecret(string(b)) {
-		return nil, fmt.Errorf("%s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
 	}
 	s, err := schema(req.schema)
 	if err != nil {
@@ -142,7 +145,7 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	}
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(b))
 	if err != nil || s.Validate(doc) != nil {
-		return nil, fmt.Errorf("%s: the request fails %s, so the client did not send it", req.what, req.schema)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request fails %s, so the client did not send it", req.what, req.schema)
 	}
 	return b, nil
 }
@@ -156,13 +159,13 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 func (c *Client) send(ctx context.Context, req request, body []byte) (*answer, error) {
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.URL+req.path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("%s: the client could not build the request", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not build the request", req.what)
 	}
 	sig, err := c.cfg.Key.SignRequest(accesskey.Request{
 		AccessKeyID: c.cfg.KeyID, InstanceID: c.cfg.InstanceID, Method: http.MethodPost, Target: hr.URL.RequestURI(), Body: body,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: the client could not sign the request", req.what)
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not sign the request", req.what)
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("User-Agent", UserAgent)
@@ -188,7 +191,7 @@ func (c *Client) send(ctx context.Context, req request, body []byte) (*answer, e
 	}
 	b, tooLarge, err := readLimited(resp.Body, resp.ContentLength, limit)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w: the client could not read the answer", req.what, ErrUnreachable)
+		return nil, fmt.Errorf(reachFix+"%s: %w: the client could not read the answer", req.what, ErrUnreachable)
 	}
 	if tooLarge {
 		return &answer{status: resp.StatusCode, tooLarge: true, limit: limit}, nil
@@ -218,9 +221,9 @@ func unreachable(what string, err error) error {
 		err = u.Err
 	}
 	if accesskey.ContainsSecret(err.Error()) {
-		return fmt.Errorf("%s: %w", what, ErrUnreachable)
+		return fmt.Errorf(reachFix+"%s: %w", what, ErrUnreachable)
 	}
-	return fmt.Errorf("%s: %w: %w", what, ErrUnreachable, err)
+	return fmt.Errorf(reachFix+"%s: %w: %w", what, ErrUnreachable, err)
 }
 
 // readLimited reads r, whose Content-Length is length or -1, up to limit bytes, into
@@ -279,7 +282,7 @@ func schema(name string) (*jsonschema.Schema, error) {
 	}
 	s, err := contracts.CompileProvisioner(name)
 	if err != nil {
-		return nil, fmt.Errorf("the contract's schema %s does not compile", name)
+		return nil, fmt.Errorf("report this defect in the provisioner: the contract's schema %s does not compile", name)
 	}
 	schemas.Store(name, s)
 	return s, nil

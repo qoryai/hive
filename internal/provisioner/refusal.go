@@ -141,18 +141,35 @@ type Refusal struct {
 func (r *Refusal) Error() string {
 	switch {
 	case r.TooLarge:
-		return fmt.Sprintf("%s: the answer with status %d is larger than %d bytes, so the client dropped it before it read the signature", r.What, r.Status, r.Limit)
+		return fmt.Sprintf("check that the Qory Apiary URL reaches Qory Apiary and no other server: %s: the answer with status %d is larger than %d bytes, so the client dropped it before it read the signature", r.What, r.Status, r.Limit)
 	case !r.Signed && r.Status == http.StatusUnauthorized:
 		return "check that the access key is approved in Qory Apiary and that this machine's clock is within 300 seconds of the correct time: " +
 			r.What + " returned 401 unauthorized, which the client does not take as a revoked key"
 	case !r.Signed:
-		return fmt.Sprintf("%s: the answer with status %d has no valid signature under the pin, so the client used nothing in it", r.What, r.Status)
+		return fmt.Sprintf("check that the Qory Apiary URL reaches Qory Apiary and that the pin is the one from the enrolment: %s: the answer with status %d has no valid signature under the pin, so the client used nothing in it", r.What, r.Status)
 	case r.Code == "":
-		return fmt.Sprintf("%s: Qory Apiary returned %d", r.What, r.Status)
+		return fmt.Sprintf("%s%s: Qory Apiary returned %d", r.fix(), r.What, r.Status)
 	case r.RetryAfter > 0:
-		return fmt.Sprintf("%s: Qory Apiary returned %d %s with a wait of %s", r.What, r.Status, r.Code, r.RetryAfter)
+		return fmt.Sprintf("%s%s: Qory Apiary returned %d %s with a wait of %s", r.fix(), r.What, r.Status, r.Code, r.RetryAfter)
 	}
-	return fmt.Sprintf("%s: Qory Apiary returned %d %s", r.What, r.Status, r.Code)
+	return fmt.Sprintf("%s%s: Qory Apiary returned %d %s", r.fix(), r.What, r.Status, r.Code)
+}
+
+// fix is the start of a signed refusal's text: what the operator can do, or that the
+// refusal is a defect in the provisioner, or "" for a refusal the provisioner acts on
+// with no operator, such as 410 gone or 409 lease_expired.
+func (r *Refusal) fix() string {
+	switch {
+	case r.Status == http.StatusBadRequest:
+		return "report this defect in the provisioner: "
+	case r.Code == "forbidden":
+		return "check in Qory Apiary that the access key is this node pool's key and allows the request: "
+	case r.Code == "no_gateway":
+		return "give the node pool a gateway in Qory Apiary that serves its workspace and has an active access key: "
+	case r.Code == "not_found":
+		return "check that the Qory Apiary URL is the origin of a Qory Apiary that serves provisioner/v1: "
+	}
+	return ""
 }
 
 // Is reports whether the refusal is target: [ErrTooLarge] for an answer over its bound,

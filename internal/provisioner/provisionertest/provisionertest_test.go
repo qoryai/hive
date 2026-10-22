@@ -100,4 +100,17 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 	if status, signed, _ := post(t, s, s.Pool, "/v1/elsewhere", claimAt(now), nil); status != 404 || !signed {
 		t.Errorf("an unknown route: %d signed %v", status, signed)
 	}
+	// A signature whose request failed before its body passed the schema is not seen:
+	// the same bytes, with the revision header, which the signature does not cover,
+	// set right, get the 204.
+	again := claimAt(now.Add(time.Second))
+	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, func(h http.Header) { h.Set("X-Qory-Contract-Version", "2") }); status != 400 || !signed {
+		t.Errorf("revision 2: %d signed %v", status, signed)
+	}
+	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, nil); status != 204 || !signed {
+		t.Errorf("the same bytes at revision 3: %d signed %v", status, signed)
+	}
+	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, nil); status != 401 || signed {
+		t.Errorf("the same bytes again: %d signed %v", status, signed)
+	}
 }

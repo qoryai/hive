@@ -5,11 +5,13 @@
 // mebibyte gets an unsigned 413, a POST of another content type an unsigned 415, a
 // signing header sent twice an unsigned 400 bad_request; then the signature is checked
 // under the pool's key, and a signature that fails, or that the fake has seen before,
-// gets the unsigned 401. After those checks the fake signs every answer under
+// gets the unsigned 401. The answers of the next checks are signed under
 // [Server.Signer]: an instance id outside its pattern gets a signed 400 bad_request;
-// another revision than 3 a signed 400 unsupported_contract_version; a body that fails its schema, a signed 400
-// invalid_request; a time more than 300 seconds from [Server.Now], the unsigned 401.
-// Then a reply that [Server.Script] queued for the route is sent, else the model's.
+// another revision than 3 a signed 400 unsupported_contract_version; a body that fails
+// its schema a signed 400 invalid_request. The fake marks a signature as seen once the
+// body passes its schema, as Qory Apiary does. A time more than 300 seconds from
+// [Server.Now] then gets the unsigned 401. After those checks the fake signs every
+// answer: a reply that [Server.Script] queued for the route, else the model's.
 //
 // The model keeps a queue of runs, which [Server.Offer] fills, and the dispatches it
 // made of them. A claim takes the first run waiting into a new dispatch, or is held up
@@ -474,9 +476,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	c.Time = timeOf(body)
 	s.mu.Lock()
 	c.Replayed = s.seen[sig]
-	if c.Verified {
-		s.seen[sig] = true
-	}
 	s.mu.Unlock()
 
 	ans, rep, signed := s.decide(r, &c, route, id, body)
@@ -555,6 +554,14 @@ func (s *Server) decide(r *http.Request, c *Call, route Route, id string, body [
 	}
 	if !validBody(route, body) {
 		return refusal(http.StatusBadRequest, "invalid_request"), Reply{}, true
+	}
+	sig := r.Header.Get(accesskey.HeaderSignature)
+	s.mu.Lock()
+	c.Replayed = s.seen[sig]
+	s.seen[sig] = true
+	s.mu.Unlock()
+	if c.Replayed {
+		return refusal(http.StatusUnauthorized, "unauthorized"), Reply{}, false
 	}
 	if c.Time.IsZero() || c.Time.Sub(s.now()).Abs() > Window {
 		return refusal(http.StatusUnauthorized, "unauthorized"), Reply{}, false

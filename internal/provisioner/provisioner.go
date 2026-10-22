@@ -297,11 +297,16 @@ func (c *Client) Dispatched(ctx context.Context, dispatchID string) error {
 
 // Release sends POST /v1/dispatches/<dispatchID>/release, release.schema.json: the
 // provisioner releases the run, for reason, display text of 1 to [MaxReason]
-// characters, with retry set when the run should go back to the queue. Before the
-// handover, retry true queues the same run and false ends it; after the handover, the
-// release ends the run, and retry true queues a new run. The answer is a signed 204. A
-// refusal is a [*Refusal]: [ErrForbidden], [ErrNotFound], [ErrGone] or
-// [ErrLeaseExpired], each a dispatch that is over already, or [ErrRateLimited].
+// characters. Before the handover, the release ends the dispatch: with retry true the
+// same run waits for another claim, except a run of the step prebuild whose collection
+// and node pool have another prebuild run waiting, which ends; with retry false the run
+// ends. After the handover, the release ends the run: with retry true Qory Apiary
+// queues a new run, with a new run id and run key, except for the step prebuild, where
+// retry true is read as false. The answer is a signed 204. A refusal is a [*Refusal]:
+// [ErrForbidden], a dispatch that is unknown or of another node pool; [ErrNotFound], a
+// route Qory Apiary does not serve; [ErrGone], a dispatch that ended, a release after
+// the run's end among them; [ErrLeaseExpired], a dispatch whose lease lapsed before its
+// handover while its run has not ended; or [ErrRateLimited].
 func (c *Client) Release(ctx context.Context, dispatchID, reason string, retry bool) error {
 	what, err := ofDispatch("the release of ", dispatchID)
 	if err != nil {
@@ -319,7 +324,7 @@ func (c *Client) Release(ctx context.Context, dispatchID, reason string, retry b
 // contract's form. Its error does not contain dispatchID, which may be any text.
 func ofDispatch(prefix, dispatchID string) (string, error) {
 	if !dispatchIDShape.MatchString(dispatchID) {
-		return "", fmt.Errorf("%sa dispatch: the dispatch id is not dp_ and 16 lower-case Crockford base32 characters", prefix)
+		return "", fmt.Errorf("report this defect in the provisioner: %sa dispatch: the dispatch id is not dp_ and 16 lower-case Crockford base32 characters", prefix)
 	}
 	return prefix + dispatchID, nil
 }

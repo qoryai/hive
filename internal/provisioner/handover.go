@@ -62,9 +62,11 @@ type Handed struct {
 // [ErrUnavailable], or [ErrRateLimited]. Handover returns a signed 503 unavailable after
 // one try: the handover took no effect, and the contract allows it again within the
 // lease, as after a 409 no_gateway. ctx bounds every try, so a deadline at the lease's
-// end stops them there. After a 409 handed_over whose [Refusal.Resent] is set, the
-// contract requires the provisioner to stop the job and release the run with retry
-// true: the run key is never sent again.
+// end stops them there. A context error after a try was sent may follow a handover
+// that Qory Apiary completed: the run may then be handed over, with its run key lost,
+// and a handover sent again gets 409 handed_over. After a 409 handed_over whose
+// [Refusal.Resent] is set, the contract requires the provisioner to stop the job and
+// release the run with retry true: the run key is never sent again.
 //
 // The answer's bytes are cleared once read, and the run key is unquoted from them
 // straight into its [Hidden]: the schema checks a copy in which a stand-in takes the
@@ -75,7 +77,7 @@ func (c *Client) Handover(ctx context.Context, dispatchID, runID string) (Handed
 		return Handed{}, err
 	}
 	if !runIDShape.MatchString(runID) {
-		return Handed{}, fmt.Errorf("%s: the run id is not a UUID in the canonical lower-case form", what)
+		return Handed{}, fmt.Errorf("report this defect in the provisioner: %s: the run id is not a UUID in the canonical lower-case form", what)
 	}
 	ans, err := c.do(ctx, request{
 		what: what, kind: kindHandover, path: routeDispatches + dispatchID + "/handover",
