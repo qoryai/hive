@@ -405,18 +405,28 @@ func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
 	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
 	h.start()
 	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
-	// Once a watch sends dispatched, the claim path has left the dispatch, and it
-	// waits for an entry to leave the journal. The watch skips the dispatch while the
-	// claim path works on it, so the test runs watches until one sends dispatched.
 	sent := func() int {
 		return len(slices.DeleteFunc(h.apiary.takeCallsKeep(), func(c string) bool {
 			return c != "dispatched "+dispatchA+" "+machineID(1)
 		}))
 	}
-	for deadline := time.Now().Add(patience); sent() < 2; {
+	// The fake clock stands still until the claim path has sent dispatched, so that
+	// no watch runs while the claim path works on the dispatch.
+	for deadline := time.Now().Add(patience); sent() < 1; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
+			t.Fatal("the claim path did not send dispatched")
+		}
+	}
+	// The claim path leaves the dispatch right after it sends dispatched, and then
+	// waits for an entry to leave the journal. A watch skips the dispatch while the
+	// claim path works on it, so the test runs up to 5 watches, 10 ms apart, until
+	// one sends dispatched: far fewer than the 75 watches of the lifetime and 15
+	// minutes.
+	for n := 0; sent() < 2; n++ {
+		if n == 5 {
 			t.Fatal("no watch sent dispatched")
 		}
+		time.Sleep(10 * time.Millisecond)
 		h.tick()
 	}
 	if n := h.apiary.claimCount(); n != 1 {
