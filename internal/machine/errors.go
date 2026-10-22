@@ -43,14 +43,14 @@ type Error struct {
 }
 
 // settingsFile is how an error refers to the adapter's settings file.
-const settingsFile = "the EC2 adapter's settings file aws-ec2.json"
+const settingsFile = "aws-ec2.json"
 
 // Error starts with what the operator does, then the cause.
 func (e *Error) Error() string {
 	var maxAttempts *retry.MaxAttemptsError
 	switch {
 	case e.Code == codeCapacity:
-		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s, because EC2 has no capacity for the instance type in the subnet's availability zone: %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s in the subnet's zone: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeSubnetFull:
 		return fmt.Sprintf("Wait until machines end, or set subnet_id in %s to a subnet with free addresses: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Kind == contracts.FailureLimit:
@@ -58,19 +58,19 @@ func (e *Error) Error() string {
 	case e.Code == codeUnauthorized:
 		return fmt.Sprintf("Give the instance role the EC2 rights that the EC2 machine adapter needs: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code == codeTokenMismatch:
-		return fmt.Sprintf("Report this defect in the provisioner, unless %s changed after the first make for this key: %s was sent twice for one key with different parameters, and EC2 returned %s: %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Report this defect in the provisioner, unless %s changed since the first make for this key: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeTokenTerminated:
 		return fmt.Sprintf("No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: %v", e.Err)
 	case e.Kind == contracts.FailureRetry && errors.As(e.Err, &maxAttempts):
-		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
+		return fmt.Sprintf("If this repeats, check EC2's service health and the account's request rate in this region: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
 	case e.Kind == contracts.FailureRetry && errors.Is(e.Err, context.DeadlineExceeded):
 		return fmt.Sprintf("If this repeats, check the network path to EC2: %s did not finish within its time limit: %v", e.Op, e.Err)
 	case e.Kind == contracts.FailureRetry:
-		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed with an error that the SDK retries: %v", e.Op, e.Err)
+		return fmt.Sprintf("If this repeats, check EC2's service health and the account's request rate in this region: %s failed with an error the SDK retries: %v", e.Op, e.Err)
 	case e.Code == codeInstanceIDNotFound:
-		return fmt.Sprintf("Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return %s for an instance that exists: %s failed: %v", e.Code, e.Op, e.Err)
+		return fmt.Sprintf("Check that the instance exists in this region: %s failed with %s, which EC2 can return right after RunInstances: %v", e.Op, e.Code, e.Err)
 	case e.Code != "":
-		return fmt.Sprintf("Look up EC2 error code %s in the EC2 API reference, and check %s and the instance role against it: %s failed: %v", e.Code, settingsFile, e.Op, e.Err)
+		return fmt.Sprintf("Look up EC2 error code %s, then check %s and the instance role: %s failed: %v", e.Code, settingsFile, e.Op, e.Err)
 	case errors.Is(e.Err, context.Canceled):
 		return fmt.Sprintf("No action needed: %s stopped when its context ended: %v", e.Op, e.Err)
 	default:
