@@ -155,3 +155,38 @@ func TestARequestWithASecretIsNotSent(t *testing.T) {
 		t.Errorf("err %v, logged %s", err, log)
 	}
 }
+
+// TestAMachineLogOverItsBoundHasNoMarker uploads a log as an adapter returns it: marker
+// lines of the run code, the run key and the access key secret in upper and lower case
+// at its start and at its end, around lines that JSON escapes to more than a mebibyte.
+// The body sent is within the request's bound, truncated is set, the log is the end of
+// the log with each marker line replaced, and no request contains a marker.
+func TestAMachineLogOverItsBoundHasNoMarker(t *testing.T) {
+	srv, c, _, log := setup(t)
+	cl := claimed(t, srv, c, provisionertest.Work{})
+	cl.RunCode.Clear()
+	markers := "run code " + markerCode + "\nrun key " + strings.ToUpper(markerKey) + "\nkey " + markerSecret + "\n"
+	sent := markers + strings.Repeat("<<<<<<<<<\n", 70<<10) + markers + "end\n"
+	if err := c.MachineLog(context.Background(), cl.DispatchID, sent, false); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := srv.Dispatch(cl.DispatchID)
+	body := last(t, srv).Body
+	hidden := "[hidden: the line contained what looks like an access key secret, a run key or a run code]\n"
+	switch {
+	case d.MachineLog == nil:
+		t.Fatal("no machine log")
+	case !d.MachineLog.Truncated || len(body) > contracts.MaxRequest || len(d.MachineLog.Log) > provisioner.MaxLog:
+		t.Errorf("truncated %v, a body of %d bytes", d.MachineLog.Truncated, len(body))
+	case !strings.HasSuffix(d.MachineLog.Log, "<<<<<<<<<\n"+strings.Repeat(hidden, 3)+"end\n"):
+		t.Error("the end of the log is not the log's end with each marker line replaced")
+	}
+	for _, call := range srv.Calls() {
+		if l := leaked(string(call.Body)); l != "" {
+			t.Errorf("%s: a request contains %q", call.Route, l)
+		}
+	}
+	if l := leaked(log.String()); l != "" {
+		t.Errorf("the log contains %q", l)
+	}
+}
