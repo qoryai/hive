@@ -21,8 +21,9 @@ entry`. Two provisioners of one node pool therefore delete each other's machines
 also machines that run a dispatch.
 
 When you rotate the key, which means a new provisioner with a new access key for the
-node pool, stop the old provisioner before you start the new one. The new provisioner
-deletes the machines that the old one made, also those that run a dispatch.
+node pool, stop the old provisioner before you start the new one. A new provisioner with a new
+state folder starts with an empty journal, so it deletes the machines that the old one
+made, also those that run a dispatch.
 
 ## Instance role policy
 
