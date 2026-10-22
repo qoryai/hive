@@ -36,14 +36,15 @@ func stages(t *testing.T) []stage {
 	return all
 }
 
-// TestDockerfileBuildsTheProvisioner pins the Dockerfile's two stages. The build stage
-// runs on the platform of the machine that builds and cross-compiles the program for
-// the image's platform, so one build makes the images of linux/amd64 and linux/arm64.
-// The image, the last stage, is on the pinned distroless base, contains the machine's
-// start unit at /usr/share/qory-provisioner/machine/, runs as 65532:65532, keeps its
-// state directory in a volume, turns off IMDSv1 for an AWS SDK, and runs
-// qory-provisioner serve.
-func TestDockerfileBuildsTheProvisioner(t *testing.T) {
+// TestDockerfileBuildsBothPrograms pins the Dockerfile's two stages. The build stage
+// runs on the platform of the machine that builds and cross-compiles the provisioner
+// and the EC2 machine adapter for the image's platform, so one build makes the images
+// of linux/amd64 and linux/arm64. The image, the last stage, is on the pinned
+// distroless base, contains the adapter at /usr/local/bin/qory-machines-aws-ec2 and
+// the machine's start unit at /usr/share/qory-provisioner/machine/, runs as
+// 65532:65532, keeps its state directory in a volume, turns off IMDSv1 for an AWS SDK,
+// and runs qory-provisioner serve.
+func TestDockerfileBuildsBothPrograms(t *testing.T) {
 	all := stages(t)
 	if len(all) != 2 {
 		t.Fatalf("the Dockerfile has %d stages, want 2", len(all))
@@ -67,10 +68,13 @@ func TestDockerfileBuildsTheProvisioner(t *testing.T) {
 			"ARG TARGETARCH",
 			`RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \`,
 			"-o /out/qory-provisioner ./cmd/qory-provisioner",
+			`RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w" \`,
+			"-o /out/qory-machines-aws-ec2 ./cmd/qory-machines-aws-ec2",
 			"RUN mkdir -p /out/var/lib/qory-provisioner && chmod 0700 /out/var/lib/qory-provisioner",
 		}},
 		{"image", image, []string{
 			"COPY --from=build /out/qory-provisioner /qory-provisioner",
+			"COPY --from=build /out/qory-machines-aws-ec2 /usr/local/bin/qory-machines-aws-ec2",
 			"COPY --chmod=0644 machine/qory-machine.service /usr/share/qory-provisioner/machine/qory-machine.service",
 			"COPY --chmod=0755 machine/qory-machine-start /usr/share/qory-provisioner/machine/qory-machine-start",
 			"COPY --from=build --chown=65532:65532 /out/var/lib/ /var/lib/",
@@ -93,8 +97,8 @@ func TestDockerfileBuildsTheProvisioner(t *testing.T) {
 			builds++
 		}
 	}
-	if builds != 1 {
-		t.Errorf("the build stage has %d builds, want 1", builds)
+	if builds != 2 {
+		t.Errorf("the build stage has %d builds, want 2", builds)
 	}
 	if got := image.lines[len(image.lines)-1]; got != `CMD ["serve"]` {
 		t.Errorf("the image's last instruction is %q, want CMD [\"serve\"]", got)

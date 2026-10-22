@@ -14,9 +14,26 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	"github.com/qoryai/hive/machines"
 )
 
-// instance returns an EC2 instance with id, state, client token and the run's tags.
+// kindOf returns the kind of err: the Kind of an *Error or of a *machines.Error in its
+// chain, or "" for any other error.
+func kindOf(err error) machines.Kind {
+	var call *Error
+	if errors.As(err, &call) {
+		return call.Kind
+	}
+	var failure *machines.Error
+	if errors.As(err, &failure) {
+		return failure.Kind
+	}
+	return ""
+}
+
+// instance returns an EC2 instance with id, state, client token and the tags of
+// testSpec.
 func instance(id, state, token string) types.Instance {
 	return types.Instance{
 		InstanceId:  aws.String(id),
@@ -25,39 +42,46 @@ func instance(id, state, token string) types.Instance {
 		LaunchTime:  aws.Time(time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)),
 		Tags: []types.Tag{
 			{Key: aws.String(TagManaged), Value: aws.String("true")},
-			{Key: aws.String(TagPool), Value: aws.String("pool-7")},
-			{Key: aws.String(TagRun), Value: aws.String("run-41")},
+			{Key: aws.String(TagPool), Value: aws.String("np_0123456789abcdef")},
+			{Key: aws.String(TagKey), Value: aws.String(token)},
 		},
 	}
 }
 
-// TestCreateInput pins every field of the RunInstances input that Create sends.
+// TestCreateInput pins every field of the RunInstances input that Create sends: the
+// subnet and the security group only on the network interface, which has no public
+// address, the IMDSv2 options, the stop on shutdown, the encrypted root volume, and
+// the tags qory:managed, qory:pool and qory:key on the instance and its volume.
 func TestCreateInput(t *testing.T) {
-	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
-		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, testSpec().DispatchID)}}, nil
-	}}
 	spec := testSpec()
+	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
+		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.Key)}}, nil
+	}}
 	m, err := New(f).Create(context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, DispatchID: spec.DispatchID, PoolID: "pool-7", RunID: "run-41", LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
+	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, Key: spec.Key, LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
 	if m != want {
 		t.Errorf("machine %+v, want %+v", m, want)
 	}
 	tags := []types.Tag{
 		{Key: aws.String("qory:managed"), Value: aws.String("true")},
-		{Key: aws.String("qory:pool"), Value: aws.String("pool-7")},
-		{Key: aws.String("qory:run"), Value: aws.String("run-41")},
+		{Key: aws.String("qory:pool"), Value: aws.String("np_0123456789abcdef")},
+		{Key: aws.String("qory:key"), Value: aws.String("dp_0123456789abcdef")},
 	}
 	wantIn := &ec2.RunInstancesInput{
-		ClientToken:                       aws.String(spec.DispatchID),
-		MinCount:                          aws.Int32(1),
-		MaxCount:                          aws.Int32(1),
-		ImageId:                           aws.String("ami-0123456789abcdef0"),
-		InstanceType:                      types.InstanceType("m7g.large"),
-		SubnetId:                          aws.String("subnet-0123456789abcdef0"),
-		SecurityGroupIds:                  []string{"sg-0123456789abcdef0"},
+		ClientToken:  aws.String("dp_0123456789abcdef"),
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		ImageId:      aws.String("ami-0123456789abcdef0"),
+		InstanceType: types.InstanceType("m7g.large"),
+		NetworkInterfaces: []types.InstanceNetworkInterfaceSpecification{{
+			DeviceIndex:              aws.Int32(0),
+			AssociatePublicIpAddress: aws.Bool(false),
+			SubnetId:                 aws.String("subnet-0123456789abcdef0"),
+			Groups:                   []string{"sg-0123456789abcdef0"},
+		}},
 		InstanceInitiatedShutdownBehavior: types.ShutdownBehaviorStop,
 		MetadataOptions: &types.InstanceMetadataOptionsRequest{
 			HttpTokens:              types.HttpTokensStateRequired,
@@ -80,8 +104,8 @@ func TestCreateInput(t *testing.T) {
 	if !reflect.DeepEqual(f.runs[0], wantIn) {
 		t.Errorf("input\n%+v\nwant\n%+v", f.runs[0], wantIn)
 	}
-	if f.runs[0].IamInstanceProfile != nil || f.runs[0].KeyName != nil {
-		t.Error("the input has an instance profile or a key pair")
+	if f.runs[0].IamInstanceProfile != nil || f.runs[0].KeyName != nil || f.runs[0].SubnetId != nil || f.runs[0].SecurityGroupIds != nil {
+		t.Error("the input has an instance profile, a key pair, or a subnet or security group outside the network interface")
 	}
 }
 
@@ -116,80 +140,86 @@ func TestCreateUserDataBound(t *testing.T) {
 	}
 	spec.UserData = []byte(strings.Repeat("a", MaxUserData+1))
 	_, err := c.Create(context.Background(), spec)
-	const want = "Report this defect in the provisioner: the user data has 16385 bytes, and EC2 accepts at most 16384"
-	if err == nil || err.Error() != want {
-		t.Errorf("16385 bytes: error %v, want %q", err, want)
+	const want = "Report this defect in the provisioner: the start data has 16385 bytes, and EC2 accepts at most 16384 bytes of user data"
+	if err == nil || err.Error() != want || kindOf(err) != machines.KindDefect {
+		t.Errorf("16385 bytes: error %v, want %q of kind defect", err, want)
 	}
 	if len(f.runs) != 1 {
 		t.Errorf("%d RunInstances calls, want 1", len(f.runs))
 	}
 }
 
-// TestCreateRefusesSpec pins each spec error, word for word, with no call.
+// TestCreateRefusesSpec pins each spec error, word for word and of kind defect, with
+// no call.
 func TestCreateRefusesSpec(t *testing.T) {
 	cases := []struct {
 		edit func(*Spec)
 		want string
 	}{
-		{func(s *Spec) { s.DispatchID = "" }, "Report this defect in the provisioner: the dispatch id has 0 bytes, and a client token has 1 to 64 characters"},
-		{func(s *Spec) { s.DispatchID = strings.Repeat("d", 65) }, "Report this defect in the provisioner: the dispatch id has 65 bytes, and a client token has 1 to 64 characters"},
-		{func(s *Spec) { s.DispatchID = "dsp 1" }, "Report this defect in the provisioner: byte 3 of the dispatch id is 0x20, and a client token has only ASCII letters, digits and punctuation"},
-		{func(s *Spec) { s.RunID = "" }, "Report this defect in the provisioner: the machine spec has no run id"},
-		{func(s *Spec) { s.PoolID = "" }, "Report this defect in the provisioner: the machine spec has no pool id"},
-		{func(s *Spec) { s.InstanceType = "" }, "Report this defect in the provisioner: the machine spec has no instance type"},
-		{func(s *Spec) { s.ImageID = "" }, "Report this defect in the provisioner: the machine spec has no image id"},
-		{func(s *Spec) { s.RootDevice = "" }, "Report this defect in the provisioner: the machine spec has no root device name"},
-		{func(s *Spec) { s.SubnetID = "" }, "Report this defect in the provisioner: the machine spec has no subnet id"},
-		{func(s *Spec) { s.SecurityGroupID = "" }, "Report this defect in the provisioner: the machine spec has no security group id"},
+		{func(s *Spec) { s.Key = "" }, "Report this defect in the provisioner: the key has 0 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.Key = strings.Repeat("d", 65) }, "Report this defect in the provisioner: the key has 65 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.Key = "dp_ 1" }, "Report this defect in the provisioner: byte 3 of the key is 0x20, and a client token has only ASCII letters, digits and punctuation"},
+		{func(s *Spec) { s.PoolID = "" }, "Fix the EC2 machine adapter: the machine spec has no pool id"},
+		{func(s *Spec) { s.InstanceType = "" }, "Fix the EC2 machine adapter: the machine spec has no instance type"},
+		{func(s *Spec) { s.ImageID = "" }, "Fix the EC2 machine adapter: the machine spec has no image id"},
+		{func(s *Spec) { s.RootDevice = "" }, "Fix the EC2 machine adapter: the machine spec has no root device name"},
+		{func(s *Spec) { s.SubnetID = "" }, "Fix the EC2 machine adapter: the machine spec has no subnet id"},
+		{func(s *Spec) { s.SecurityGroupID = "" }, "Fix the EC2 machine adapter: the machine spec has no security group id"},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{}
 		spec := testSpec()
 		tc.edit(&spec)
 		_, err := New(f).Create(context.Background(), spec)
-		if err == nil || err.Error() != tc.want {
-			t.Errorf("error %v, want %q", err, tc.want)
+		if err == nil || err.Error() != tc.want || kindOf(err) != machines.KindDefect {
+			t.Errorf("error %v, want %q of kind defect", err, tc.want)
 		}
 		if len(f.runs) != 0 {
 			t.Errorf("%q: %d RunInstances calls, want 0", tc.want, len(f.runs))
 		}
 	}
 	spec := testSpec()
-	spec.DispatchID = strings.Repeat("d", 64)
+	spec.Key = strings.Repeat("d", 64)
 	if _, err := New(&fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return &ec2.RunInstancesOutput{Instances: []types.Instance{{}}}, nil
 	}}).Create(context.Background(), spec); err != nil {
-		t.Errorf("a 64-character id: %v", err)
+		t.Errorf("a 64-character key: %v", err)
 	}
 }
 
 // TestCreateCountMismatch pins the error when RunInstances returns no instance.
 func TestCreateCountMismatch(t *testing.T) {
 	_, err := New(&fakeAPI{}).Create(context.Background(), testSpec())
-	const want = "If this repeats, check EC2's service health in this region: RunInstances for client token dsp-0f3a9c2e-1b7d-4e55-8a10-6c2d9e4b7a01 returned 0 instances, not 1"
-	if err == nil || err.Error() != want {
-		t.Errorf("error %v, want %q", err, want)
+	const want = "If this repeats, check EC2's service health in this region: RunInstances for key dp_0123456789abcdef returned 0 instances, not 1"
+	if err == nil || err.Error() != want || kindOf(err) != machines.KindOther {
+		t.Errorf("error %v, want %q of kind other", err, want)
 	}
 }
 
 // TestCreateErrorKinds pins the kind and the text of each class of RunInstances
 // error.
 func TestCreateErrorKinds(t *testing.T) {
+	deadline := fmt.Errorf("operation error EC2: RunInstances, %w", context.DeadlineExceeded)
 	cases := []struct {
 		err  error
-		kind Kind
+		kind machines.Kind
 		want string
 	}{
-		{apiError("InstanceLimitExceeded"), KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
-		{apiError("VcpuLimitExceeded"), KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
-		{apiError("IdempotentParameterMismatch"), KindTokenMismatch, "Report this defect in the provisioner: it sent RunInstances for one dispatch twice with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
-		{apiError("IdempotentInstanceTerminated"), KindTokenTerminated, "No action needed: the machine started with this client token is terminated, and EC2 starts no second machine for the token: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
-		{apiError("RequestLimitExceeded"), KindRetried, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, KindRetried, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
-		{apiError("InvalidAMIID.NotFound"), KindOther, "Look up EC2 error code InvalidAMIID.NotFound in the EC2 API reference, and check the provisioner's settings and the instance role against it: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
-		{apiError("UnauthorizedOperation"), KindOther, "Give the instance role the provisioner's EC2 rights: RunInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
-		{context.Canceled, KindOther, "No action needed: RunInstances stopped when its context ended: context canceled"},
-		{errors.New("failed to refresh cached credentials"), KindOther, "Check the instance role and the network path to EC2: RunInstances failed: failed to refresh cached credentials"},
+		{apiError("InstanceLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
+		{apiError("VcpuLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, machines.KindLimit, "Wait, or map the size to another instance type in the EC2 adapter's settings file aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity, because EC2 has no capacity for the instance type in the subnet's availability zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
+		{apiError("InsufficientFreeAddressesInSubnet"), machines.KindLimit, "Wait until machines end, or set subnet_id in the EC2 adapter's settings file aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
+		{apiError("IdempotentParameterMismatch"), machines.KindDefect, "Report this defect in the provisioner, unless the EC2 adapter's settings file aws-ec2.json changed after the first make for this key: RunInstances was sent twice for one key with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
+		{apiError("IdempotentInstanceTerminated"), machines.KindOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
+		{apiError("RequestLimitExceeded"), machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InternalError: test message for InternalError"},
+		{deadline, machines.KindRetry, "If this repeats, check the network path to EC2: RunInstances did not finish within its time limit: operation error EC2: RunInstances, context deadline exceeded"},
+		{apiError("InvalidAMIID.NotFound"), machines.KindDefect, "Look up EC2 error code InvalidAMIID.NotFound in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{apiError("InvalidParameterValue"), machines.KindDefect, "Look up EC2 error code InvalidParameterValue in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidParameterValue: test message for InvalidParameterValue"},
+		{apiError("UnauthorizedOperation"), machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
+		{apiError("AuthFailure"), machines.KindOther, "Look up EC2 error code AuthFailure in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error AuthFailure: test message for AuthFailure"},
+		{context.Canceled, machines.KindOther, "No action needed: RunInstances stopped when its context ended: context canceled"},
+		{errors.New("failed to refresh cached credentials"), machines.KindOther, "Check the instance role and the network path to EC2: RunInstances failed: failed to refresh cached credentials"},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, tc.err }}
@@ -198,8 +228,8 @@ func TestCreateErrorKinds(t *testing.T) {
 		if !errors.As(err, &e) {
 			t.Fatalf("%v: error %T, want *Error", tc.err, err)
 		}
-		if Classify(err) != tc.kind || e.Kind != tc.kind {
-			t.Errorf("%v: kind %v, want %v", tc.err, Classify(err), tc.kind)
+		if e.Kind != tc.kind {
+			t.Errorf("%v: kind %v, want %v", tc.err, e.Kind, tc.kind)
 		}
 		if err.Error() != tc.want {
 			t.Errorf("error\n%s\nwant\n%s", err, tc.want)
@@ -210,35 +240,41 @@ func TestCreateErrorKinds(t *testing.T) {
 	}
 }
 
-// TestClassifyUnwrapped pins Classify on errors that are not *Error.
-func TestClassifyUnwrapped(t *testing.T) {
-	cases := map[error]Kind{
-		apiError("VcpuLimitExceeded"):                                KindLimit,
-		fmt.Errorf("x: %w", apiError("IdempotentParameterMismatch")): KindTokenMismatch,
-		apiError("EC2ThrottledException"):                            KindRetried,
-		apiError("RequestTimeout"):                                   KindRetried,
-		apiError("InvalidParameterValue"):                            KindOther,
-		context.DeadlineExceeded:                                     KindOther,
-		nil:                                                          KindOther,
+// TestClassify pins the kind of each class of error, wrapped or not.
+func TestClassify(t *testing.T) {
+	cases := map[error]machines.Kind{
+		apiError("VcpuLimitExceeded"):                                machines.KindLimit,
+		apiError("InsufficientInstanceCapacity"):                     machines.KindLimit,
+		apiError("InsufficientFreeAddressesInSubnet"):                machines.KindLimit,
+		fmt.Errorf("x: %w", apiError("IdempotentParameterMismatch")): machines.KindDefect,
+		apiError("EC2ThrottledException"):                            machines.KindRetry,
+		apiError("RequestTimeout"):                                   machines.KindRetry,
+		apiError("InvalidParameterValue"):                            machines.KindDefect,
+		apiError("InvalidParameter"):                                 machines.KindDefect,
+		apiError("InvalidSubnetID.NotFound"):                         machines.KindDefect,
+		apiError("MissingParameter"):                                 machines.KindDefect,
+		apiError("UnknownParameter"):                                 machines.KindDefect,
+		apiError("UnsupportedOperation"):                             machines.KindDefect,
+		apiError("InvalidInstanceID.NotFound"):                       machines.KindOther,
+		apiError("IdempotentInstanceTerminated"):                     machines.KindOther,
+		context.DeadlineExceeded:                                     machines.KindRetry,
+		context.Canceled:                                             machines.KindOther,
+		errors.New("unknown"):                                        machines.KindOther,
 	}
 	for err, want := range cases {
-		if got := Classify(err); got != want {
+		if got := classify(err); got != want {
 			t.Errorf("%v: kind %v, want %v", err, got, want)
 		}
 	}
-	for k, want := range map[Kind]string{KindOther: "other", KindRetried: "retried", KindLimit: "limit", KindTokenMismatch: "token-mismatch", KindTokenTerminated: "token-terminated"} {
-		if k.String() != want {
-			t.Errorf("%d: %q, want %q", k, k.String(), want)
-		}
+	if !TokenTerminated(fmt.Errorf("x: %w", apiError("IdempotentInstanceTerminated"))) || TokenTerminated(apiError("IdempotentParameterMismatch")) || TokenTerminated(nil) {
+		t.Error("TokenTerminated matches another code")
 	}
 }
 
-// TestCheckRights pins the dry run's input and its three outcomes.
+// TestCheckRights pins the dry run's input and its outcomes.
 func TestCheckRights(t *testing.T) {
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, apiError("DryRunOperation") }}
-	spec := testSpec()
-	spec.DispatchID = ""
-	if err := New(f).CheckRights(context.Background(), spec); err != nil {
+	if err := New(f).CheckRights(context.Background(), testSpec()); err != nil {
 		t.Fatalf("DryRunOperation: %v", err)
 	}
 	want, err := runInput(testSpec(), true)
@@ -255,30 +291,60 @@ func TestCheckRights(t *testing.T) {
 		return nil, apiError("UnauthorizedOperation")
 	}
 	err = New(f).CheckRights(context.Background(), testSpec())
-	const wantDenied = "Give the instance role the provisioner's EC2 rights: RunInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
-	if err == nil || err.Error() != wantDenied {
-		t.Errorf("UnauthorizedOperation: error %v, want %q", err, wantDenied)
+	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
+	if err == nil || err.Error() != wantDenied || kindOf(err) != machines.KindDefect {
+		t.Errorf("UnauthorizedOperation: error %v, want %q of kind defect", err, wantDenied)
 	}
 
 	f.run = nil
 	err = New(f).CheckRights(context.Background(), testSpec())
 	const wantSuccess = "Check the EC2 endpoint: a RunInstances dry run returned success, and EC2 returns DryRunOperation for a dry run"
-	if err == nil || err.Error() != wantSuccess {
-		t.Errorf("success: error %v, want %q", err, wantSuccess)
+	if err == nil || err.Error() != wantSuccess || kindOf(err) != machines.KindOther {
+		t.Errorf("success: error %v, want %q of kind other", err, wantSuccess)
 	}
 
 	f.run = func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
 	err = New(f).CheckRights(context.Background(), testSpec())
-	if Classify(err) != KindRetried {
-		t.Errorf("RequestLimitExceeded: kind %v, want retried", Classify(err))
+	if kindOf(err) != machines.KindRetry {
+		t.Errorf("RequestLimitExceeded: kind %v, want retry", kindOf(err))
 	}
 
-	spec.RunID = ""
+	spec := testSpec()
+	spec.PoolID = ""
 	n := len(f.runs)
 	if err := New(f).CheckRights(context.Background(), spec); err == nil || len(f.runs) != n {
-		t.Errorf("an empty run id: error %v, %d calls", err, len(f.runs)-n)
+		t.Errorf("an empty pool id: error %v, %d calls", err, len(f.runs)-n)
+	}
+}
+
+// TestCheckListRights pins the DescribeInstances dry run's input and its outcomes.
+func TestCheckListRights(t *testing.T) {
+	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return nil, apiError("DryRunOperation")
+	}}
+	if err := New(f).CheckListRights(context.Background()); err != nil {
+		t.Fatalf("DryRunOperation: %v", err)
+	}
+	if want := (&ec2.DescribeInstancesInput{DryRun: aws.Bool(true)}); !reflect.DeepEqual(f.describes[0], want) {
+		t.Errorf("input %+v, want %+v", f.describes[0], want)
+	}
+
+	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return nil, apiError("UnauthorizedOperation")
+	}
+	err := New(f).CheckListRights(context.Background())
+	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
+	if err == nil || err.Error() != wantDenied || kindOf(err) != machines.KindDefect {
+		t.Errorf("UnauthorizedOperation: error %v, want %q of kind defect", err, wantDenied)
+	}
+
+	f.describe = nil
+	err = New(f).CheckListRights(context.Background())
+	const wantSuccess = "Check the EC2 endpoint: a DescribeInstances dry run returned success, and EC2 returns DryRunOperation for a dry run"
+	if err == nil || err.Error() != wantSuccess || kindOf(err) != machines.KindOther {
+		t.Errorf("success: error %v, want %q of kind other", err, wantSuccess)
 	}
 }
 
@@ -290,26 +356,27 @@ func TestFindByToken(t *testing.T) {
 		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: reply}}}, nil
 	}}
 	c := New(f)
-	_, found, err := c.FindByToken(context.Background(), "dsp-1")
+	const key = "dp_0123456789abcdef"
+	_, found, err := c.FindByToken(context.Background(), key)
 	if err != nil || found {
 		t.Fatalf("no machine: found %v, error %v", found, err)
 	}
 	wantIn := &ec2.DescribeInstancesInput{
-		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{"dsp-1"}}},
+		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{key}}},
 		MaxResults: aws.Int32(1000),
 	}
 	if !reflect.DeepEqual(f.describes[0], wantIn) {
 		t.Errorf("input %+v, want %+v", f.describes[0], wantIn)
 	}
 
-	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, "dsp-1"), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, "dsp-1")}
-	m, found, err := c.FindByToken(context.Background(), "dsp-1")
-	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.DispatchID != "dsp-1" {
+	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, key), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, key)}
+	m, found, err := c.FindByToken(context.Background(), key)
+	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.Key != key {
 		t.Errorf("machine %+v, found %v, error %v", m, found, err)
 	}
 
 	reply = reply[:1]
-	m, found, err = c.FindByToken(context.Background(), "dsp-1")
+	m, found, err = c.FindByToken(context.Background(), key)
 	if err != nil || !found || m.State != StateTerminated {
 		t.Errorf("terminated only: machine %+v, found %v, error %v", m, found, err)
 	}
@@ -317,8 +384,8 @@ func TestFindByToken(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
-	if _, _, err := c.FindByToken(context.Background(), "dsp-1"); Classify(err) != KindRetried {
-		t.Errorf("error %v, want kind retried", err)
+	if _, _, err := c.FindByToken(context.Background(), key); kindOf(err) != machines.KindRetry {
+		t.Errorf("error %v, want kind retry", err)
 	}
 }
 
@@ -326,30 +393,34 @@ func TestFindByToken(t *testing.T) {
 func TestList(t *testing.T) {
 	pages := map[string]*ec2.DescribeInstancesOutput{
 		"": {
-			Reservations: []types.Reservation{{Instances: []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateStopped, "dsp-1"), instance("i-0bbbbbbbbbbbbbbb0", StateRunning, "dsp-2")}}},
+			Reservations: []types.Reservation{{Instances: []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateStopped, "dp_000000000000000a"), instance("i-0bbbbbbbbbbbbbbb0", StateRunning, "dp_000000000000000b")}}},
 			NextToken:    aws.String("page-2"),
 		},
 		"page-2": {
-			Reservations: []types.Reservation{{Instances: []types.Instance{instance("i-0ccccccccccccccc0", StatePending, "dsp-3")}}},
+			Reservations: []types.Reservation{{Instances: []types.Instance{instance("i-0ccccccccccccccc0", StatePending, "dp_000000000000000c")}}},
 		},
 	}
 	f := &fakeAPI{describe: func(in *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return pages[aws.ToString(in.NextToken)], nil
 	}}
-	ms, err := New(f).List(context.Background(), "pool-7", StatePending, StateRunning, StateStopped)
+	ms, err := New(f).List(context.Background(), "np_0123456789abcdef", StatePending, StateRunning, StateStopped)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ids []string
+	var ids, keys []string
 	for _, m := range ms {
 		ids = append(ids, m.ID)
+		keys = append(keys, m.Key)
 	}
 	if want := []string{"i-0aaaaaaaaaaaaaaa0", "i-0bbbbbbbbbbbbbbb0", "i-0ccccccccccccccc0"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("ids %v, want %v", ids, want)
 	}
+	if want := []string{"dp_000000000000000a", "dp_000000000000000b", "dp_000000000000000c"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("keys %v, want %v", keys, want)
+	}
 	wantFilters := []types.Filter{
 		{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},
-		{Name: aws.String("tag:qory:pool"), Values: []string{"pool-7"}},
+		{Name: aws.String("tag:qory:pool"), Values: []string{"np_0123456789abcdef"}},
 		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopped"}},
 	}
 	if len(f.describes) != 2 {
@@ -362,7 +433,7 @@ func TestList(t *testing.T) {
 	}
 
 	f.describes = nil
-	if _, err := New(f).List(context.Background(), "pool-7"); err != nil {
+	if _, err := New(f).List(context.Background(), "np_0123456789abcdef"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.describes[0].Filters; len(got) != 2 {
@@ -370,55 +441,56 @@ func TestList(t *testing.T) {
 	}
 }
 
-// TestDescribeAndTerminated pins the read by id and the confirmation of a terminate.
-func TestDescribeAndTerminated(t *testing.T) {
-	var reply *ec2.DescribeInstancesOutput
-	var replyErr error
-	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) { return reply, replyErr }}
-	c := New(f)
+// TestTerminate pins the TerminateInstances input, the state after the call, the
+// unknown id, and the kind of a failed call.
+func TestTerminate(t *testing.T) {
 	const id = "i-0123456789abcdef0"
-
-	reply = &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: []types.Instance{instance(id, StateShuttingDown, "dsp-1")}}}}
-	done, err := c.Terminated(context.Background(), id)
-	if err != nil || done {
-		t.Errorf("shutting-down: done %v, error %v", done, err)
-	}
-	wantIn := &ec2.DescribeInstancesInput{InstanceIds: []string{id}}
-	if !reflect.DeepEqual(f.describes[0], wantIn) {
-		t.Errorf("input %+v, want %+v (by id, with no tag filter)", f.describes[0], wantIn)
-	}
-
-	reply = &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: []types.Instance{{InstanceId: aws.String(id), State: &types.InstanceState{Name: types.InstanceStateNameTerminated}}}}}}
-	if done, err := c.Terminated(context.Background(), id); err != nil || !done {
-		t.Errorf("terminated with no tags: done %v, error %v", done, err)
+	var reply *ec2.TerminateInstancesOutput
+	var replyErr error
+	f := &fakeAPI{terminate: func(*ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error) { return reply, replyErr }}
+	c := New(f)
+	change := func(id string, previous, current types.InstanceStateName) *ec2.TerminateInstancesOutput {
+		return &ec2.TerminateInstancesOutput{TerminatingInstances: []types.InstanceStateChange{{
+			InstanceId:    aws.String(id),
+			PreviousState: &types.InstanceState{Name: previous},
+			CurrentState:  &types.InstanceState{Name: current},
+		}}}
 	}
 
-	reply, replyErr = nil, apiError("InvalidInstanceID.NotFound")
-	if done, err := c.Terminated(context.Background(), id); err != nil || done {
-		t.Errorf("NotFound: done %v, error %v", done, err)
+	cases := []struct {
+		reply *ec2.TerminateInstancesOutput
+		state string
+	}{
+		{change(id, types.InstanceStateNameStopped, types.InstanceStateNameShuttingDown), StateShuttingDown},
+		{change(id, types.InstanceStateNameTerminated, types.InstanceStateNameTerminated), StateTerminated},
+		{change("i-0fedcba9876543210", types.InstanceStateNameRunning, types.InstanceStateNameShuttingDown), ""},
+		{&ec2.TerminateInstancesOutput{}, ""},
 	}
-	if _, found, err := c.Describe(context.Background(), id); err != nil || found {
-		t.Errorf("NotFound: found %v, error %v", found, err)
-	}
-
-	replyErr = apiError("InternalError")
-	if _, err := c.Terminated(context.Background(), id); errorCode(err) != "InternalError" {
-		t.Errorf("InternalError: error %v", err)
-	}
-
-	if err := c.Terminate(context.Background(), id); err != nil {
-		t.Fatal(err)
+	for i, tc := range cases {
+		reply, replyErr = tc.reply, nil
+		state, found, err := c.Terminate(context.Background(), id)
+		if err != nil || !found || state != tc.state {
+			t.Errorf("case %d: state %q, found %v, error %v, want %q", i, state, found, err, tc.state)
+		}
 	}
 	if want := (&ec2.TerminateInstancesInput{InstanceIds: []string{id}}); !reflect.DeepEqual(f.kills[0], want) {
 		t.Errorf("terminate input %+v, want %+v", f.kills[0], want)
 	}
-	f.terminate = func(*ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error) {
-		return nil, apiError("UnauthorizedOperation")
+
+	reply, replyErr = nil, apiError("InvalidInstanceID.NotFound")
+	if state, found, err := c.Terminate(context.Background(), id); err != nil || found || state != "" {
+		t.Errorf("NotFound: state %q, found %v, error %v", state, found, err)
 	}
-	err = c.Terminate(context.Background(), id)
-	const want = "Give the instance role the provisioner's EC2 rights: TerminateInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
-	if err == nil || err.Error() != want {
-		t.Errorf("error %v, want %q", err, want)
+
+	replyErr = apiError("UnauthorizedOperation")
+	_, _, err := c.Terminate(context.Background(), id)
+	const want = "Give the instance role the EC2 rights that the EC2 machine adapter needs: TerminateInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
+	if err == nil || err.Error() != want || kindOf(err) != machines.KindDefect {
+		t.Errorf("error %v, want %q of kind defect", err, want)
+	}
+	replyErr = apiError("InvalidInstanceID.Malformed")
+	if _, _, err := c.Terminate(context.Background(), id); kindOf(err) != machines.KindDefect {
+		t.Errorf("InvalidInstanceID.Malformed: error %v, want kind defect", err)
 	}
 }
 
@@ -447,15 +519,51 @@ func TestConsole(t *testing.T) {
 	out = aws.String("not base64!")
 	_, err = c.Console(context.Background(), id)
 	const want = "If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for i-0123456789abcdef0 that is not base64: illegal base64 data at input byte 3"
-	if err == nil || err.Error() != want {
-		t.Errorf("error %v, want %q", err, want)
+	if err == nil || err.Error() != want || kindOf(err) != machines.KindOther {
+		t.Errorf("error %v, want %q of kind other", err, want)
 	}
 
 	f.console = func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
 		return nil, apiError("InvalidInstanceID.NotFound")
 	}
-	if _, err := c.Console(context.Background(), id); errorCode(err) != "InvalidInstanceID.NotFound" {
-		t.Errorf("error %v", err)
+	if _, err := c.Console(context.Background(), id); len(f.consoles) != 4 {
+		t.Errorf("NotFound: %d calls in all, want 4 with no second call, error %v", len(f.consoles), err)
+	}
+	if _, err := c.Console(context.Background(), id); errorCode(err) != "InvalidInstanceID.NotFound" || kindOf(err) != machines.KindOther {
+		t.Errorf("error %v, want kind other", err)
+	}
+}
+
+// TestConsoleNotNitro pins that Console reads the output again without Latest when
+// EC2 returns UnsupportedOperation for Latest, and the error when that call fails too.
+func TestConsoleNotNitro(t *testing.T) {
+	const text = "boot on a Xen instance\n"
+	f := &fakeAPI{console: func(in *ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+		if aws.ToBool(in.Latest) {
+			return nil, apiError("UnsupportedOperation")
+		}
+		return &ec2.GetConsoleOutputOutput{Output: aws.String(base64.StdEncoding.EncodeToString([]byte(text)))}, nil
+	}}
+	c := New(f)
+	const id = "i-0123456789abcdef0"
+	got, err := c.Console(context.Background(), id)
+	if err != nil || got != text {
+		t.Errorf("text %q, error %v", got, err)
+	}
+	want := []*ec2.GetConsoleOutputInput{
+		{InstanceId: aws.String(id), Latest: aws.Bool(true)},
+		{InstanceId: aws.String(id)},
+	}
+	if !reflect.DeepEqual(f.consoles, want) {
+		t.Errorf("inputs %+v, want %+v", f.consoles, want)
+	}
+
+	f.console = func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+		return nil, apiError("UnsupportedOperation")
+	}
+	_, err = c.Console(context.Background(), id)
+	if errorCode(err) != "UnsupportedOperation" || kindOf(err) != machines.KindDefect || len(f.consoles) != 4 {
+		t.Errorf("error %v, %d calls in all, want UnsupportedOperation of kind defect after 4 calls", err, len(f.consoles))
 	}
 }
 
@@ -482,23 +590,23 @@ func TestRootDevice(t *testing.T) {
 		err   error
 		want  string
 	}{
-		{&ec2.DescribeImagesOutput{}, nil, "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
-		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String("ami-0fedcba9876543210"), RootDeviceName: aws.String("/dev/xvda")}}}, nil, "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
-		{nil, apiError("InvalidAMIID.NotFound"), "Use an image id that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
-		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id)}}}, nil, "Use an image with a root device: image ami-0123456789abcdef0 has no root device name"},
-		{nil, apiError("UnauthorizedOperation"), "Give the instance role the provisioner's EC2 rights: DescribeImages failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
+		{&ec2.DescribeImagesOutput{}, nil, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
+		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String("ami-0fedcba9876543210"), RootDeviceName: aws.String("/dev/xvda")}}}, nil, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
+		{nil, apiError("InvalidAMIID.NotFound"), "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id)}}}, nil, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image with a root device: image ami-0123456789abcdef0 has no root device name"},
+		{nil, apiError("UnauthorizedOperation"), "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeImages failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
 	}
 	for _, tc := range cases {
 		reply, replyErr = tc.reply, tc.err
 		_, err := c.RootDevice(context.Background(), id)
-		if err == nil || err.Error() != tc.want {
-			t.Errorf("error %v, want %q", err, tc.want)
+		if err == nil || err.Error() != tc.want || kindOf(err) != machines.KindDefect {
+			t.Errorf("error %v, want %q of kind defect", err, tc.want)
 		}
 	}
 
 	n := len(f.images)
 	_, err = c.RootDevice(context.Background(), "")
-	const wantEmpty = "Report this defect in the provisioner: the root device lookup has no image id"
+	const wantEmpty = "Fix the EC2 machine adapter: the root device lookup has no image id"
 	if err == nil || err.Error() != wantEmpty || len(f.images) != n {
 		t.Errorf("empty id: error %v, want %q with no call", err, wantEmpty)
 	}
@@ -507,7 +615,7 @@ func TestRootDevice(t *testing.T) {
 // TestCreateErrorsHideUserData pins that no Create error contains the user data or
 // its base64, for each error class and for user data over the bound.
 func TestCreateErrorsHideUserData(t *testing.T) {
-	const marker = "run-code-marker-4f2a9e"
+	const marker = "qecr_runcodemarker4f2a9e"
 	data := []byte(`{"version": 1, "run_code": "` + marker + `"}`)
 	encoded := base64.StdEncoding.EncodeToString(data)
 	check := func(err error) {
@@ -519,7 +627,7 @@ func TestCreateErrorsHideUserData(t *testing.T) {
 			t.Errorf("the error contains the user data: %v", err)
 		}
 	}
-	for _, code := range []string{"VcpuLimitExceeded", "IdempotentParameterMismatch", "IdempotentInstanceTerminated", "RequestLimitExceeded", "UnauthorizedOperation", "InvalidParameterValue"} {
+	for _, code := range []string{"VcpuLimitExceeded", "InsufficientInstanceCapacity", "IdempotentParameterMismatch", "IdempotentInstanceTerminated", "RequestLimitExceeded", "UnauthorizedOperation", "InvalidParameterValue"} {
 		f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, apiError(code) }}
 		spec := testSpec()
 		spec.UserData = data

@@ -1,5 +1,6 @@
 # The container image of qory-provisioner, built from cmd/qory-provisioner. Its command
-# is qory-provisioner serve.
+# is qory-provisioner serve. The image also contains the EC2 machine adapter,
+# /usr/local/bin/qory-machines-aws-ec2, built from cmd/qory-machines-aws-ec2.
 #
 # Build from the repository's root:
 #
@@ -7,12 +8,12 @@
 #
 # Build both platforms at once with docker buildx build --platform
 # linux/amd64,linux/arm64. The build stage runs on the building machine's platform, and
-# Go cross-compiles the program, so nothing runs under emulation.
+# Go cross-compiles the programs, so nothing runs under emulation.
 #
 # .github/workflows/prerelease.yml publishes the image for both platforms, tags it only
 # sha-<the commit's first 7 characters>, and prints the digest in the run's summary.
 #
-# The program runs as distroless's nonroot user, uid 65532 and gid 65532. The state
+# The programs run as distroless's nonroot user, uid 65532 and gid 65532. The state
 # directory /var/lib/qory-provisioner belongs to that user and is 0700.
 #
 # The base images are pinned by version tag and by digest; distroless publishes no
@@ -21,8 +22,8 @@
 # linux/amd64 and linux/arm64 from these pins.
 
 # The build stage runs on the platform of the machine that builds, BUILDPLATFORM, which
-# docker buildx sets, and cross-compiles for the platform of the image, TARGETOS and
-# TARGETARCH below.
+# docker buildx sets, and cross-compiles both programs for the platform of the image,
+# TARGETOS and TARGETARCH below.
 FROM --platform=$BUILDPLATFORM golang:1.27.1-trixie@sha256:8f58fd67ea075142d947a60e0caa4317746a55118d312f027793d382c7741734 AS build
 
 WORKDIR /src
@@ -41,6 +42,8 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/qory-provisioner ./cmd/qory-provisioner
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "-s -w" \
+      -o /out/qory-machines-aws-ec2 ./cmd/qory-machines-aws-ec2
 
 # The state directory, 0700; it is given to the nonroot user below. /out/var/lib/ is
 # copied whole, so the directory keeps its mode.
@@ -50,6 +53,7 @@ RUN mkdir -p /out/var/lib/qory-provisioner && chmod 0700 /out/var/lib/qory-provi
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS provisioner
 
 COPY --from=build /out/qory-provisioner /qory-provisioner
+COPY --from=build /out/qory-machines-aws-ec2 /usr/local/bin/qory-machines-aws-ec2
 
 # The start unit of each machine that the provisioner makes. The provisioner does not run
 # these files; a machine image installs them as /etc/systemd/system/qory-machine.service

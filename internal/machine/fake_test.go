@@ -86,14 +86,13 @@ func apiError(code string) error {
 // testSpec returns a valid spec with neutral example values.
 func testSpec() Spec {
 	return Spec{
-		DispatchID:      "dsp-0f3a9c2e-1b7d-4e55-8a10-6c2d9e4b7a01",
-		RunID:           "run-41",
-		PoolID:          "pool-7",
+		Key:             "dp_0123456789abcdef",
+		PoolID:          "np_0123456789abcdef",
 		InstanceType:    "m7g.large",
 		ImageID:         "ami-0123456789abcdef0",
 		RootDevice:      "/dev/sda1",
 		SubnetID:        "subnet-0123456789abcdef0",
 		SecurityGroupID: "sg-0123456789abcdef0",
-		UserData:        []byte(`{"version": 1, "run_id": "run-41"}`),
+		UserData:        []byte(`{"version": 1, "pool": "np_0123456789abcdef"}`),
 	}
 }
