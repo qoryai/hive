@@ -8,7 +8,7 @@ import (
 	"github.com/qoryai/hive/internal/adapter"
 	"github.com/qoryai/hive/internal/journal"
 	"github.com/qoryai/hive/internal/loop"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // TestRestartRecovery starts the loop with a journal from before a restart. It lists
@@ -28,10 +28,10 @@ func TestRestartRecovery(t *testing.T) {
 		journal.Entry{DispatchID: dispatchE, Phase: journal.PhaseMade, MachineID: "i-e", MaxLifetimeMinutes: lifetime},
 		dispatched(dispatchF, "i-f"),
 	)
-	h.machines.add("i-b", dispatchB, machines.StateStarting, epoch)
-	h.machines.add("i-d", dispatchD, machines.StateDeleting, epoch)
-	h.machines.add("i-e", dispatchE, machines.StateRunning, epoch)
-	h.machines.add("i-f", dispatchF, machines.StateRunning, epoch)
+	h.machines.add("i-b", dispatchB, contracts.MachineStarting, epoch)
+	h.machines.add("i-d", dispatchD, contracts.MachineDeleting, epoch)
+	h.machines.add("i-e", dispatchE, contracts.MachineRunning, epoch)
+	h.machines.add("i-f", dispatchF, contracts.MachineRunning, epoch)
 	h.start()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"release " + dispatchA + " " + journal.ReasonRestarted,
@@ -67,7 +67,7 @@ func TestRestartRecovery(t *testing.T) {
 func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime})
-	h.machines.add("i-a", dispatchA, machines.StateRunning, epoch)
+	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
 	h.apiary.setDispatched(dispatchA, loop.ErrGone)
 	h.start()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
@@ -85,7 +85,7 @@ func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 // nothing.
 func TestAFailedCheckStopsTheLoop(t *testing.T) {
 	h := newHarness(t)
-	h.machines.checkErr = &adapter.Error{Command: "check", Kind: machines.KindDefect, Message: "Give the role the right to list machines."}
+	h.machines.checkErr = &adapter.Error{Command: "check", Kind: contracts.FailureDefect, Message: "Give the role the right to list machines."}
 	h.startNoWait()
 	err := h.result()
 	want := "Fix the machine adapter's settings or the rights it uses, then start the provisioner again: the machine adapter's check failed: Give the role the right to list machines. (machine adapter command check, kind defect)"

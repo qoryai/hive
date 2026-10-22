@@ -9,7 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // validSettings is a settings document with neutral example values.
@@ -128,9 +129,9 @@ func TestParseSettingsErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		_, err := ParseSettings([]byte(tc.doc))
-		var e *machines.Error
-		if !errors.As(err, &e) || e.Kind != machines.KindDefect {
-			t.Errorf("%q: error %#v, want a *machines.Error of kind defect", tc.doc, err)
+		var e *adapterio.Failure
+		if !errors.As(err, &e) || e.Kind != contracts.FailureDefect {
+			t.Errorf("%q: error %#v, want a *adapterio.Failure of kind defect", tc.doc, err)
 			continue
 		}
 		if err.Error() != tc.want {
@@ -148,7 +149,7 @@ func TestReadSettingsFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "aws-ec2.json")
 	_, err := ReadSettings(missing)
 	want := "Create the EC2 adapter's settings file aws-ec2.json at the path in the provisioner's adapter.settings: open " + missing + ": no such file or directory"
-	if err == nil || err.Error() != want || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("missing file: error %v, want %q of kind defect", err, want)
 	}
 
@@ -158,7 +159,7 @@ func TestReadSettingsFile(t *testing.T) {
 	}
 	_, err = ReadSettings(writeSettings(t, big+" "))
 	const wantBig = "Shorten the EC2 adapter's settings file aws-ec2.json to at most 64 KiB."
-	if err == nil || err.Error() != wantBig || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != wantBig || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("64 KiB and 1 byte: error %v, want %q of kind defect", err, wantBig)
 	}
 
@@ -169,7 +170,7 @@ func TestReadSettingsFile(t *testing.T) {
 		}
 		_, err = ReadSettings(locked)
 		wantLocked := fmt.Sprintf("Make the EC2 adapter's settings file aws-ec2.json readable by uid %d: open %s: permission denied", os.Geteuid(), locked)
-		if err == nil || err.Error() != wantLocked || kindOf(err) != machines.KindDefect {
+		if err == nil || err.Error() != wantLocked || kindOf(err) != contracts.FailureDefect {
 			t.Errorf("unreadable file: error %v, want %q of kind defect", err, wantLocked)
 		}
 	}
@@ -177,14 +178,14 @@ func TestReadSettingsFile(t *testing.T) {
 	dir := t.TempDir()
 	_, err = ReadSettings(dir)
 	const prefix = "Fix the EC2 adapter's settings file aws-ec2.json: reading it failed: "
-	if err == nil || !strings.HasPrefix(err.Error(), prefix) || kindOf(err) != machines.KindDefect {
+	if err == nil || !strings.HasPrefix(err.Error(), prefix) || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("a folder: error %v, want the prefix %q of kind defect", err, prefix)
 	}
 }
 
-// kindOf returns the kind of a *machines.Error in err's chain, or "".
-func kindOf(err error) machines.Kind {
-	var e *machines.Error
+// kindOf returns the kind of a *adapterio.Failure in err's chain, or "".
+func kindOf(err error) string {
+	var e *adapterio.Failure
 	if errors.As(err, &e) {
 		return e.Kind
 	}

@@ -11,8 +11,9 @@ import (
 	"testing"
 
 	"github.com/qoryai/hive/internal/adapter"
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/loop"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // TestARunCodeNeverFormatsAsItsText formats a run code and a claim with every verb,
@@ -56,7 +57,7 @@ func TestNoLogLineContainsTheRunCode(t *testing.T) {
 	h := newHarness(t)
 	h.start()
 	// A make whose adapter message contains the run code.
-	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Fix it: " + runCode}
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Fix it: " + runCode}
 	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
 	data := h.machines.lastStartData()
@@ -67,7 +68,7 @@ func TestNoLogLineContainsTheRunCode(t *testing.T) {
 	// A make whose adapter message contains a piece of the start data in base64.
 	piece := base64.StdEncoding.EncodeToString(data)[20:40]
 	h.machines.mu.Lock()
-	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Fix it: " + piece}
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Fix it: " + piece}
 	h.machines.mu.Unlock()
 	h.apiary.mu.Lock()
 	h.apiary.releaseErr = errors.New("release failed for " + runCode)
@@ -88,8 +89,8 @@ func TestNoLogLineContainsTheRunCode(t *testing.T) {
 	// At the first watch, the dispatch ended, and the read of the log and the delete
 	// fail with the run code.
 	h.machines.mu.Lock()
-	h.machines.logErr = &adapter.Error{Command: "log", Kind: machines.KindOther, Message: "log " + runCode}
-	h.machines.deleteErr = []error{&adapter.Error{Command: "delete", Kind: machines.KindOther, Message: "delete " + runCode}}
+	h.machines.logErr = &adapter.Error{Command: "log", Kind: contracts.FailureOther, Message: "log " + runCode}
+	h.machines.deleteErr = []error{&adapter.Error{Command: "delete", Kind: contracts.FailureOther, Message: "delete " + runCode}}
 	h.machines.mu.Unlock()
 	h.apiary.setDispatched(dispatchC, fmt.Errorf("dispatched failed for %s: %w", runCode, loop.ErrGone))
 	h.clock.Advance(loop.WatchInterval - 3*loop.ShortWait)
@@ -112,7 +113,7 @@ func TestNoLogLineContainsTheRunCode(t *testing.T) {
 			t.Errorf("the log contains %q:\n%s", secret, logs)
 		}
 	}
-	if machines.ContainsSecret(logs, data) {
+	if adapterio.ContainsSecret(logs, data) {
 		t.Errorf("the log contains a piece of the start data:\n%s", logs)
 	}
 	hidden := 0

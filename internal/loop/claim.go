@@ -8,7 +8,7 @@ import (
 
 	"github.com/qoryai/hive/internal/adapter"
 	"github.com/qoryai/hive/internal/journal"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The reasons of the loop's releases. Each is 1 to 200 characters, as the provisioner
@@ -34,13 +34,13 @@ const (
 
 // makeFailure is the release reason, the wait before the next claim and the log level
 // of a make that failed with the kind k.
-func makeFailure(k machines.Kind) (reason string, wait time.Duration, level slog.Level) {
+func makeFailure(k string) (reason string, wait time.Duration, level slog.Level) {
 	switch k {
-	case machines.KindLimit:
+	case contracts.FailureLimit:
 		return ReasonLimit, LongWait, slog.LevelWarn
-	case machines.KindRetry:
+	case contracts.FailureRetry:
 		return ReasonRetry, ShortWait, slog.LevelWarn
-	case machines.KindDefect:
+	case contracts.FailureDefect:
 		return ReasonDefect, LongWait, slog.LevelError
 	}
 	return ReasonOther, ShortWait, slog.LevelWarn
@@ -48,12 +48,12 @@ func makeFailure(k machines.Kind) (reason string, wait time.Duration, level slog
 
 // kindOf is the kind of a failed make. An error that is not an *adapter.Error is a
 // request that fails a rule of the protocol, a defect.
-func kindOf(err error) machines.Kind {
+func kindOf(err error) string {
 	var ae *adapter.Error
 	if errors.As(err, &ae) {
 		return ae.Kind
 	}
-	return machines.KindDefect
+	return contracts.FailureDefect
 }
 
 // claim is the claim path. It claims one dispatch at a time, while the journal has

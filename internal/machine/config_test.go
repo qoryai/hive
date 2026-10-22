@@ -12,7 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 const testToken = "imds-token-marker"
@@ -58,12 +59,12 @@ func newIMDS(t *testing.T, paths map[string]string) (*httptest.Server, *imdsServ
 	return srv, s
 }
 
-// wantKind fails t unless err is a *machines.Error of kind.
-func wantKind(t *testing.T, err error, kind machines.Kind) {
+// wantKind fails t unless err is a *adapterio.Failure of kind.
+func wantKind(t *testing.T, err error, kind string) {
 	t.Helper()
-	var e *machines.Error
+	var e *adapterio.Failure
 	if !errors.As(err, &e) || e.Kind != kind {
-		t.Errorf("error %#v, want a *machines.Error of kind %s", err, kind)
+		t.Errorf("error %#v, want a *adapterio.Failure of kind %s", err, kind)
 	}
 }
 
@@ -177,7 +178,7 @@ func TestLoadConfigRefusesOtherCredentials(t *testing.T) {
 			if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), ", not EC2RoleProvider") {
 				t.Fatalf("error %v, want the prefix %q", err, prefix)
 			}
-			wantKind(t, err, machines.KindDefect)
+			wantKind(t, err, contracts.FailureDefect)
 			for _, marker := range []string{keyID, secret, roleKeyID, roleSecret, roleToken} {
 				if strings.Contains(err.Error(), marker) {
 					t.Errorf("the error contains the marker %q", marker)
@@ -197,7 +198,7 @@ func TestLoadConfigNoRole(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
-	wantKind(t, err, machines.KindOther)
+	wantKind(t, err, contracts.FailureOther)
 }
 
 // TestLoadConfigNoRegion pins the error when neither the environment nor the
@@ -210,7 +211,7 @@ func TestLoadConfigNoRegion(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
 	}
-	wantKind(t, err, machines.KindOther)
+	wantKind(t, err, contracts.FailureOther)
 }
 
 // TestLoadConfigEmptyRegion pins the error when the metadata returns an empty region.

@@ -38,8 +38,9 @@ import (
 	"time"
 
 	"github.com/qoryai/hive/internal/adapter"
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/journal"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // DefaultSize is the size that the loop asks the machine adapter for when a claim
@@ -142,13 +143,13 @@ type Machines interface {
 	// Check shows that the adapter's rights and settings work.
 	Check(ctx context.Context) error
 	// Make makes one machine of size in pool for key and delivers startData to it.
-	Make(ctx context.Context, key, pool, size string, startData []byte) (machines.MakeAnswer, error)
+	Make(ctx context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error)
 	// List lists the machines of pool.
-	List(ctx context.Context, pool string) (machines.ListAnswer, error)
+	List(ctx context.Context, pool string) (contracts.MachinesListAnswer, error)
 	// Log reads the console text of the machine id.
-	Log(ctx context.Context, id string) (machines.LogAnswer, error)
+	Log(ctx context.Context, id string) (contracts.MachinesLogAnswer, error)
 	// Delete deletes the machine id.
-	Delete(ctx context.Context, id string) (machines.DeleteAnswer, error)
+	Delete(ctx context.Context, id string) (contracts.MachinesDeleteAnswer, error)
 }
 
 var _ Machines = (*adapter.Runner)(nil)
@@ -354,7 +355,7 @@ const hiddenError = "the error's text contains what looks like a run code, a run
 func shown(err error, startData []byte) string {
 	text := err.Error()
 	lower := strings.ToLower(text)
-	if machines.ContainsSecret(text, startData) || strings.Contains(lower, "qrk_") || strings.Contains(lower, "qak_") {
+	if adapterio.ContainsSecret(text, startData) || strings.Contains(lower, "qrk_") || strings.Contains(lower, "qak_") {
 		return hiddenError
 	}
 	return text

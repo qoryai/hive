@@ -10,7 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/smithy-go"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The EC2 error codes this package acts on.
@@ -33,7 +34,7 @@ type Error struct {
 	// Op is the EC2 operation, such as RunInstances.
 	Op string
 	// Kind is the kind of failure that the adapter writes in its error document.
-	Kind machines.Kind
+	Kind string
 	// Code is the EC2 error code, such as VcpuLimitExceeded; empty when the call
 	// returned no EC2 error.
 	Code string
@@ -52,7 +53,7 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s, because EC2 has no capacity for the instance type in the subnet's availability zone: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeSubnetFull:
 		return fmt.Sprintf("Wait until machines end, or set subnet_id in %s to a subnet with free addresses: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
-	case e.Kind == machines.KindLimit:
+	case e.Kind == contracts.FailureLimit:
 		return fmt.Sprintf("Wait until machines end, or raise the account's EC2 instance or vCPU quota: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code == codeUnauthorized:
 		return fmt.Sprintf("Give the instance role the EC2 rights that the EC2 machine adapter needs: %s failed with %s: %v", e.Op, e.Code, e.Err)
@@ -60,11 +61,11 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("Report this defect in the provisioner, unless %s changed after the first make for this key: %s was sent twice for one key with different parameters, and EC2 returned %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeTokenTerminated:
 		return fmt.Sprintf("No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: %v", e.Err)
-	case e.Kind == machines.KindRetry && errors.As(e.Err, &maxAttempts):
+	case e.Kind == contracts.FailureRetry && errors.As(e.Err, &maxAttempts):
 		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
-	case e.Kind == machines.KindRetry && errors.Is(e.Err, context.DeadlineExceeded):
+	case e.Kind == contracts.FailureRetry && errors.Is(e.Err, context.DeadlineExceeded):
 		return fmt.Sprintf("If this repeats, check the network path to EC2: %s did not finish within its time limit: %v", e.Op, e.Err)
-	case e.Kind == machines.KindRetry:
+	case e.Kind == contracts.FailureRetry:
 		return fmt.Sprintf("If this repeats, check EC2's service health in this region and the account's EC2 request rate: %s failed with an error that the SDK retries: %v", e.Op, e.Err)
 	case e.Code == codeInstanceIDNotFound:
 		return fmt.Sprintf("Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return %s for an instance that exists: %s failed: %v", e.Code, e.Op, e.Err)
@@ -83,25 +84,25 @@ func (e *Error) Unwrap() error { return e.Err }
 // classify returns the kind of err. It reads the error code first, because the limit
 // codes are client errors that the SDK does not retry, and a capacity error that the
 // SDK retried is still a limit.
-func classify(err error) machines.Kind {
+func classify(err error) string {
 	code := errorCode(err)
 	switch {
 	case code == codeInstanceLimit || code == codeVcpuLimit || code == codeCapacity || code == codeSubnetFull:
-		return machines.KindLimit
+		return contracts.FailureLimit
 	case defectCode(code):
-		return machines.KindDefect
+		return contracts.FailureDefect
 	}
 	var maxAttempts *retry.MaxAttemptsError
 	switch {
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &maxAttempts):
-		return machines.KindRetry
+		return contracts.FailureRetry
 	case errors.Is(err, context.Canceled):
 		// The caller's context ended; a retry inside that context fails at once.
-		return machines.KindOther
+		return contracts.FailureOther
 	case retry.IsErrorRetryables(retry.DefaultRetryables).IsErrorRetryable(err) == aws.TrueTernary:
-		return machines.KindRetry
+		return contracts.FailureRetry
 	}
-	return machines.KindOther
+	return contracts.FailureOther
 }
 
 // defectCode reports whether the EC2 error code means that the request, the settings
@@ -144,10 +145,10 @@ func wrap(op string, err error) error {
 
 // defect returns a failure of the kind defect with message.
 func defect(message string) error {
-	return &machines.Error{Kind: machines.KindDefect, Message: message}
+	return &adapterio.Failure{Kind: contracts.FailureDefect, Message: message}
 }
 
 // other returns a failure of the kind other with message.
 func other(message string) error {
-	return &machines.Error{Kind: machines.KindOther, Message: message}
+	return &adapterio.Failure{Kind: contracts.FailureOther, Message: message}
 }

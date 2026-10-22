@@ -14,7 +14,7 @@ import (
 	"github.com/qoryai/hive/internal/adapter"
 	"github.com/qoryai/hive/internal/journal"
 	"github.com/qoryai/hive/internal/loop"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // equal fails the test when got is not want.
@@ -75,7 +75,7 @@ func TestTheDefaultSizeIsStandard(t *testing.T) {
 // and other. A defect is logged at the level error. No adapter text reaches the
 // release.
 func TestAMakeFailureOfEachKind(t *testing.T) {
-	adapterError := func(k machines.Kind) error {
+	adapterError := func(k string) error {
 		return &adapter.Error{Command: "make", Kind: k, Message: "Fix the vendor account: adapter text"}
 	}
 	for _, c := range []struct {
@@ -86,10 +86,10 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 		wait   time.Duration
 		level  string
 	}{
-		{"limit", adapterError(machines.KindLimit), "limit", loop.ReasonLimit, 60 * time.Second, "WARN"},
-		{"retry", adapterError(machines.KindRetry), "retry", loop.ReasonRetry, 15 * time.Second, "WARN"},
-		{"defect", adapterError(machines.KindDefect), "defect", loop.ReasonDefect, 60 * time.Second, "ERROR"},
-		{"other", adapterError(machines.KindOther), "other", loop.ReasonOther, 15 * time.Second, "WARN"},
+		{"limit", adapterError(contracts.FailureLimit), "limit", loop.ReasonLimit, 60 * time.Second, "WARN"},
+		{"retry", adapterError(contracts.FailureRetry), "retry", loop.ReasonRetry, 15 * time.Second, "WARN"},
+		{"defect", adapterError(contracts.FailureDefect), "defect", loop.ReasonDefect, 60 * time.Second, "ERROR"},
+		{"other", adapterError(contracts.FailureOther), "other", loop.ReasonOther, 15 * time.Second, "WARN"},
 		{"a request that fails a rule", errors.New("Report this defect in the provisioner"), "defect", loop.ReasonDefect, 60 * time.Second, "ERROR"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -243,13 +243,13 @@ func TestTheLoopClaimsOnlyBelowMaxMachines(t *testing.T) {
 	h := newHarness(t)
 	h.config.MaxMachines = 1
 	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: "i-a", MaxLifetimeMinutes: lifetime})
-	h.machines.add("i-a", dispatchA, machines.StateRunning, epoch)
+	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
 	h.start()
 	h.tick()
 	if n := h.apiary.claimCount(); n != 0 {
 		t.Fatalf("the loop asked for %d claims with a full journal", n)
 	}
-	h.machines.setState("i-a", machines.StateStopped)
+	h.machines.setState("i-a", contracts.MachineStopped)
 	h.tick()
 	h.idle()
 	equal(t, "the journal", h.entries(), nil)

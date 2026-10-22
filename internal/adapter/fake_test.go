@@ -17,7 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // fakeSwitch makes the test binary act as a fake machine adapter. Its name does not
@@ -51,8 +52,8 @@ type config struct {
 	StartDataSHA256 string `json:"start_data_sha256,omitempty"`
 	// Kind and Message are the failure of mode fail. The Message echo writes the start
 	// data, and echo64 writes it as base64.
-	Kind    machines.Kind `json:"kind,omitempty"`
-	Message string        `json:"message,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Message string `json:"message,omitempty"`
 	// Stdout and Status are the output and the exit status of mode raw.
 	Stdout string `json:"stdout,omitempty"`
 	Status int    `json:"status,omitempty"`
@@ -61,6 +62,12 @@ type config struct {
 	// GroupFile is where modes hang, daemon and orphan write their process id, which
 	// is the id of the process group.
 	GroupFile string `json:"group_file,omitempty"`
+}
+
+// bigLog is a log answer whose line, with its line feed, is 1 MiB or at most 5 bytes
+// less: control characters, each escaped as 6 bytes.
+func bigLog() contracts.MachinesLogAnswer {
+	return adapterio.LogAnswer(strings.Repeat("\x01", adapterio.MaxLog))
 }
 
 // writePID writes the process id to path through a rename, so a reader finds either
@@ -142,8 +149,8 @@ func fake(args []string) int {
 		}
 	case "biglog":
 		_, _ = io.ReadAll(os.Stdin)
-		doc, _ := machines.Encode(machines.LogAnswer{Log: strings.Repeat("\x00", machines.MaxLog)})
-		_, _ = os.Stdout.Write(doc)
+		doc, _ := adapterio.Encode(bigLog())
+		_, _ = os.Stdout.Write(append(doc, '\n'))
 		return 0
 	case "raw":
 		_, _ = io.ReadAll(os.Stdin)
@@ -164,8 +171,8 @@ func fake(args []string) int {
 			rep.KeptEnv = true
 		}
 	}
-	if req, err := machines.DecodeMakeRequest(stdin); err == nil {
-		sum := sha256.Sum256(req.StartData)
+	if _, data, err := adapterio.DecodeMake(stdin); err == nil {
+		sum := sha256.Sum256(data)
 		rep.StartDataMatch = hex.EncodeToString(sum[:]) == cfg.StartDataSHA256
 	}
 	if cfg.Report != "" {
@@ -175,10 +182,10 @@ func fake(args []string) int {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "fake adapter: %s ran\n", args[0])
-	return machines.Serve(context.Background(), args, bytes.NewReader(stdin), os.Stdout, &handler{cfg: cfg})
+	return adapterio.Serve(context.Background(), args, bytes.NewReader(stdin), os.Stdout, &handler{cfg: cfg})
 }
 
-// handler is the fake adapter's [machines.Handler].
+// handler is the fake adapter's [adapterio.Handler].
 type handler struct{ cfg config }
 
 func (h *handler) err(req []byte) error {
@@ -192,11 +199,11 @@ func (h *handler) err(req []byte) error {
 	case "echo64":
 		msg = "Check the start data " + base64.StdEncoding.EncodeToString(req)
 	}
-	return &machines.Error{Kind: h.cfg.Kind, Message: msg}
+	return &adapterio.Failure{Kind: h.cfg.Kind, Message: msg}
 }
 
-func (h *handler) Check(context.Context, string, machines.CheckRequest) (machines.CheckAnswer, error) {
-	return machines.CheckAnswer{}, h.err(nil)
+func (h *handler) Check(context.Context, string, contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error) {
+	return contracts.MachinesCheckAnswer{}, h.err(nil)
 }
 
 // machines reads the fake's machines, by key, from the file beside its report.
@@ -209,44 +216,44 @@ func (h *handler) machines() map[string]string {
 }
 
 // Make makes at most one machine per key, and knows the one size standard.
-func (h *handler) Make(_ context.Context, _ string, req machines.MakeRequest) (machines.MakeAnswer, error) {
-	if err := h.err(req.StartData); err != nil {
-		return machines.MakeAnswer{}, err
+func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
+	if err := h.err(startData); err != nil {
+		return contracts.MachinesMakeAnswer{}, err
 	}
 	if req.Size != "standard" {
-		return machines.MakeAnswer{}, &machines.Error{Kind: machines.KindDefect, Message: "Add the size to the adapter's settings: the adapter has no size of this name"}
+		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Add the size to the adapter's settings: the adapter has no size of this name"}
 	}
 	m := h.machines()
 	if id, ok := m[req.Key]; ok {
-		return machines.MakeAnswer{ID: id}, nil
+		return contracts.MachinesMakeAnswer{ID: id}, nil
 	}
 	id := fmt.Sprintf("i-%017x", len(m)+1)
 	m[req.Key] = id
 	b, _ := json.Marshal(m)
 	if err := os.WriteFile(h.cfg.Report+".machines", b, 0o600); err != nil {
-		return machines.MakeAnswer{}, err
+		return contracts.MachinesMakeAnswer{}, err
 	}
-	return machines.MakeAnswer{ID: id}, nil
+	return contracts.MachinesMakeAnswer{ID: id}, nil
 }
 
-func (h *handler) List(_ context.Context, _ string, req machines.ListRequest) (machines.ListAnswer, error) {
-	m := machines.Machine{ID: "i-0123456789abcdef0", Key: testKey, State: machines.StateRunning, Started: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
-	return machines.ListAnswer{Machines: []machines.Machine{m}}, h.err(nil)
+func (h *handler) List(_ context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
+	m := contracts.Machine{ID: "i-0123456789abcdef0", Key: testKey, State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
+	return contracts.MachinesListAnswer{Machines: []contracts.Machine{m}}, h.err(nil)
 }
 
-func (h *handler) Log(context.Context, string, machines.LogRequest) (machines.LogAnswer, error) {
-	return machines.LogAnswer{Log: "boot\n"}, h.err(nil)
+func (h *handler) Log(context.Context, string, contracts.MachinesLog) (contracts.MachinesLogAnswer, error) {
+	return contracts.MachinesLogAnswer{Log: "boot\n"}, h.err(nil)
 }
 
 // Delete returns deleting for a machine that the fake made, and gone for any other id.
-func (h *handler) Delete(_ context.Context, _ string, req machines.DeleteRequest) (machines.DeleteAnswer, error) {
+func (h *handler) Delete(_ context.Context, _ string, req contracts.MachinesDelete) (contracts.MachinesDeleteAnswer, error) {
 	if err := h.err(nil); err != nil {
-		return machines.DeleteAnswer{}, err
+		return contracts.MachinesDeleteAnswer{}, err
 	}
 	for _, id := range h.machines() {
 		if id == req.ID {
-			return machines.DeleteAnswer{State: machines.StateDeleting}, nil
+			return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
 		}
 	}
-	return machines.DeleteAnswer{State: machines.StateGone}, nil
+	return contracts.MachinesDeleteAnswer{State: contracts.MachineGone}, nil
 }

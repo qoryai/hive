@@ -1,12 +1,11 @@
 // Package adapter runs the commands of a machine adapter, the separate program that
-// makes, lists, reads and deletes machines at one vendor, as version 1 of the protocol
-// in package machines states them.
+// makes, lists, reads and deletes machines at one vendor, as machines/v1 of the
+// integrations contracts states them. Package adapterio checks each request and answer.
 //
 // The runner starts the adapter as <command> <name> --settings <file> in a new process
 // group, writes the request on its standard input and reads at most
-// [machines.MaxOutput] bytes of its standard output: 5 MiB for log, 1 MiB for any other
-// command. The adapter's standard error goes
-// to the runner's stderr writer unchanged. The adapter's environment is the
+// contracts.MaxMachinesAnswer bytes, 1 MiB, of its standard output for every command.
+// The adapter's standard error goes to the runner's stderr writer unchanged. The adapter's environment is the
 // provisioner's environment without any variable whose name starts with QORY_. The
 // start data travels only on standard input. The runner's errors never contain the
 // adapter's standard output or standard error, except the message of a valid error
@@ -16,6 +15,7 @@ package adapter
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +27,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The time limits of the commands. When a command runs longer, the runner kills the
@@ -54,7 +55,7 @@ type Error struct {
 	// Command is the command: check, make, list, log or delete.
 	Command string
 	// Kind is the kind of failure.
-	Kind machines.Kind
+	Kind string
 	// Message is the failure for the operator.
 	Message string
 }
@@ -104,39 +105,39 @@ func timeout(name string) time.Duration {
 // Check runs check: the adapter shows that its rights and settings work, and makes no
 // machine.
 func (r *Runner) Check(ctx context.Context) error {
-	_, err := run(ctx, r, "check", machines.CheckRequest{Version: machines.Version}, nil, machines.DecodeCheckAnswer)
+	_, err := run(ctx, r, "check", contracts.MachinesCheck{Version: adapterio.Version}, nil, adapterio.DecodeCheckAnswer)
 	return err
 }
 
 // Make runs make: the adapter makes one machine of size in pool for key, the dispatch
 // id, and delivers startData to it. startData contains the machine's run code, and it
 // travels only on the adapter's standard input.
-func (r *Runner) Make(ctx context.Context, key, pool, size string, startData []byte) (machines.MakeAnswer, error) {
-	req := machines.MakeRequest{Version: machines.Version, Key: key, Pool: pool, Size: size, StartData: startData}
-	return run(ctx, r, "make", req, startData, machines.DecodeMakeAnswer)
+func (r *Runner) Make(ctx context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error) {
+	req := contracts.MachinesMake{Version: adapterio.Version, Key: key, Pool: pool, Size: size, StartData: base64.StdEncoding.EncodeToString(startData)}
+	return run(ctx, r, "make", req, startData, adapterio.DecodeMakeAnswer)
 }
 
 // List runs list: the adapter lists the machines of pool.
-func (r *Runner) List(ctx context.Context, pool string) (machines.ListAnswer, error) {
-	return run(ctx, r, "list", machines.ListRequest{Version: machines.Version, Pool: pool}, nil, machines.DecodeListAnswer)
+func (r *Runner) List(ctx context.Context, pool string) (contracts.MachinesListAnswer, error) {
+	return run(ctx, r, "list", contracts.MachinesList{Version: adapterio.Version, Pool: pool}, nil, adapterio.DecodeListAnswer)
 }
 
 // Log runs log: the adapter reads the console text of the machine id.
-func (r *Runner) Log(ctx context.Context, id string) (machines.LogAnswer, error) {
-	return run(ctx, r, "log", machines.LogRequest{Version: machines.Version, ID: id}, nil, machines.DecodeLogAnswer)
+func (r *Runner) Log(ctx context.Context, id string) (contracts.MachinesLogAnswer, error) {
+	return run(ctx, r, "log", contracts.MachinesLog{Version: adapterio.Version, ID: id}, nil, adapterio.DecodeLogAnswer)
 }
 
 // Delete runs delete: the adapter deletes the machine id.
-func (r *Runner) Delete(ctx context.Context, id string) (machines.DeleteAnswer, error) {
-	return run(ctx, r, "delete", machines.DeleteRequest{Version: machines.Version, ID: id}, nil, machines.DecodeDeleteAnswer)
+func (r *Runner) Delete(ctx context.Context, id string) (contracts.MachinesDeleteAnswer, error) {
+	return run(ctx, r, "delete", contracts.MachinesDelete{Version: adapterio.Version, ID: id}, nil, adapterio.DecodeDeleteAnswer)
 }
 
 // run runs the command name with req on standard input and decodes the answer.
 // startData is the start data of a make request, which an error message must not
 // contain.
-func run[A any](ctx context.Context, r *Runner, name string, req machines.Document, startData []byte, decode func([]byte) (A, error)) (A, error) {
+func run[A any](ctx context.Context, r *Runner, name string, req any, startData []byte, decode func([]byte) (A, error)) (A, error) {
 	var zero A
-	body, err := machines.Encode(req)
+	body, err := adapterio.Encode(req)
 	if err != nil {
 		return zero, fmt.Errorf("Report this defect in the provisioner: its %s request to the machine adapter is not valid: %w", name, err)
 	}
@@ -144,7 +145,7 @@ func run[A any](ctx context.Context, r *Runner, name string, req machines.Docume
 	cmdCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 
-	out := &capped{limit: machines.MaxOutput(name), cancel: cancel}
+	out := &capped{limit: contracts.MaxMachinesAnswer, cancel: cancel}
 	cmd := exec.CommandContext(cmdCtx, r.command, name, "--settings", r.settings)
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Stdout = out
@@ -173,7 +174,7 @@ func run[A any](ctx context.Context, r *Runner, name string, req machines.Docume
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	defect := func(format string, args ...any) error {
-		return &Error{Command: name, Kind: machines.KindDefect, Message: fmt.Sprintf(format, args...)}
+		return &Error{Command: name, Kind: contracts.FailureDefect, Message: fmt.Sprintf(format, args...)}
 	}
 	ps := cmd.ProcessState
 	exited := ps != nil && ps.Exited()
@@ -217,16 +218,16 @@ func run[A any](ctx context.Context, r *Runner, name string, req machines.Docume
 // wrote stdout.
 func failure(name string, code int, stdout, startData []byte) error {
 	defect := func(format string, args ...any) error {
-		return &Error{Command: name, Kind: machines.KindDefect, Message: fmt.Sprintf(format, args...)}
+		return &Error{Command: name, Kind: contracts.FailureDefect, Message: fmt.Sprintf(format, args...)}
 	}
-	if code != machines.ExitFailure {
+	if code != adapterio.ExitFailure {
 		return defect("Fix the machine adapter: it exited with status %d for %s; only status 0 and status 1 are allowed", code, name)
 	}
-	doc, err := machines.DecodeErrorAnswer(stdout)
+	doc, err := adapterio.DecodeError(stdout)
 	if err != nil {
 		return defect("Fix the machine adapter: it exited with status 1 for %s, and its standard output fails a rule of the error document: %v", name, err)
 	}
-	if machines.ContainsSecret(doc.Error.Message, startData) {
+	if adapterio.ContainsSecret(doc.Error.Message, startData) {
 		return defect("Fix the machine adapter: its error message for %s contains what looks like a run code or the start data, so the provisioner does not show it", name)
 	}
 	return &Error{Command: name, Kind: doc.Error.Kind, Message: doc.Error.Message}

@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/qoryai/hive/internal/adapter"
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/journal"
 	"github.com/qoryai/hive/internal/loop"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // dispatched is the dispatched entry of the dispatch id and the machine id.
@@ -76,7 +77,7 @@ func TestAStoppedMachineIsCleanedUp(t *testing.T) {
 	h.claim(newClaim(dispatchA))
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
-	h.machines.setState(machineID(1), machines.StateStopped)
+	h.machines.setState(machineID(1), contracts.MachineStopped)
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
@@ -95,9 +96,9 @@ func TestAStoppedMachineIsCleanedUp(t *testing.T) {
 func TestAnEntryWhoseMachineIsDeletingIsRemoved(t *testing.T) {
 	h := newHarness(t)
 	h.setEntries(dispatched(dispatchA, "i-a"))
-	h.machines.add("i-a", dispatchA, machines.StateRunning, epoch)
+	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
 	h.start()
-	h.machines.setState("i-a", machines.StateDeleting)
+	h.machines.setState("i-a", contracts.MachineDeleting)
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
@@ -177,7 +178,7 @@ func TestAMachineListedLateIsNotAStray(t *testing.T) {
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.tick()
-	h.machines.add(machineID(1), dispatchA, machines.StateRunning, epoch)
+	h.machines.add(machineID(1), dispatchA, contracts.MachineRunning, epoch)
 	for range ticksInGrace + 2 {
 		h.tick()
 	}
@@ -204,8 +205,8 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 	h.setEntries(short(dispatched(dispatchA, "i-a")), short(dispatched(dispatchB, "i-b")))
 	// The watch runs at epoch + 60 s. The bound is the start time + 30 minutes.
 	at := epoch.Add(loop.WatchInterval - 30*time.Minute)
-	h.machines.add("i-a", dispatchA, machines.StateRunning, at.Add(-time.Second))
-	h.machines.add("i-b", dispatchB, machines.StateRunning, at)
+	h.machines.add("i-a", dispatchA, contracts.MachineRunning, at.Add(-time.Second))
+	h.machines.add("i-b", dispatchB, contracts.MachineRunning, at)
 	h.start()
 	h.machines.takeCalls()
 	h.tick()
@@ -230,8 +231,8 @@ func TestAStrayIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "stray log"
 	h.start()
-	h.machines.add("i-s", dispatchC, machines.StateRunning, epoch)
-	h.machines.add("i-d", dispatchD, machines.StateDeleting, epoch)
+	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
+	h.machines.add("i-d", dispatchD, contracts.MachineDeleting, epoch)
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false"})
@@ -263,7 +264,7 @@ func TestAMachineInFlightIsNotAStray(t *testing.T) {
 	case <-time.After(patience):
 		t.Fatal("the make did not start")
 	}
-	h.machines.add("i-early", dispatchA, machines.StateStarting, epoch)
+	h.machines.add("i-early", dispatchA, contracts.MachineStarting, epoch)
 	h.tick()
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check"})
 	close(h.machines.makeGate)
@@ -279,10 +280,10 @@ func TestAMachineInFlightIsNotAStray(t *testing.T) {
 func TestAFailedDeleteIsTriedAgain(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "log"
-	h.machines.deleteErr = []error{&adapter.Error{Command: "delete", Kind: machines.KindRetry, Message: "Try again later: the vendor throttled the call"}}
+	h.machines.deleteErr = []error{&adapter.Error{Command: "delete", Kind: contracts.FailureRetry, Message: "Try again later: the vendor throttled the call"}}
 	h.start()
 	h.claim(newClaim(dispatchA))
-	h.machines.setState(machineID(1), machines.StateStopped)
+	h.machines.setState(machineID(1), contracts.MachineStopped)
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.tick()
@@ -311,7 +312,7 @@ func TestEachCleanupStepRunsAfterAFailure(t *testing.T) {
 		uploads   int
 		msg       string
 	}{
-		{"the read fails", &adapter.Error{Command: "log", Kind: machines.KindOther, Message: "Check the vendor"}, nil, 0, "reading a machine's log failed"},
+		{"the read fails", &adapter.Error{Command: "log", Kind: contracts.FailureOther, Message: "Check the vendor"}, nil, 0, "reading a machine's log failed"},
 		{"the upload fails", nil, errors.New("no answer from Qory Apiary"), 1, "uploading a machine's log failed"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -348,8 +349,8 @@ func TestALogAtTheBoundIsTruncated(t *testing.T) {
 		size      int
 		truncated bool
 	}{
-		{machines.MaxLog, true},
-		{machines.MaxLog - 1, false},
+		{adapterio.MaxLog, true},
+		{adapterio.MaxLog - 1, false},
 		{0, false},
 	} {
 		t.Run(fmt.Sprint(c.size), func(t *testing.T) {
@@ -376,7 +377,7 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	h.claim(newClaim(dispatchA))
 	h.apiary.takeCalls()
 	h.machines.mu.Lock()
-	h.machines.listErr = &adapter.Error{Command: "list", Kind: machines.KindRetry, Message: "Try again later"}
+	h.machines.listErr = &adapter.Error{Command: "list", Kind: contracts.FailureRetry, Message: "Try again later"}
 	h.machines.mu.Unlock()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
@@ -455,7 +456,7 @@ var machineExists = fmt.Errorf("Qory Apiary answered: %w", loop.ErrMachineExists
 // 410 gone cleans the machine up.
 func TestAMakeFailureWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	h := newHarness(t)
-	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Try again later: the vendor's answer was lost"}
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later: the vendor's answer was lost"}
 	h.apiary.releaseErr = machineExists
 	h.start()
 	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
@@ -465,7 +466,7 @@ func TestAMakeFailureWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	if len(h.find("the release returned machine_exists: a machine redeemed the run code")) != 1 || len(h.find("released a dispatch")) != 0 {
 		t.Error("the log has no line for machine_exists, or a line for a release")
 	}
-	h.machines.add("i-late", dispatchA, machines.StateRunning, epoch)
+	h.machines.add("i-late", dispatchA, contracts.MachineRunning, epoch)
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.clock.Advance(loop.ShortWait)
@@ -501,7 +502,7 @@ func TestARestartReleaseWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	equal(t, "the journal", h.entries(), []journal.Entry{claimed})
 	h.tick()
 	equal(t, "the journal", h.entries(), []journal.Entry{claimed})
-	h.machines.add("i-late", dispatchA, machines.StateRunning, epoch)
+	h.machines.add("i-late", dispatchA, contracts.MachineRunning, epoch)
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late"})
@@ -520,7 +521,7 @@ func TestARestartReleaseWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 // 15 minutes have passed since the claim, and then removes it.
 func TestAKeptClaimedEntryIsRemovedAfterItsLifetime(t *testing.T) {
 	h := newHarness(t)
-	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Try again later"}
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later"}
 	h.apiary.releaseErr = machineExists
 	h.start()
 	c := newClaim(dispatchA)
