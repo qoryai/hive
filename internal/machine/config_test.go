@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 
 	"github.com/qoryai/hive/internal/adapterio"
@@ -253,6 +254,29 @@ func TestLoadConfigIgnoresSharedFiles(t *testing.T) {
 	}
 	if e := ec2.NewFromConfig(cfg).Options().BaseEndpoint; e != nil {
 		t.Errorf("the EC2 client has the endpoint %q", *e)
+	}
+}
+
+// TestLoadConfigDefaultsModeAuto pins that AWS_DEFAULTS_MODE=auto does not apply: the
+// configuration has the defaults mode legacy and no runtime environment, which auto
+// would set from a region read from the instance metadata, and the metadata service
+// gets only the requests for the credentials.
+func TestLoadConfigDefaultsModeAuto(t *testing.T) {
+	paths := rolePaths()
+	paths["/latest/dynamic/instance-identity/document"] = `{"region": "test-region-2", "instanceId": "i-0123456789abcdef0"}`
+	srv, s := newIMDS(t, paths)
+	isolateAWSEnv(t, srv.URL)
+	t.Setenv("AWS_REGION", "test-region-1")
+	t.Setenv("AWS_DEFAULTS_MODE", "auto")
+	cfg, err := LoadConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultsMode != aws.DefaultsModeLegacy || cfg.RuntimeEnvironment != (aws.RuntimeEnvironment{}) {
+		t.Errorf("defaults mode %q, runtime environment %+v; want legacy and none", cfg.DefaultsMode, cfg.RuntimeEnvironment)
+	}
+	if n := s.documentReads(); n != 0 {
+		t.Errorf("%d reads of the region from the metadata, want 0", n)
 	}
 }
 

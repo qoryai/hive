@@ -116,6 +116,9 @@ var imdsEndpoint string
 //     proxy.
 //   - The configuration has no EC2 endpoint, so the EC2 client calls the standard
 //     endpoint of the region.
+//   - The SDK's defaults mode is legacy, the SDK's default when AWS_DEFAULTS_MODE is
+//     not set. AWS_DEFAULTS_MODE does not apply: its value auto makes the SDK read the
+//     region from the instance metadata with a client that uses HTTP_PROXY.
 //
 // LoadConfig retrieves the credentials once, so a host with no instance role fails
 // here.
@@ -142,6 +145,7 @@ func LoadConfig(ctx context.Context) (aws.Config, error) {
 		config.WithSharedConfigFiles([]string{}),
 		config.WithSharedCredentialsFiles([]string{}),
 		config.WithRegion(region),
+		config.WithDefaultsMode(aws.DefaultsModeLegacy),
 		config.WithCredentialsProvider(ec2rolecreds.New(func(o *ec2rolecreds.Options) { o.Client = meta })),
 	)
 	if err != nil {
