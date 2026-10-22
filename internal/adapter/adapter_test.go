@@ -221,10 +221,29 @@ func TestErrorDocument(t *testing.T) {
 }
 
 func TestErrorMessageWithSecret(t *testing.T) {
+	// The fake's Serve replaces such a message before the runner reads it.
 	for _, msg := range []string{"echo", "echo64", "Check the code qecr_abc"} {
 		f := newFixture(t, config{Mode: "fail", Kind: machines.KindOther, Message: msg})
 		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
-		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data")
+		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so Serve wrote this message in its place")
+	}
+	// The runner replaces it when the adapter writes it: the start data, raw (as a
+	// JSON string) or in base64, the run code prefix in any case, and a cut part of
+	// the start data in base64 from several start characters.
+	const want = "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the provisioner does not show it"
+	raw, _ := json.Marshal(string(startData))
+	enc := base64.StdEncoding.EncodeToString(startData)
+	for _, part := range []string{string(raw[1 : len(raw)-1]), enc, "QECR_abc", enc[:80], enc[1:60], enc[2:50], enc[3:45], enc[21:52]} {
+		f := newFixture(t, config{Mode: "raw", Status: 1, Stdout: `{"error": {"kind": "other", "message": "Check the start data ` + part + `"}}`})
+		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+		defect(t, err, "make", want)
+	}
+}
+
+func TestErrorIsOneLine(t *testing.T) {
+	e := &Error{Command: "make", Kind: machines.KindOther, Message: "Raise\nthe\tquota\r\u2028now\u0085."}
+	if got := e.Error(); got != "Raise the quota  now . (machine adapter command make, kind other)" {
+		t.Errorf("the error text is %q", got)
 	}
 }
 
@@ -310,15 +329,30 @@ func TestCancelKillsProcessGroup(t *testing.T) {
 }
 
 func TestOutputLeftOpen(t *testing.T) {
-	f := newFixture(t, config{Mode: "daemon"})
+	f := newFixture(t, config{Mode: "daemon", Stdout: ""})
 	f.r.waitDelay = 300 * time.Millisecond
 	defect(t, f.r.Check(context.Background()), "check", "Fix the machine adapter: a process that it started kept its standard output or standard error open after check exited")
-	b, err := os.ReadFile(f.cfg.PIDFile)
-	if err == nil {
-		if pid, err := strconv.Atoi(string(b)); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
+	f.gone(t)
+}
+
+func TestChildOutlivesSuccess(t *testing.T) {
+	f := newFixture(t, config{Mode: "orphan", Stdout: "{}\n"})
+	if err := f.r.Check(context.Background()); err != nil {
+		t.Fatal(err)
 	}
+	f.gone(t)
+}
+
+// TestAnswerWithOutputLeftOpen checks that an adapter that exits with status 0 keeps
+// its valid answer when a child that it left holds standard output open.
+func TestAnswerWithOutputLeftOpen(t *testing.T) {
+	f := newFixture(t, config{Mode: "daemon", Stdout: `{"id": "i-0123456789abcdef0"}`})
+	f.r.waitDelay = 300 * time.Millisecond
+	made, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+	if err != nil || made.ID != "i-0123456789abcdef0" {
+		t.Errorf("make returned %+v, %v", made, err)
+	}
+	f.gone(t)
 }
 
 func TestInvalidRequest(t *testing.T) {

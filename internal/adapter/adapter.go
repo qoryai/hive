@@ -16,15 +16,16 @@ package adapter
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/qoryai/hive/machines"
 )
@@ -43,9 +44,12 @@ const (
 const waitDelay = 5 * time.Second
 
 // Error is a failed command. Kind and Message come from the adapter's error document
-// when the adapter exits with status 1 and writes a valid one. Any other failure has
-// the kind defect and a message that starts with the fix and states the exit status or
-// the rule that failed.
+// when the adapter exits with status 1 and writes a valid one. Any other failure of
+// the adapter has the kind defect and a message that starts with the fix and states
+// the exit status or the rule that failed. Two failures return a plain error, not an
+// *Error: a context that ends before the adapter finishes, which wraps the context's
+// error, and a request that fails a rule of version 1, for which the runner does not
+// start the adapter.
 type Error struct {
 	// Command is the command: check, make, list, log or delete.
 	Command string
@@ -55,9 +59,20 @@ type Error struct {
 	Message string
 }
 
-// Error returns the message, then the command and the kind.
+// Error returns the message, then the command and the kind, on one line: each control
+// character, line separator and paragraph separator of the message becomes a space.
 func (e *Error) Error() string {
-	return fmt.Sprintf("%s (machine adapter command %s, kind %s)", e.Message, e.Command, e.Kind)
+	return fmt.Sprintf("%s (machine adapter command %s, kind %s)", oneLine(e.Message), e.Command, e.Kind)
+}
+
+// oneLine is s with each control character, U+2028 and U+2029 replaced by a space.
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // Runner runs the commands of one machine adapter.
@@ -136,70 +151,84 @@ func run[A any](ctx context.Context, r *Runner, name string, req machines.Docume
 	cmd.Stderr = r.stderr
 	cmd.Env = environment()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// killed records a kill of the process group that reached at least one process,
+	// so that an error claims the kill only when it happened.
+	var killed atomic.Bool
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		if err == nil {
+			killed.Store(true)
+		}
+		return err
+	}
 	cmd.WaitDelay = r.waitDelay
 
 	err = cmd.Run()
+	if cmd.Process != nil {
+		// A process that the adapter started may outlive it. ESRCH means none is left,
+		// and no other error leaves anything to do.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	defect := func(format string, args ...any) error {
 		return &Error{Command: name, Kind: machines.KindDefect, Message: fmt.Sprintf(format, args...)}
 	}
-	var exit *exec.ExitError
+	ps := cmd.ProcessState
+	exited := ps != nil && ps.Exited()
 	switch {
-	case out.over:
-		return zero, defect("Fix the machine adapter: it wrote more than %d bytes on standard output for %s, so the provisioner killed its process group", out.limit, name)
-	case ctx.Err() != nil && cmd.Process == nil:
+	case cmd.Process == nil && ctx.Err() != nil:
 		return zero, fmt.Errorf("the provisioner cancelled the machine adapter's %s before it started: %w", name, ctx.Err())
-	case ctx.Err() != nil:
-		return zero, fmt.Errorf("the provisioner stopped the machine adapter's %s and killed its process group: %w", name, ctx.Err())
 	case cmd.Process == nil:
 		return zero, defect("Fix adapter.command in the provisioner's settings: the machine adapter did not start: %v", err)
-	case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
+	case out.over && killed.Load():
+		return zero, defect("Fix the machine adapter: it wrote more than %d bytes on standard output for %s, so the provisioner killed its process group", out.limit, name)
+	case out.over:
+		return zero, defect("Fix the machine adapter: it wrote more than %d bytes on standard output for %s", out.limit, name)
+	case exited && ps.ExitCode() == 0:
+		// The adapter exited with status 0 before any kill, so a valid answer counts
+		// even when the context ended or a child held the output open after the exit:
+		// a made machine's id must not be lost.
+		answer, decodeErr := decode(out.Bytes())
+		switch {
+		case decodeErr == nil:
+			return answer, nil
+		case errors.Is(err, exec.ErrWaitDelay):
+			return zero, defect("Fix the machine adapter: a process that it started kept its standard output or standard error open after %s exited", name)
+		}
+		return zero, defect("Fix the machine adapter: its answer to %s fails a rule of version 1: %v", name, decodeErr)
+	case exited:
+		return zero, failure(name, ps.ExitCode(), out.Bytes(), startData)
+	case killed.Load() && ctx.Err() != nil:
+		return zero, fmt.Errorf("the provisioner stopped the machine adapter's %s and killed its process group: %w", name, ctx.Err())
+	case killed.Load():
 		return zero, defect("Fix the machine adapter: %s ran longer than its time limit of %s, so the provisioner killed its process group", name, limit)
-	case errors.Is(err, exec.ErrWaitDelay):
-		return zero, defect("Fix the machine adapter: a process that it started kept its standard output or standard error open after %s exited", name)
-	case errors.As(err, &exit):
-		return zero, failure(name, exit, out.Bytes(), startData)
-	case err != nil:
-		return zero, defect("Fix the machine adapter: its output for %s could not be read: %v", name, err)
+	case ps != nil:
+		if status, ok := ps.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return zero, defect("Fix the machine adapter: it ended on the signal %s during %s", status.Signal(), name)
+		}
 	}
-	answer, err := decode(out.Bytes())
-	if err != nil {
-		return zero, defect("Fix the machine adapter: its answer to %s fails a rule of version 1: %v", name, err)
-	}
-	return answer, nil
+	return zero, defect("Fix the machine adapter: its output for %s could not be read: %v", name, err)
 }
 
-// failure is the error of an adapter that exited with exit, after it wrote stdout.
-func failure(name string, exit *exec.ExitError, stdout, startData []byte) error {
+// failure is the error of an adapter that exited with the status code, after it
+// wrote stdout.
+func failure(name string, code int, stdout, startData []byte) error {
 	defect := func(format string, args ...any) error {
 		return &Error{Command: name, Kind: machines.KindDefect, Message: fmt.Sprintf(format, args...)}
 	}
-	if status, ok := exit.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		return defect("Fix the machine adapter: it ended on the signal %s during %s", status.Signal(), name)
-	}
-	if code := exit.ExitCode(); code != machines.ExitFailure {
+	if code != machines.ExitFailure {
 		return defect("Fix the machine adapter: it exited with status %d for %s; only status 0 and status 1 are allowed", code, name)
 	}
 	doc, err := machines.DecodeErrorAnswer(stdout)
 	if err != nil {
 		return defect("Fix the machine adapter: it exited with status 1 for %s, and its standard output fails a rule of the error document: %v", name, err)
 	}
-	if secret(doc.Error.Message, startData) {
+	if machines.ContainsSecret(doc.Error.Message, startData) {
 		return defect("Fix the machine adapter: its error message for %s contains what looks like a run code or the start data, so the provisioner does not show it", name)
 	}
 	return &Error{Command: name, Kind: doc.Error.Kind, Message: doc.Error.Message}
-}
-
-// secret is whether message contains what looks like a run code, qecr_ in any case, or
-// the start data, raw or as base64.
-func secret(message string, startData []byte) bool {
-	if strings.Contains(strings.ToLower(message), "qecr_") {
-		return true
-	}
-	if len(startData) == 0 {
-		return false
-	}
-	return strings.Contains(message, string(startData)) || strings.Contains(message, base64.StdEncoding.EncodeToString(startData))
 }
 
 // environment is the provisioner's environment without any variable whose name
@@ -215,9 +244,10 @@ func environment() []string {
 	return out
 }
 
-// capped keeps at most limit bytes. On the first byte over the bound it marks itself
-// over and calls cancel, which kills the adapter's process group; it discards that
-// byte and every later one. It has no ReadFrom method, so io.Copy goes through Write.
+// capped keeps at most limit bytes. On the first write that would cross the bound it
+// marks itself over and calls cancel, which kills the adapter's process group. It
+// discards that whole write and every later one. It has no ReadFrom method, so
+// io.Copy goes through Write.
 type capped struct {
 	buf    bytes.Buffer
 	limit  int

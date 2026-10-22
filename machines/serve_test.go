@@ -3,6 +3,7 @@ package machines_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"reflect"
 	"strings"
@@ -220,5 +221,48 @@ func TestServeLogBound(t *testing.T) {
 	status, out := serve(&handler{answer: machines.LogAnswer{Log: strings.Repeat("\x00", machines.MaxLog)}}, `{"version": 1, "id": "i-1"}`, "log", "--settings", "a.json")
 	if status != machines.ExitOK || len(out) > machines.MaxOutput("log") || len(out) <= machines.MaxAnswer {
 		t.Errorf("status %d, %d bytes", status, len(out))
+	}
+}
+
+func TestServeRefusesSecretMessage(t *testing.T) {
+	data := []byte(`{"version":1,"run_code":"qecr_MARKERc0ffee7a1b","gateway":{"url":"https://gateway.example.com:8443","address":"10.0.1.5"}}`)
+	enc := base64.StdEncoding.EncodeToString(data)
+	in := `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "` + enc + `"}`
+	for _, err := range []error{
+		errors.New("Check the start data " + enc[:80]),
+		errors.New("Check the start data " + string(data)),
+		&machines.Error{Kind: machines.KindLimit, Message: "Check the code qecr_abc"},
+	} {
+		e := errorOf(t, &handler{err: err}, in, "make", "--settings", "a.json")
+		if e.Kind != machines.KindDefect || e.Message != "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so Serve wrote this message in its place" {
+			t.Errorf("the error document is %#v", e)
+		}
+	}
+}
+
+// TestContainsSecret checks that the run code prefix is found in base64 at each byte
+// offset, whatever bytes surround it.
+func TestContainsSecret(t *testing.T) {
+	for offset := range 3 {
+		for _, fill := range []byte{0x00, 0x5a, 0xff} {
+			for tail := range 3 {
+				b := append(bytes.Repeat([]byte{fill}, offset), "qecr_"...)
+				b = append(b, bytes.Repeat([]byte{fill ^ 0xa5}, tail)...)
+				for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding} {
+					if text := enc.EncodeToString(b); !machines.ContainsSecret(text, nil) {
+						t.Errorf("offset %d, fill %#x, tail %d: %s is not found", offset, fill, tail, text)
+					}
+				}
+			}
+		}
+	}
+	for _, text := range []string{
+		"Raise the instance quota of the account.",
+		"Add the size to the adapter's settings: the adapter has no size of this name",
+		"Check the subnet subnet-0123456789abcdef0 and the image ami-0123456789abcdef0.",
+	} {
+		if machines.ContainsSecret(text, []byte("start")) {
+			t.Errorf("%q is found", text)
+		}
 	}
 }

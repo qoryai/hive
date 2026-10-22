@@ -13,7 +13,8 @@ import (
 // adapter's settings file, from --settings, and a request that passed its decoder.
 // A method returns an *[Error] to choose the kind of a failure; [Serve] writes any
 // other error with the kind other and the error's text as the message. A message
-// never contains the start data or a secret.
+// never contains the start data or a secret: [Serve] replaces a message for which
+// [ContainsSecret] is true with a fixed message of the kind defect.
 type Handler interface {
 	// Check shows that the adapter's rights and settings work, and makes no machine.
 	Check(ctx context.Context, settings string, req CheckRequest) (CheckAnswer, error)
@@ -77,12 +78,15 @@ func Serve(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer
 		fail(stdout, KindDefect, fmt.Sprintf("Report this defect in the provisioner: its %s request to the machine adapter is larger than %d bytes", name, MaxAnswer))
 		return ExitFailure
 	}
-	answer, err := dispatch(ctx, name, settings, b, h)
+	answer, startData, err := dispatch(ctx, name, settings, b, h)
 	var bad *badRequest
 	var failure *Error
 	switch {
 	case errors.As(err, &bad):
 		fail(stdout, KindDefect, fmt.Sprintf("Report this defect in the provisioner: its %s request to the machine adapter is not valid: %v", name, bad.err))
+		return ExitFailure
+	case err != nil && ContainsSecret(err.Error(), startData):
+		fail(stdout, KindDefect, fmt.Sprintf("Fix the machine adapter: its error message for %s contains what looks like a run code or the start data, so Serve wrote this message in its place", name))
 		return ExitFailure
 	case errors.As(err, &failure):
 		fail(stdout, failure.Kind, failure.Message)
@@ -120,39 +124,45 @@ func command(name string) bool {
 	return false
 }
 
-// dispatch decodes the request b of the command name and calls the handler.
-func dispatch(ctx context.Context, name, settings string, b []byte, h Handler) (Document, error) {
+// dispatch decodes the request b of the command name and calls the handler. It also
+// returns the start data of a make request.
+func dispatch(ctx context.Context, name, settings string, b []byte, h Handler) (Document, []byte, error) {
 	switch name {
 	case "check":
 		req, err := DecodeCheckRequest(b)
 		if err != nil {
-			return nil, &badRequest{err}
+			return nil, nil, &badRequest{err}
 		}
-		return h.Check(ctx, settings, req)
+		a, err := h.Check(ctx, settings, req)
+		return a, nil, err
 	case "make":
 		req, err := DecodeMakeRequest(b)
 		if err != nil {
-			return nil, &badRequest{err}
+			return nil, nil, &badRequest{err}
 		}
-		return h.Make(ctx, settings, req)
+		a, err := h.Make(ctx, settings, req)
+		return a, req.StartData, err
 	case "list":
 		req, err := DecodeListRequest(b)
 		if err != nil {
-			return nil, &badRequest{err}
+			return nil, nil, &badRequest{err}
 		}
-		return h.List(ctx, settings, req)
+		a, err := h.List(ctx, settings, req)
+		return a, nil, err
 	case "log":
 		req, err := DecodeLogRequest(b)
 		if err != nil {
-			return nil, &badRequest{err}
+			return nil, nil, &badRequest{err}
 		}
-		return h.Log(ctx, settings, req)
+		a, err := h.Log(ctx, settings, req)
+		return a, nil, err
 	default:
 		req, err := DecodeDeleteRequest(b)
 		if err != nil {
-			return nil, &badRequest{err}
+			return nil, nil, &badRequest{err}
 		}
-		return h.Delete(ctx, settings, req)
+		a, err := h.Delete(ctx, settings, req)
+		return a, nil, err
 	}
 }
 

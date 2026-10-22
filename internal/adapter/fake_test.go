@@ -40,7 +40,9 @@ func TestMain(m *testing.M) {
 
 // config is the fake adapter's settings file.
 type config struct {
-	// Mode is serve, fail, raw, flood, biglog, hang, sleep, daemon or signal.
+	// Mode is serve, fail, raw, flood, biglog, hang, sleep, daemon, orphan or signal.
+	// Mode daemon leaves a child that holds standard output; mode orphan leaves a
+	// child that does not. Both write Stdout and exit with status 0.
 	Mode string `json:"mode"`
 	// Report is the file to which the fake writes what it received.
 	Report string `json:"report,omitempty"`
@@ -84,7 +86,7 @@ func fake(args []string) int {
 		_ = os.WriteFile(cfg.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 		time.Sleep(10 * time.Minute)
 		return 0
-	case "hang", "daemon":
+	case "hang", "daemon", "orphan":
 		child := config{Mode: "sleep", PIDFile: cfg.PIDFile}
 		cb, _ := json.Marshal(child)
 		path := args[2] + ".child"
@@ -104,8 +106,9 @@ func fake(args []string) int {
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
-		if cfg.Mode == "daemon" {
-			_, _ = os.Stdout.WriteString("{}\n")
+		if cfg.Mode == "daemon" || cfg.Mode == "orphan" {
+			_, _ = io.ReadAll(os.Stdin)
+			_, _ = os.Stdout.WriteString(cfg.Stdout)
 			return 0
 		}
 		time.Sleep(10 * time.Minute)
