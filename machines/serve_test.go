@@ -234,7 +234,7 @@ func TestServeRefusesSecretMessage(t *testing.T) {
 		&machines.Error{Kind: machines.KindLimit, Message: "Check the code qecr_abc"},
 	} {
 		e := errorOf(t, &handler{err: err}, in, "make", "--settings", "a.json")
-		if e.Kind != machines.KindDefect || e.Message != "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so Serve wrote this message in its place" {
+		if e.Kind != machines.KindDefect || e.Message != "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the machine adapter wrote this message in its place" {
 			t.Errorf("the error document is %#v", e)
 		}
 	}

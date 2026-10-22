@@ -67,6 +67,7 @@ func newFixture(t *testing.T, cfg config) *fixture {
 	dir := t.TempDir()
 	cfg.Report = filepath.Join(dir, "report.json")
 	cfg.PIDFile = filepath.Join(dir, "child.pid")
+	cfg.GroupFile = filepath.Join(dir, "group.pid")
 	sum := sha256.Sum256(startData)
 	cfg.StartDataSHA256 = hex.EncodeToString(sum[:])
 	b, err := json.Marshal(cfg)
@@ -99,25 +100,27 @@ func (f *fixture) report(t *testing.T) report {
 	return r
 }
 
-// gone waits until the process in the fake's pid file no longer exists.
+// gone waits until no process of the fake adapter's process group exists. It reads
+// the group id from the file that the fake adapter writes before it starts a child, so
+// a child killed before it wrote its process id passes too.
 func (f *fixture) gone(t *testing.T) {
 	t.Helper()
-	b, err := os.ReadFile(f.cfg.PIDFile)
+	b, err := os.ReadFile(f.cfg.GroupFile)
 	if err != nil {
-		t.Fatalf("the fake adapter's child wrote no pid: %v", err)
+		t.Fatalf("the fake adapter wrote no group id: %v", err)
 	}
-	pid, err := strconv.Atoi(string(b))
+	pgid, err := strconv.Atoi(string(b))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 500 {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	t.Errorf("the adapter's child process %d still runs", pid)
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	t.Errorf("a process of the adapter's process group %d still runs", pgid)
 }
 
 // defect checks that err is a defect of the command name whose message starts with
@@ -221,11 +224,11 @@ func TestErrorDocument(t *testing.T) {
 }
 
 func TestErrorMessageWithSecret(t *testing.T) {
-	// The fake's Serve replaces such a message before the runner reads it.
+	// The fake adapter's Serve replaces such a message before the runner reads it.
 	for _, msg := range []string{"echo", "echo64", "Check the code qecr_abc"} {
 		f := newFixture(t, config{Mode: "fail", Kind: machines.KindOther, Message: msg})
 		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
-		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so Serve wrote this message in its place")
+		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the machine adapter wrote this message in its place")
 	}
 	// The runner replaces it when the adapter writes it: the start data, raw (as a
 	// JSON string) or in base64, the run code prefix in any case, and a cut part of
@@ -300,9 +303,10 @@ func TestOutputBound(t *testing.T) {
 
 func TestTimeoutKillsProcessGroup(t *testing.T) {
 	f := newFixture(t, config{Mode: "hang"})
-	f.r.timeout = func(string) time.Duration { return 500 * time.Millisecond }
+	// The limit leaves the fake adapter time to start its child under load.
+	f.r.timeout = func(string) time.Duration { return 2 * time.Second }
 	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
-	defect(t, err, "make", "Fix the machine adapter: make ran longer than its time limit of 500ms, so the provisioner killed its process group")
+	defect(t, err, "make", "Fix the machine adapter: make ran longer than its time limit of 2s, so the provisioner killed its process group")
 	f.gone(t)
 }
 

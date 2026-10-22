@@ -58,6 +58,19 @@ type config struct {
 	Status int    `json:"status,omitempty"`
 	// PIDFile is where mode sleep writes its process id.
 	PIDFile string `json:"pid_file,omitempty"`
+	// GroupFile is where modes hang, daemon and orphan write their process id, which
+	// is the id of the process group.
+	GroupFile string `json:"group_file,omitempty"`
+}
+
+// writePID writes the process id to path through a rename, so a reader finds either
+// no file or the whole id.
+func writePID(path string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // report is what the fake received.
@@ -83,10 +96,13 @@ func fake(args []string) int {
 	}
 	switch cfg.Mode {
 	case "sleep":
-		_ = os.WriteFile(cfg.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		_ = writePID(cfg.PIDFile)
 		time.Sleep(10 * time.Minute)
 		return 0
 	case "hang", "daemon", "orphan":
+		if err := writePID(cfg.GroupFile); err != nil {
+			return 9
+		}
 		child := config{Mode: "sleep", PIDFile: cfg.PIDFile}
 		cb, _ := json.Marshal(child)
 		path := args[2] + ".child"

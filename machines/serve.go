@@ -86,7 +86,7 @@ func Serve(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer
 		fail(stdout, KindDefect, fmt.Sprintf("Report this defect in the provisioner: its %s request to the machine adapter is not valid: %v", name, bad.err))
 		return ExitFailure
 	case err != nil && ContainsSecret(err.Error(), startData):
-		fail(stdout, KindDefect, fmt.Sprintf("Fix the machine adapter: its error message for %s contains what looks like a run code or the start data, so Serve wrote this message in its place", name))
+		fail(stdout, KindDefect, fmt.Sprintf("Fix the machine adapter: its error message for %s contains what looks like a run code or the start data, so the machine adapter wrote this message in its place", name))
 		return ExitFailure
 	case errors.As(err, &failure):
 		fail(stdout, failure.Kind, failure.Message)

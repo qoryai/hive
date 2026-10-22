@@ -208,6 +208,7 @@ func run[A any](ctx context.Context, r *Runner, name string, req machines.Docume
 		if status, ok := ps.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			return zero, defect("Fix the machine adapter: it ended on the signal %s during %s", status.Signal(), name)
 		}
+		return zero, defect("Fix the machine adapter: it ended during %s with neither an exit status nor a signal", name)
 	}
 	return zero, defect("Fix the machine adapter: its output for %s could not be read: %v", name, err)
 }
