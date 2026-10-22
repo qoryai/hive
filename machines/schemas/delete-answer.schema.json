@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qory.dev/contracts/machines/v1/delete-answer.schema.json",
+  "title": "Delete answer",
+  "description": "The answer of delete, on the adapter's standard output, after it exits with status 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "state"
+  ],
+  "properties": {
+    "state": {
+      "$ref": "definitions.schema.json#/$defs/delete_state"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qory.dev/contracts/machines/v1/delete-request.schema.json",
+  "title": "Delete request",
+  "description": "The request of delete, on the adapter's standard input: the adapter deletes the machine. The delete of an unknown id returns the state gone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "id"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "definitions.schema.json#/$defs/version"
+    },
+    "id": {
+      "$ref": "definitions.schema.json#/$defs/id"
+    }
+  }
+}
