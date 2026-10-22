@@ -410,20 +410,21 @@ func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
 			return c != "dispatched "+dispatchA+" "+machineID(1)
 		}))
 	}
-	// The fake clock stands still until the claim path has sent dispatched, so that
-	// no watch runs while the claim path works on the dispatch.
-	for deadline := time.Now().Add(patience); sent() < 1; time.Sleep(time.Millisecond) {
+	// The fake clock stands still until the claim path has logged "sent dispatched",
+	// so that no watch runs while the claim path works on the dispatch. No watch has
+	// run yet, so the line is the claim path's.
+	for deadline := time.Now().Add(patience); len(h.find("sent dispatched")) < 1; time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("the claim path did not send dispatched")
+			t.Fatal("the claim path did not log sent dispatched")
 		}
 	}
-	// The claim path leaves the dispatch right after it sends dispatched, and then
+	// After that line, the claim path only returns and leaves the dispatch, and then
 	// waits for an entry to leave the journal. A watch skips the dispatch while the
-	// claim path works on it, so the test runs up to 5 watches, 10 ms apart, until
-	// one sends dispatched: far fewer than the 75 watches of the lifetime and 15
-	// minutes.
+	// claim path works on it, so the test runs up to 30 watches, 10 ms apart, until
+	// one sends dispatched: 30 minutes of the fake clock, below the 75 minutes of the
+	// lifetime and 15 minutes.
 	for n := 0; sent() < 2; n++ {
-		if n == 5 {
+		if n == 30 {
 			t.Fatal("no watch sent dispatched")
 		}
 		time.Sleep(10 * time.Millisecond)
