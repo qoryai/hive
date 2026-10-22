@@ -13,8 +13,9 @@
 //     for each machine, and it cleans up each machine whose dispatch ended, that
 //     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
 //     entry of a machine that is deleting, or that is still not listed 5 minutes
-//     after its make. It also cleans up each listed machine that has no journal
-//     entry.
+//     after its make. It adopts the listed machine of a claimed entry that stays
+//     because its release returned machine_exists. It also cleans up each listed
+//     machine that has no journal entry.
 //
 // To clean up a machine, the loop reads the machine's log through the adapter,
 // uploads it to Qory Apiary, deletes the machine and removes the journal entry. Each
@@ -62,7 +63,8 @@ const (
 	// an entry that the journal had at the start.
 	ListGrace = 5 * time.Minute
 	// LongWait is the wait before the next claim after a make that failed with the
-	// kind limit or defect, and after the start data of a claim could not be built.
+	// kind limit or defect, after the start data of a claim could not be built, and
+	// after a claim for another pool than the provisioner's.
 	LongWait = 60 * time.Second
 	// ShortWait is the wait before the next claim after a make that failed with the
 	// kind retry or other, and after a claim that failed.
@@ -117,10 +119,22 @@ type Apiary interface {
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.
 	Release(ctx context.Context, dispatchID, reason string) error
 	// MachineLog uploads the machine's log of the dispatch. truncated is true when
-	// the log is the last part of a longer one. Its error wraps [ErrGone] for that
-	// refusal.
+	// the log is the last part of a longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
 }
+
+// Journal is the journal of live dispatches, as [journal.Journal] keeps it.
+type Journal interface {
+	// List returns the entries, in the order of their claims.
+	List() []journal.Entry
+	// Set writes the entry in place of the entry of its dispatch, or after the others.
+	Set(e journal.Entry) error
+	// Remove takes the entry of the dispatch id out of the journal. It can return an
+	// error after the entry left the list, when syncing the folder fails.
+	Remove(dispatchID string) error
+}
+
+var _ Journal = (*journal.Journal)(nil)
 
 // Machines is the runner of the machine adapter's commands, as [adapter.Runner] runs
 // them. A failed command returns an *adapter.Error with the kind of failure.
@@ -163,7 +177,7 @@ type Config struct {
 	// Machines is the runner of the machine adapter.
 	Machines Machines
 	// Journal is the journal of live dispatches in the state folder.
-	Journal *journal.Journal
+	Journal Journal
 	// PoolID is the node pool of the provisioner's access key, np_ and 16 characters.
 	PoolID string
 	// MaxMachines is max_machines of the settings: the most journal entries at once.
@@ -178,14 +192,16 @@ type Config struct {
 
 // Run runs the loop until ctx ends, and then returns nil. It returns an error that
 // stops the program when the adapter's check fails, when listing the machines for the
-// recovery fails, and when the journal cannot be written before a make or after it.
+// recovery fails, when the recovery cannot write a resumed entry to the journal, and
+// when the journal cannot be written before a make or after it.
 func Run(ctx context.Context, cfg Config) error {
 	l := &loop{
-		Config: cfg,
-		busy:   map[string]bool{},
-		logged: map[string]bool{},
-		freed:  make(chan struct{}, 1),
-		made:   map[string]time.Time{},
+		Config:  cfg,
+		busy:    map[string]bool{},
+		logged:  map[string]bool{},
+		freed:   make(chan struct{}, 1),
+		made:    map[string]time.Time{},
+		claimed: map[string]time.Time{},
 	}
 	if l.Clock == nil {
 		l.Clock = systemClock{}
@@ -219,20 +235,36 @@ type loop struct {
 	logged map[string]bool
 	// freed receives a value when an entry leaves the journal.
 	freed chan struct{}
-	// made is the time of the make that returned each entry's machine. An entry that
-	// the journal had at the start has no time here and counts from start.
-	made  map[string]time.Time
-	start time.Time
+	// made is the time of the make that returned each entry's machine, and claimed
+	// the time of each entry's claim. An entry that the journal had at the start has
+	// no time in them and counts from start.
+	made    map[string]time.Time
+	claimed map[string]time.Time
+	start   time.Time
 }
 
 // madeAt is the time from which the list grace of the dispatch id counts.
-func (l *loop) madeAt(id string) time.Time {
+func (l *loop) madeAt(id string) time.Time { return l.timeOf(l.made, id) }
+
+// claimedAt is the time of the claim of the dispatch id.
+func (l *loop) claimedAt(id string) time.Time { return l.timeOf(l.claimed, id) }
+
+// timeOf is the time of the dispatch id in times, or the start.
+func (l *loop) timeOf(times map[string]time.Time, id string) time.Time {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if t, ok := l.made[id]; ok {
+	if t, ok := times[id]; ok {
 		return t
 	}
 	return l.start
+}
+
+// setTime sets the time of the dispatch id in times to now.
+func (l *loop) setTime(times map[string]time.Time, id string) {
+	now := l.Clock.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	times[id] = now
 }
 
 // wait waits d on the clock, or until ctx ends.
@@ -261,16 +293,22 @@ func (l *loop) isBusy(id string) bool {
 	return l.busy[id]
 }
 
-// remove takes the dispatch out of the journal and lets the claim path claim again. A
-// failure is logged, and the entry stays: the next watch removes a made or dispatched
-// entry again, and the recovery after a restart removes a claimed one.
+// remove takes the dispatch out of the journal. Once the entry has left the journal's
+// list, the claim path may claim again, also when Remove returned an error after the
+// entry left, as when syncing the folder fails. A failure is logged. When the entry
+// is still in the list, it stays, and the next watch acts on it again.
 func (l *loop) remove(id string) {
 	if err := l.Journal.Remove(id); err != nil {
 		l.Log.Error("removing a dispatch from the journal failed", slog.String("dispatch_id", id), errorAttr(err, nil))
-		return
+	}
+	for _, e := range l.Journal.List() {
+		if e.DispatchID == id {
+			return
+		}
 	}
 	l.mu.Lock()
 	delete(l.made, id)
+	delete(l.claimed, id)
 	l.mu.Unlock()
 	select {
 	case l.freed <- struct{}{}:
@@ -279,15 +317,32 @@ func (l *loop) remove(id string) {
 }
 
 // release releases the dispatch with reason. It runs also after ctx ends, for a
-// claim whose make has not started. A failure is logged: a release has no retry.
-func (l *loop) release(ctx context.Context, id, reason string) {
+// claim whose make has not started. A failure is logged: a release has no retry. It
+// returns true when the release returned 409 machine_exists: a machine redeemed the
+// run code, so the dispatch is not released.
+func (l *loop) release(ctx context.Context, id, reason string) (exists bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
-	if err := l.Apiary.Release(ctx, id, reason); err != nil {
+	err := l.Apiary.Release(ctx, id, reason)
+	switch {
+	case err == nil:
+		l.Log.Info("released a dispatch", slog.String("dispatch_id", id))
+	case errors.Is(err, ErrMachineExists):
+		l.Log.Warn("the release returned machine_exists: a machine redeemed the run code", slog.String("dispatch_id", id))
+		return true
+	default:
 		l.Log.Warn("releasing a dispatch failed", slog.String("dispatch_id", id), errorAttr(err, nil))
-		return
 	}
-	l.Log.Info("released a dispatch", slog.String("dispatch_id", id))
+	return false
+}
+
+// releaseEntry releases the dispatch of a claimed entry and removes the entry. When
+// the release returns 409 machine_exists, the entry stays in the phase claimed, so
+// that the watch adopts the machine and no watch deletes it as a stray.
+func (l *loop) releaseEntry(ctx context.Context, id, reason string) {
+	if !l.release(ctx, id, reason) {
+		l.remove(id)
+	}
 }
 
 // hiddenError replaces an error's text that contains what looks like a secret.

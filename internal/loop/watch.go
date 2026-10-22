@@ -2,7 +2,6 @@ package loop
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -21,12 +20,19 @@ func (l *loop) watch(ctx context.Context) {
 	}
 }
 
-// watchOnce lists the pool's machines once and acts on each made or dispatched entry
-// that was in the journal before the list. An entry whose machine is not listed is
-// removed only after [ListGrace]; inside it, the entry gets dispatched as usual. It skips the claimed entries and the
-// dispatches of the claim path. Then it cleans up each listed machine whose key had no
-// journal entry, neither before the list nor after it: a make that starts during the
-// list has a claimed entry after it.
+// watchOnce lists the pool's machines once and acts on each entry that was in the
+// journal before the list, except the dispatches of the claim path:
+//   - A claimed entry stays from a release that returned 409 machine_exists. When
+//     the list has a machine with its key, the entry adopts the machine: it becomes
+//     made with the machine's id, and the rules of a made entry apply. The entry is
+//     removed when the machine is deleting, or when no machine is listed once the
+//     entry's lifetime and 15 minutes have passed since the claim.
+//   - A made or dispatched entry whose machine is not listed is removed only after
+//     [ListGrace]. Inside the grace, it gets dispatched as usual.
+//
+// Then the watch cleans up each listed machine whose key had no journal entry, neither
+// before the list nor after it: a make that starts during the list has a claimed
+// entry after it.
 func (l *loop) watchOnce(ctx context.Context) {
 	before := l.Journal.List()
 	list, err := l.Machines.List(ctx, l.PoolID)
@@ -39,33 +45,17 @@ func (l *loop) watchOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if e.Phase == journal.PhaseClaimed || l.isBusy(e.DispatchID) || !l.inJournal(e) {
+		if l.isBusy(e.DispatchID) || !l.inJournal(e) {
 			continue
 		}
-		attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
 		m, found := byKey[e.DispatchID]
-		if found {
-			attrs = append(attrs, slog.String("state", string(m.State)))
+		if e.Phase == journal.PhaseClaimed {
+			var ok bool
+			if e, ok = l.adopt(e, m, found); !ok {
+				continue
+			}
 		}
-		switch {
-		case found && m.State == machines.StateDeleting:
-			l.Log.Info("the machine is deleting", attrs...)
-			l.remove(e.DispatchID)
-		case !found && l.Clock.Now().Sub(l.madeAt(e.DispatchID)) > ListGrace:
-			l.Log.Info("the machine is still not listed 5 minutes after its make", attrs...)
-			l.remove(e.DispatchID)
-		case !found:
-			// Inside the list grace, the machine may exist.
-			l.dispatched(ctx, e)
-		case m.State == machines.StateStopped:
-			l.Log.Info("the machine stopped", attrs...)
-			l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
-		case l.Clock.Now().After(m.Started.Add(time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace)):
-			l.Log.Warn("the machine ran longer than its lifetime and 15 minutes", attrs...)
-			l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
-		default:
-			l.dispatched(ctx, e)
-		}
+		l.watchEntry(ctx, e, m, found)
 	}
 	known := map[string]bool{}
 	for _, e := range append(before, l.Journal.List()...) {
@@ -80,6 +70,65 @@ func (l *loop) watchOnce(ctx context.Context) {
 		}
 		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", string(m.State)))
 		l.cleanUp(ctx, m.Key, m.ID, false)
+	}
+}
+
+// adopt acts on the claimed entry e, given the lookup of its machine m. It returns
+// the entry made with the machine's id and true when the machine is listed and not
+// deleting. Otherwise it removes the entry or leaves it, and returns false.
+func (l *loop) adopt(e journal.Entry, m machines.Machine, found bool) (journal.Entry, bool) {
+	attrs := []any{slog.String("dispatch_id", e.DispatchID)}
+	if found {
+		attrs = append(attrs, slog.String("machine_id", m.ID), slog.String("state", string(m.State)))
+	}
+	lifetime := time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace
+	switch {
+	case found && m.State == machines.StateDeleting:
+		l.Log.Info("the machine is deleting", attrs...)
+		l.remove(e.DispatchID)
+		return e, false
+	case !found && l.Clock.Now().Sub(l.claimedAt(e.DispatchID)) > lifetime:
+		l.Log.Info("no machine is listed for the claimed dispatch after its lifetime and 15 minutes", attrs...)
+		l.remove(e.DispatchID)
+		return e, false
+	case !found:
+		return e, false
+	}
+	e.Phase, e.MachineID = journal.PhaseMade, m.ID
+	if err := l.Journal.Set(e); err != nil {
+		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
+		return e, false
+	}
+	l.setTime(l.made, e.DispatchID)
+	l.Log.Info("adopted the machine of a claimed dispatch", attrs...)
+	return e, true
+}
+
+// watchEntry acts on the made or dispatched entry e, given the lookup of its machine
+// m.
+func (l *loop) watchEntry(ctx context.Context, e journal.Entry, m machines.Machine, found bool) {
+	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
+	if found {
+		attrs = append(attrs, slog.String("state", string(m.State)))
+	}
+	switch {
+	case found && m.State == machines.StateDeleting:
+		l.Log.Info("the machine is deleting", attrs...)
+		l.remove(e.DispatchID)
+	case !found && l.Clock.Now().Sub(l.madeAt(e.DispatchID)) > ListGrace:
+		l.Log.Info("the machine is still not listed 5 minutes after its make", attrs...)
+		l.remove(e.DispatchID)
+	case !found:
+		// Inside the list grace, the machine may exist.
+		l.dispatched(ctx, e)
+	case m.State == machines.StateStopped:
+		l.Log.Info("the machine stopped", attrs...)
+		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
+	case l.Clock.Now().After(m.Started.Add(time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace)):
+		l.Log.Warn("the machine ran longer than its lifetime and 15 minutes", attrs...)
+		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
+	default:
+		l.dispatched(ctx, e)
 	}
 }
 
@@ -142,13 +191,11 @@ func (l *loop) uploadLog(ctx context.Context, dispatchID, machineID string, attr
 	l.logged[machineID] = true
 	l.mu.Unlock()
 	err = l.Apiary.MachineLog(ctx, dispatchID, got.Log, len(got.Log) >= machines.MaxLog)
-	switch {
-	case err == nil:
-		l.Log.Info("uploaded a machine's log", attrs...)
-	case errors.Is(err, ErrGone):
-	default:
+	if err != nil {
 		l.Log.Warn("uploading a machine's log failed", append(attrs, errorAttr(err, nil))...)
+		return
 	}
+	l.Log.Info("uploaded a machine's log", attrs...)
 }
 
 // wasLogged is whether the log of the machine id is uploaded in a cleanup whose delete

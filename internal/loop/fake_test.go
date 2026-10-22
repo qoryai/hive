@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -377,6 +378,8 @@ type harness struct {
 	cancel   context.CancelFunc
 	done     chan error
 	config   loop.Config
+	// wrap, when set, wraps the journal that the loop uses.
+	wrap func(loop.Journal) loop.Journal
 }
 
 // newHarness returns a harness with an empty journal and no machine, and with
@@ -437,6 +440,9 @@ func (h *harness) startNoWait() {
 	h.t.Cleanup(cancel)
 	cfg := h.config
 	cfg.Apiary, cfg.Machines, cfg.Journal, cfg.Clock = h.apiary, h.machines, h.journal, h.clock
+	if h.wrap != nil {
+		cfg.Journal = h.wrap(h.journal)
+	}
 	cfg.Log = slog.New(slog.NewJSONHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	go func() { h.done <- loop.Run(ctx, cfg) }()
 }
@@ -554,3 +560,24 @@ func newClaim(id string) loop.Claim {
 
 // machineID is the id of the nth machine that the fake adapter makes.
 func machineID(n int) string { return fmt.Sprintf("i-0123456789abcd%03d", n) }
+
+// syncFailure is a journal whose next Remove removes the entry and then returns the
+// error of a failed sync of the folder, as journal.Journal returns it.
+type syncFailure struct {
+	loop.Journal
+	mu   sync.Mutex
+	fail bool
+}
+
+func (j *syncFailure) Remove(id string) error {
+	if err := j.Journal.Remove(id); err != nil {
+		return err
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.fail {
+		j.fail = false
+		return errors.New("check the state folder: the journal of live dispatches is written, but syncing its folder failed: input/output error")
+	}
+	return nil
+}

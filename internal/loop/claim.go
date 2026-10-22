@@ -117,9 +117,9 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		l.release(ctx, id, ReasonJournal)
 		return err
 	}
+	l.setTime(l.claimed, id)
 	if ctx.Err() != nil {
-		l.release(ctx, id, ReasonStopped)
-		l.remove(id)
+		l.releaseEntry(ctx, id, ReasonStopped)
 		return nil
 	}
 	size := c.Machine
@@ -133,8 +133,9 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		kind := kindOf(err)
 		reason, wait, level := makeFailure(kind)
 		l.Log.Log(ctx, level, "making a machine failed", slog.String("dispatch_id", id), slog.String("kind", string(kind)), errorAttr(err, data))
-		l.release(ctx, id, reason)
-		l.remove(id)
+		l.releaseEntry(ctx, id, reason)
+		// An entry kept by 409 machine_exists is the watch's during the wait.
+		l.setBusy(id, false)
 		l.wait(ctx, wait)
 		return nil
 	}

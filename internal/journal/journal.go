@@ -4,8 +4,8 @@
 //
 // An entry has four fields, a dispatch id, a phase, a machine id and the machine's
 // lifetime in minutes, and no field for a secret or for inputs. Each field is checked
-// against a fixed shape before it is written and after it is read. A machine id that contains qak_, qrk_, qecr_ or qecp_,
-// the start of a secret, is out of shape.
+// against a fixed shape before it is written and after it is read. A machine id that
+// contains qak_, qrk_, qecr_ or qecp_, the start of a secret, is out of shape.
 package journal
 
 import (

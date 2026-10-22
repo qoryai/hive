@@ -302,8 +302,7 @@ func TestAFailedDeleteIsTriedAgain(t *testing.T) {
 }
 
 // TestEachCleanupStepRunsAfterAFailure fails the log's read or upload. The machine is
-// deleted and the entry removed all the same. A 410 gone to the upload is not logged
-// as a failure.
+// deleted and the entry removed all the same.
 func TestEachCleanupStepRunsAfterAFailure(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -314,7 +313,6 @@ func TestEachCleanupStepRunsAfterAFailure(t *testing.T) {
 	}{
 		{"the read fails", &adapter.Error{Command: "log", Kind: machines.KindOther, Message: "Check the vendor"}, nil, 0, "reading a machine's log failed"},
 		{"the upload fails", nil, errors.New("no answer from Qory Apiary"), 1, "uploading a machine's log failed"},
-		{"the upload is gone", nil, fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone), 1, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -333,11 +331,8 @@ func TestEachCleanupStepRunsAfterAFailure(t *testing.T) {
 				"delete " + machineID(1),
 			})
 			equal(t, "the journal", h.entries(), nil)
-			if c.msg != "" && len(h.find(c.msg)) != 1 {
+			if len(h.find(c.msg)) != 1 {
 				t.Errorf("the log has no line %q", c.msg)
-			}
-			if c.msg == "" && (len(h.find("uploading a machine's log failed")) != 0 || len(h.find("uploaded a machine's log")) != 0) {
-				t.Error("the log has a line for the upload")
 			}
 			if err := h.stop(); err != nil {
 				t.Error(err)
@@ -394,6 +389,127 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	h.machines.mu.Unlock()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAFailedFolderSyncStillLetsTheLoopClaim cleans up a machine whose dispatch
+// ended. The removal of its entry returns the error of a failed sync of the folder
+// after the entry left the journal. With max_machines 1, the loop claims again.
+func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
+	h := newHarness(t)
+	h.config.MaxMachines = 1
+	failing := &syncFailure{fail: true}
+	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
+	h.apiary.setDispatched(dispatchA, loop.ErrGone)
+	h.start()
+	h.claim(newClaim(dispatchA))
+	equal(t, "the journal", h.entries(), nil)
+	if len(h.find("removing a dispatch from the journal failed")) != 1 {
+		t.Error("the log has no line for the failed removal")
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// machineExists is the error of a release that returns 409 machine_exists.
+var machineExists = fmt.Errorf("Qory Apiary answered: %w", loop.ErrMachineExists)
+
+// TestAMakeFailureWithAMachineThatExistsKeepsTheEntry fails a make after the vendor
+// made the machine, and the release returns 409 machine_exists. The claimed entry
+// stays, the next watch adopts the listed machine and sends dispatched, and a later
+// 410 gone cleans the machine up.
+func TestAMakeFailureWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
+	h := newHarness(t)
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Try again later: the vendor's answer was lost"}
+	h.apiary.releaseErr = machineExists
+	h.start()
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+	claimed := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
+	equal(t, "the journal", h.entries(), []journal.Entry{claimed})
+	if len(h.find("the release returned machine_exists: a machine redeemed the run code")) != 1 || len(h.find("released a dispatch")) != 0 {
+		t.Error("the log has no line for machine_exists, or a line for a release")
+	}
+	h.machines.add("i-late", dispatchA, machines.StateRunning, epoch)
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+	h.clock.Advance(loop.ShortWait)
+	h.idle()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, "i-late")})
+	lines := h.find("adopted the machine of a claimed dispatch")
+	if len(lines) != 1 || lines[0]["machine_id"] != "i-late" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	h.apiary.setDispatched(dispatchA, loop.ErrGone)
+	h.tick()
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-late", "delete i-late"})
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestARestartReleaseWithAMachineThatExistsKeepsTheEntry restarts with a claimed
+// entry whose machine the list does not have yet, and the release returns 409
+// machine_exists. The entry stays, and once the list has the machine, the watch adopts
+// it and never deletes it as a stray.
+func TestARestartReleaseWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
+	h := newHarness(t)
+	claimed := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
+	h.setEntries(claimed)
+	h.apiary.releaseErr = machineExists
+	h.start()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + journal.ReasonRestarted})
+	equal(t, "the journal", h.entries(), []journal.Entry{claimed})
+	h.tick()
+	equal(t, "the journal", h.entries(), []journal.Entry{claimed})
+	h.machines.add("i-late", dispatchA, machines.StateRunning, epoch)
+	h.machines.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, "i-late")})
+	if len(h.find("found a machine with no journal entry")) != 0 {
+		t.Error("the machine was taken for a stray")
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAKeptClaimedEntryIsRemovedAfterItsLifetime keeps a claimed entry whose release
+// returned 409 machine_exists while no list has its machine, until its lifetime and
+// 15 minutes have passed since the claim, and then removes it.
+func TestAKeptClaimedEntryIsRemovedAfterItsLifetime(t *testing.T) {
+	h := newHarness(t)
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: machines.KindRetry, Message: "Try again later"}
+	h.apiary.releaseErr = machineExists
+	h.start()
+	c := newClaim(dispatchA)
+	c.MaxLifetimeMinutes = 15
+	h.send(claimResult{claim: c, ok: true})
+	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+	h.clock.Advance(loop.ShortWait)
+	h.idle()
+	// The claim was at epoch and the clock is at 15 s, so the watches run at 75 s,
+	// 135 s and so on. The bound is epoch + 30 minutes: 29 watches keep the entry,
+	// and the 30th, at 1815 s, removes it.
+	for range 29 {
+		h.tick()
+	}
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: 15}})
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
+	if len(h.find("no machine is listed for the claimed dispatch after its lifetime and 15 minutes")) != 1 {
+		t.Error("the log has no line for the removal")
+	}
+	equal(t, "the adapter's calls", slices.DeleteFunc(h.machines.takeCalls(), func(c string) bool { return c == "check" || strings.HasPrefix(c, "make ") }), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
