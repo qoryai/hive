@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qory.dev/contracts/machines/v1/list-request.schema.json",
+  "title": "List request",
+  "description": "The request of list, on the adapter's standard input: the adapter lists the machines of the pool.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "pool"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "definitions.schema.json#/$defs/version"
+    },
+    "pool": {
+      "$ref": "definitions.schema.json#/$defs/pool"
+    }
+  }
+}
