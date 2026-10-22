@@ -1,75 +1,57 @@
 package journal
 
-// The states of an EC2 instance that end it. A machine in either state cannot stop
-// again, so a restart finishes its dispatch.
-const (
-	// StateShuttingDown is an instance that is being terminated.
-	StateShuttingDown = "shutting-down"
-	// StateTerminated is a terminated instance.
-	StateTerminated = "terminated"
-)
+// stateDeleting is the adapter state of a machine that is being deleted. A restart
+// drops the entry of such a machine.
+const stateDeleting = "deleting"
 
-// The reasons of the releases that [Recover] returns. Each is 1 to 200 characters, as
-// the provisioner contract requires.
-const (
-	// ReasonNoMachine is a dispatch released with retry true: the provisioner
-	// restarted, and its run has no machine.
-	ReasonNoMachine = "the provisioner restarted, and the run has no machine"
-	// ReasonTerminated is a dispatch released with retry false: the provisioner
-	// restarted, and its run's machine was terminated or is being terminated.
-	ReasonTerminated = "the provisioner restarted, and the run's machine was terminated or is being terminated"
-)
+// ReasonRestarted is the reason of the release that [Recover] returns. It is 1 to 200
+// characters, as the provisioner contract requires.
+const ReasonRestarted = "the provisioner restarted before a machine was made"
 
-// Lookup is the result of the lookup of a dispatch's machine by its client token, the
-// dispatch id. Found is false when no instance has that client token. InstanceID and
-// State are the instance's id and its state name, such as running or stopped.
+// Lookup is the result of the lookup of a dispatch's machine by its key, the dispatch
+// id, in the adapter's list of machines. Found is false when no machine in the list
+// has that key. MachineID and State are the machine's id and its adapter state:
+// starting, running, stopped or deleting.
 type Lookup struct {
-	Found             bool
-	InstanceID, State string
+	Found            bool
+	MachineID, State string
 }
 
 // Kind is what to do with a journal entry after a restart.
 type Kind int
 
 const (
-	// Release releases the run with retry true and Action.Reason.
+	// Release releases the dispatch with Action.Reason. A release has no retry.
 	Release Kind = iota + 1
-	// Resume resumes the watch of the machine Action.InstanceID.
+	// Resume continues the dispatch with the machine Action.MachineID.
 	Resume
-	// Finish releases the run with retry false and Action.Reason.
-	Finish
+	// Drop removes the entry from the journal, with no release.
+	Drop
 )
 
-// Action is what to do with one journal entry after a restart. Retry is the release's
-// retry: true for [Release] and false for [Finish]. Reason is set for both releases.
-// InstanceID is set for [Resume].
+// Action is what to do with one journal entry after a restart. Reason is set for
+// [Release]. MachineID is set for [Resume].
 type Action struct {
-	Kind       Kind
-	Retry      bool
-	Reason     string
-	InstanceID string
+	Kind      Kind
+	Reason    string
+	MachineID string
 }
 
 // Recover returns what to do with the entry e after a restart, given the lookup l of
-// its machine by client token:
-//   - before handed_over: release with retry true. No machine was created, and the run
-//     key or run code, which the journal never contains, is lost, so the run starts
-//     again with a new one. l is not used.
-//   - from handed_over on, with no machine found: release with retry true.
-//   - from handed_over on, with a machine found that is shutting down or terminated:
-//     finish, which releases with retry false and [ReasonTerminated].
-//   - from handed_over on, with any other machine found: resume the watch of the
-//     machine found.
+// its machine by its key:
+//   - claimed, with no machine found: release with [ReasonRestarted]. A release
+//     exists only before a machine exists.
+//   - made or dispatched, with no machine found: drop. The machine is gone.
+//   - any phase, with a machine found that is deleting: drop.
+//   - any phase, with a machine found in another state: resume with the machine id
+//     found. For claimed, the make succeeded before the restart.
 func Recover(e Entry, l Lookup) Action {
-	release := Action{Kind: Release, Retry: true, Reason: ReasonNoMachine}
 	switch {
-	case e.Phase == PhaseClaimed || e.Phase == PhaseDispatched || e.Phase == PhaseHandover:
-		return release
-	case !l.Found:
-		return release
-	case l.State == StateShuttingDown || l.State == StateTerminated:
-		return Action{Kind: Finish, Retry: false, Reason: ReasonTerminated}
+	case !l.Found && e.Phase == PhaseClaimed:
+		return Action{Kind: Release, Reason: ReasonRestarted}
+	case !l.Found, l.State == stateDeleting:
+		return Action{Kind: Drop}
 	default:
-		return Action{Kind: Resume, InstanceID: l.InstanceID}
+		return Action{Kind: Resume, MachineID: l.MachineID}
 	}
 }
