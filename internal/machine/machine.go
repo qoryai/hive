@@ -14,7 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The tags on every machine and its volume. A machine has all three.
@@ -63,21 +64,21 @@ func NewFromConfig(cfg aws.Config) *Client {
 // comes from AWS_REGION or AWS_DEFAULT_REGION, then the shared config file, then the
 // instance metadata. LoadConfig then retrieves the credentials once, and returns an
 // error unless they come from the host's instance role: the adapter uses no stored AWS
-// key. Its errors are *machines.Error.
+// key. Its errors are *adapterio.Failure.
 func LoadConfig(ctx context.Context) (aws.Config, error) {
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
 	if err != nil {
-		return aws.Config{}, &machines.Error{Kind: machines.KindOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
 	}
 	if cfg.Region == "" {
-		return aws.Config{}, &machines.Error{Kind: machines.KindDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		return aws.Config{}, &machines.Error{Kind: machines.KindOther, Message: fmt.Sprintf("Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: %v", err)}
 	}
 	if creds.Source != ec2rolecreds.ProviderName {
-		return aws.Config{}, &machines.Error{Kind: machines.KindDefect, Message: fmt.Sprintf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
 	}
 	return cfg, nil
 }

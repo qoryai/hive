@@ -1,4 +1,4 @@
-package machines
+package adapterio
 
 import (
 	"encoding/base64"

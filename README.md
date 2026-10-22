@@ -5,8 +5,8 @@ This repository builds two programs:
 - `qory-provisioner`, a program with one command, `serve`.
 - `qory-machines-aws-ec2`, the EC2 machine adapter. The provisioner runs it as
   `qory-machines-aws-ec2 <command> --settings FILE` to make, list, read and delete EC2
-  instances, as package `machines` states the protocol. FILE is the adapter's
-  settings file, `aws-ec2.json`.
+  instances, as `contracts/machines/v1` of `github.com/qoryai/integrations` states the
+  protocol. FILE is the adapter's settings file, `aws-ec2.json`.
 
 `serve` is not built in this commit: it prints one error line on standard error and
 exits with status 2.

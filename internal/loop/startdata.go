@@ -11,7 +11,7 @@ import (
 	"regexp"
 
 	"github.com/qoryai/hive/internal/journal"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // hiddenRunCode is the text of a [RunCode] in every format.
@@ -67,7 +67,7 @@ var errStartData = errors.New("the claim's run code, gateway URL or lifetime doe
 // {"version":1,"run_code":…,"gateway":{"url":…,"address":…},"max_lifetime_minutes":…}.
 // An IPv4 address mapped into IPv6 is written in its IPv4 form. The start data
 // contains no backslash, since the start unit refuses one, and is at most
-// [machines.MaxStartData] bytes.
+// [contracts.MaxStartData] bytes.
 func buildStartData(c Claim, a netip.Addr) ([]byte, error) {
 	if !runCodeShape.MatchString(c.RunCode.text) || c.MaxLifetimeMinutes < journal.MinLifetime || c.MaxLifetimeMinutes > journal.MaxLifetime {
 		return nil, errStartData
@@ -78,7 +78,7 @@ func buildStartData(c Claim, a netip.Addr) ([]byte, error) {
 		Gateway:            gateway{URL: c.GatewayURL, Address: a.Unmap().String()},
 		MaxLifetimeMinutes: c.MaxLifetimeMinutes,
 	})
-	if err != nil || bytes.ContainsRune(b, '\\') || len(b) > machines.MaxStartData {
+	if err != nil || bytes.ContainsRune(b, '\\') || len(b) > contracts.MaxStartData {
 		return nil, errStartData
 	}
 	return b, nil

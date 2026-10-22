@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // testSecret is the static test credentials' secret key. It never appears on the wire.
@@ -190,19 +190,19 @@ func TestWireCreateErrors(t *testing.T) {
 	cases := []struct {
 		status   int
 		code     string
-		kind     machines.Kind
+		kind     string
 		attempts int
 	}{
-		{503, "RequestLimitExceeded", machines.KindRetry, 3},
-		{500, "InternalError", machines.KindRetry, 3},
-		{500, "InsufficientInstanceCapacity", machines.KindLimit, 3},
-		{400, "InstanceLimitExceeded", machines.KindLimit, 1},
-		{400, "VcpuLimitExceeded", machines.KindLimit, 1},
-		{400, "IdempotentParameterMismatch", machines.KindDefect, 1},
-		{400, "IdempotentInstanceTerminated", machines.KindOther, 1},
-		{400, "InvalidAMIID.NotFound", machines.KindDefect, 1},
-		{400, "InvalidParameterValue", machines.KindDefect, 1},
-		{403, "UnauthorizedOperation", machines.KindDefect, 1},
+		{503, "RequestLimitExceeded", contracts.FailureRetry, 3},
+		{500, "InternalError", contracts.FailureRetry, 3},
+		{500, "InsufficientInstanceCapacity", contracts.FailureLimit, 3},
+		{400, "InstanceLimitExceeded", contracts.FailureLimit, 1},
+		{400, "VcpuLimitExceeded", contracts.FailureLimit, 1},
+		{400, "IdempotentParameterMismatch", contracts.FailureDefect, 1},
+		{400, "IdempotentInstanceTerminated", contracts.FailureOther, 1},
+		{400, "InvalidAMIID.NotFound", contracts.FailureDefect, 1},
+		{400, "InvalidParameterValue", contracts.FailureDefect, 1},
+		{403, "UnauthorizedOperation", contracts.FailureDefect, 1},
 	}
 	for _, tc := range cases {
 		c, s := newWireClient(t, reply{tc.status, errorXML(tc.code)})

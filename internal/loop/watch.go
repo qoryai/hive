@@ -5,8 +5,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/journal"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // watch runs one watch every [WatchInterval] until ctx ends.
@@ -67,10 +68,10 @@ func (l *loop) watchOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if known[m.Key] || m.State == machines.StateDeleting {
+		if known[m.Key] || m.State == contracts.MachineDeleting {
 			continue
 		}
-		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", string(m.State)))
+		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
 		l.cleanUp(ctx, m.Key, m.ID, false)
 	}
 }
@@ -78,14 +79,14 @@ func (l *loop) watchOnce(ctx context.Context) {
 // adopt acts on the claimed entry e, given the lookup of its machine m. It returns
 // the entry made with the machine's id and true when the machine is listed and not
 // deleting. Otherwise it removes the entry or leaves it, and returns false.
-func (l *loop) adopt(e journal.Entry, m machines.Machine, found bool) (journal.Entry, bool) {
+func (l *loop) adopt(e journal.Entry, m contracts.Machine, found bool) (journal.Entry, bool) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID)}
 	if found {
-		attrs = append(attrs, slog.String("machine_id", m.ID), slog.String("state", string(m.State)))
+		attrs = append(attrs, slog.String("machine_id", m.ID), slog.String("state", m.State))
 	}
 	lifetime := time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace
 	switch {
-	case found && m.State == machines.StateDeleting:
+	case found && m.State == contracts.MachineDeleting:
 		l.Log.Info("the machine is deleting", attrs...)
 		l.remove(e.DispatchID)
 		return e, false
@@ -108,13 +109,13 @@ func (l *loop) adopt(e journal.Entry, m machines.Machine, found bool) (journal.E
 
 // watchEntry acts on the made or dispatched entry e, given the lookup of its machine
 // m.
-func (l *loop) watchEntry(ctx context.Context, e journal.Entry, m machines.Machine, found bool) {
+func (l *loop) watchEntry(ctx context.Context, e journal.Entry, m contracts.Machine, found bool) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
 	if found {
-		attrs = append(attrs, slog.String("state", string(m.State)))
+		attrs = append(attrs, slog.String("state", m.State))
 	}
 	switch {
-	case found && m.State == machines.StateDeleting:
+	case found && m.State == contracts.MachineDeleting:
 		l.Log.Info("the machine is deleting", attrs...)
 		l.remove(e.DispatchID)
 	case !found && l.Clock.Now().Sub(l.madeAt(e.DispatchID)) > ListGrace:
@@ -123,10 +124,10 @@ func (l *loop) watchEntry(ctx context.Context, e journal.Entry, m machines.Machi
 	case !found:
 		// Inside the list grace, the machine may exist.
 		l.dispatched(ctx, e)
-	case m.State == machines.StateStopped:
+	case m.State == contracts.MachineStopped:
 		l.Log.Info("the machine stopped", attrs...)
 		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
-	case l.Clock.Now().After(m.Started.Add(time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace)):
+	case l.Clock.Now().After(adapterio.Started(m).Add(time.Duration(e.MaxLifetimeMinutes)*time.Minute + LifetimeGrace)):
 		l.Log.Warn("the machine ran longer than its lifetime and 15 minutes", attrs...)
 		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
 	default:
@@ -146,10 +147,10 @@ func (l *loop) inJournal(e journal.Entry) bool {
 
 // machinesByKey maps each key to its machine. When two machines have one key, a
 // machine that is not deleting comes first.
-func machinesByKey(list []machines.Machine) map[string]machines.Machine {
-	byKey := make(map[string]machines.Machine, len(list))
+func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
+	byKey := make(map[string]contracts.Machine, len(list))
 	for _, m := range list {
-		if old, ok := byKey[m.Key]; !ok || old.State == machines.StateDeleting {
+		if old, ok := byKey[m.Key]; !ok || old.State == contracts.MachineDeleting {
 			byKey[m.Key] = m
 		}
 	}
@@ -181,7 +182,7 @@ func (l *loop) cleanUp(ctx context.Context, dispatchID, machineID string, entry 
 }
 
 // uploadLog reads the log of the machine and uploads it for the dispatch. A log at the
-// adapter's bound of [machines.MaxLog] bytes is uploaded as truncated. Once the read
+// adapter's bound of [adapterio.MaxLog] bytes is uploaded as truncated. Once the read
 // succeeds, the machine counts as logged, also when the upload fails.
 func (l *loop) uploadLog(ctx context.Context, dispatchID, machineID string, attrs []any) {
 	got, err := l.Machines.Log(ctx, machineID)
@@ -192,7 +193,7 @@ func (l *loop) uploadLog(ctx context.Context, dispatchID, machineID string, attr
 	l.mu.Lock()
 	l.logged[machineID] = true
 	l.mu.Unlock()
-	err = l.Apiary.MachineLog(ctx, dispatchID, got.Log, len(got.Log) >= machines.MaxLog)
+	err = l.Apiary.MachineLog(ctx, dispatchID, got.Log, len(got.Log) >= adapterio.MaxLog)
 	if err != nil {
 		l.Log.Warn("uploading a machine's log failed", append(attrs, errorAttr(err, nil))...)
 		return

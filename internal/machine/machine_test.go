@@ -15,17 +15,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
-// kindOf returns the kind of err: the Kind of an *Error or of a *machines.Error in its
+// kindOf returns the kind of err: the Kind of an *Error or of a *adapterio.Failure in its
 // chain, or "" for any other error.
-func kindOf(err error) machines.Kind {
+func kindOf(err error) string {
 	var call *Error
 	if errors.As(err, &call) {
 		return call.Kind
 	}
-	var failure *machines.Error
+	var failure *adapterio.Failure
 	if errors.As(err, &failure) {
 		return failure.Kind
 	}
@@ -141,7 +142,7 @@ func TestCreateUserDataBound(t *testing.T) {
 	spec.UserData = []byte(strings.Repeat("a", MaxUserData+1))
 	_, err := c.Create(context.Background(), spec)
 	const want = "Report this defect in the provisioner: the start data has 16385 bytes, and EC2 accepts at most 16384 bytes of user data"
-	if err == nil || err.Error() != want || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("16385 bytes: error %v, want %q of kind defect", err, want)
 	}
 	if len(f.runs) != 1 {
@@ -171,7 +172,7 @@ func TestCreateRefusesSpec(t *testing.T) {
 		spec := testSpec()
 		tc.edit(&spec)
 		_, err := New(f).Create(context.Background(), spec)
-		if err == nil || err.Error() != tc.want || kindOf(err) != machines.KindDefect {
+		if err == nil || err.Error() != tc.want || kindOf(err) != contracts.FailureDefect {
 			t.Errorf("error %v, want %q of kind defect", err, tc.want)
 		}
 		if len(f.runs) != 0 {
@@ -191,7 +192,7 @@ func TestCreateRefusesSpec(t *testing.T) {
 func TestCreateCountMismatch(t *testing.T) {
 	_, err := New(&fakeAPI{}).Create(context.Background(), testSpec())
 	const want = "If this repeats, check EC2's service health in this region: RunInstances for key dp_0123456789abcdef returned 0 instances, not 1"
-	if err == nil || err.Error() != want || kindOf(err) != machines.KindOther {
+	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureOther {
 		t.Errorf("error %v, want %q of kind other", err, want)
 	}
 }
@@ -202,24 +203,24 @@ func TestCreateErrorKinds(t *testing.T) {
 	deadline := fmt.Errorf("operation error EC2: RunInstances, %w", context.DeadlineExceeded)
 	cases := []struct {
 		err  error
-		kind machines.Kind
+		kind string
 		want string
 	}{
-		{apiError("InstanceLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
-		{apiError("VcpuLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, machines.KindLimit, "Wait, or map the size to another instance type in the EC2 adapter's settings file aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity, because EC2 has no capacity for the instance type in the subnet's availability zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
-		{apiError("InsufficientFreeAddressesInSubnet"), machines.KindLimit, "Wait until machines end, or set subnet_id in the EC2 adapter's settings file aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
-		{apiError("IdempotentParameterMismatch"), machines.KindDefect, "Report this defect in the provisioner, unless the EC2 adapter's settings file aws-ec2.json changed after the first make for this key: RunInstances was sent twice for one key with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
-		{apiError("IdempotentInstanceTerminated"), machines.KindOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
-		{apiError("RequestLimitExceeded"), machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InternalError: test message for InternalError"},
-		{deadline, machines.KindRetry, "If this repeats, check the network path to EC2: RunInstances did not finish within its time limit: operation error EC2: RunInstances, context deadline exceeded"},
-		{apiError("InvalidAMIID.NotFound"), machines.KindDefect, "Look up EC2 error code InvalidAMIID.NotFound in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
-		{apiError("InvalidParameterValue"), machines.KindDefect, "Look up EC2 error code InvalidParameterValue in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidParameterValue: test message for InvalidParameterValue"},
-		{apiError("UnauthorizedOperation"), machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
-		{apiError("AuthFailure"), machines.KindOther, "Look up EC2 error code AuthFailure in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error AuthFailure: test message for AuthFailure"},
-		{context.Canceled, machines.KindOther, "No action needed: RunInstances stopped when its context ended: context canceled"},
-		{errors.New("failed to refresh cached credentials"), machines.KindOther, "Check the instance role and the network path to EC2: RunInstances failed: failed to refresh cached credentials"},
+		{apiError("InstanceLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
+		{apiError("VcpuLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit, "Wait, or map the size to another instance type in the EC2 adapter's settings file aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity, because EC2 has no capacity for the instance type in the subnet's availability zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
+		{apiError("InsufficientFreeAddressesInSubnet"), contracts.FailureLimit, "Wait until machines end, or set subnet_id in the EC2 adapter's settings file aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
+		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report this defect in the provisioner, unless the EC2 adapter's settings file aws-ec2.json changed after the first make for this key: RunInstances was sent twice for one key with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
+		{apiError("IdempotentInstanceTerminated"), contracts.FailureOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
+		{apiError("RequestLimitExceeded"), contracts.FailureRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, contracts.FailureRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InternalError: test message for InternalError"},
+		{deadline, contracts.FailureRetry, "If this repeats, check the network path to EC2: RunInstances did not finish within its time limit: operation error EC2: RunInstances, context deadline exceeded"},
+		{apiError("InvalidAMIID.NotFound"), contracts.FailureDefect, "Look up EC2 error code InvalidAMIID.NotFound in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{apiError("InvalidParameterValue"), contracts.FailureDefect, "Look up EC2 error code InvalidParameterValue in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error InvalidParameterValue: test message for InvalidParameterValue"},
+		{apiError("UnauthorizedOperation"), contracts.FailureDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
+		{apiError("AuthFailure"), contracts.FailureOther, "Look up EC2 error code AuthFailure in the EC2 API reference, and check the EC2 adapter's settings file aws-ec2.json and the instance role against it: RunInstances failed: api error AuthFailure: test message for AuthFailure"},
+		{context.Canceled, contracts.FailureOther, "No action needed: RunInstances stopped when its context ended: context canceled"},
+		{errors.New("failed to refresh cached credentials"), contracts.FailureOther, "Check the instance role and the network path to EC2: RunInstances failed: failed to refresh cached credentials"},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, tc.err }}
@@ -242,24 +243,24 @@ func TestCreateErrorKinds(t *testing.T) {
 
 // TestClassify pins the kind of each class of error, wrapped or not.
 func TestClassify(t *testing.T) {
-	cases := map[error]machines.Kind{
-		apiError("VcpuLimitExceeded"):                                machines.KindLimit,
-		apiError("InsufficientInstanceCapacity"):                     machines.KindLimit,
-		apiError("InsufficientFreeAddressesInSubnet"):                machines.KindLimit,
-		fmt.Errorf("x: %w", apiError("IdempotentParameterMismatch")): machines.KindDefect,
-		apiError("EC2ThrottledException"):                            machines.KindRetry,
-		apiError("RequestTimeout"):                                   machines.KindRetry,
-		apiError("InvalidParameterValue"):                            machines.KindDefect,
-		apiError("InvalidParameter"):                                 machines.KindDefect,
-		apiError("InvalidSubnetID.NotFound"):                         machines.KindDefect,
-		apiError("MissingParameter"):                                 machines.KindDefect,
-		apiError("UnknownParameter"):                                 machines.KindDefect,
-		apiError("UnsupportedOperation"):                             machines.KindDefect,
-		apiError("InvalidInstanceID.NotFound"):                       machines.KindOther,
-		apiError("IdempotentInstanceTerminated"):                     machines.KindOther,
-		context.DeadlineExceeded:                                     machines.KindRetry,
-		context.Canceled:                                             machines.KindOther,
-		errors.New("unknown"):                                        machines.KindOther,
+	cases := map[error]string{
+		apiError("VcpuLimitExceeded"):                                contracts.FailureLimit,
+		apiError("InsufficientInstanceCapacity"):                     contracts.FailureLimit,
+		apiError("InsufficientFreeAddressesInSubnet"):                contracts.FailureLimit,
+		fmt.Errorf("x: %w", apiError("IdempotentParameterMismatch")): contracts.FailureDefect,
+		apiError("EC2ThrottledException"):                            contracts.FailureRetry,
+		apiError("RequestTimeout"):                                   contracts.FailureRetry,
+		apiError("InvalidParameterValue"):                            contracts.FailureDefect,
+		apiError("InvalidParameter"):                                 contracts.FailureDefect,
+		apiError("InvalidSubnetID.NotFound"):                         contracts.FailureDefect,
+		apiError("MissingParameter"):                                 contracts.FailureDefect,
+		apiError("UnknownParameter"):                                 contracts.FailureDefect,
+		apiError("UnsupportedOperation"):                             contracts.FailureDefect,
+		apiError("InvalidInstanceID.NotFound"):                       contracts.FailureOther,
+		apiError("IdempotentInstanceTerminated"):                     contracts.FailureOther,
+		context.DeadlineExceeded:                                     contracts.FailureRetry,
+		context.Canceled:                                             contracts.FailureOther,
+		errors.New("unknown"):                                        contracts.FailureOther,
 	}
 	for err, want := range cases {
 		if got := classify(err); got != want {
@@ -292,14 +293,14 @@ func TestCheckRights(t *testing.T) {
 	}
 	err = New(f).CheckRights(context.Background(), testSpec())
 	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
-	if err == nil || err.Error() != wantDenied || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != wantDenied || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("UnauthorizedOperation: error %v, want %q of kind defect", err, wantDenied)
 	}
 
 	f.run = nil
 	err = New(f).CheckRights(context.Background(), testSpec())
 	const wantSuccess = "Check the EC2 endpoint: a RunInstances dry run returned success, and EC2 returns DryRunOperation for a dry run"
-	if err == nil || err.Error() != wantSuccess || kindOf(err) != machines.KindOther {
+	if err == nil || err.Error() != wantSuccess || kindOf(err) != contracts.FailureOther {
 		t.Errorf("success: error %v, want %q of kind other", err, wantSuccess)
 	}
 
@@ -307,7 +308,7 @@ func TestCheckRights(t *testing.T) {
 		return nil, apiError("RequestLimitExceeded")
 	}
 	err = New(f).CheckRights(context.Background(), testSpec())
-	if kindOf(err) != machines.KindRetry {
+	if kindOf(err) != contracts.FailureRetry {
 		t.Errorf("RequestLimitExceeded: kind %v, want retry", kindOf(err))
 	}
 
@@ -336,14 +337,14 @@ func TestCheckListRights(t *testing.T) {
 	}
 	err := New(f).CheckListRights(context.Background())
 	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
-	if err == nil || err.Error() != wantDenied || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != wantDenied || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("UnauthorizedOperation: error %v, want %q of kind defect", err, wantDenied)
 	}
 
 	f.describe = nil
 	err = New(f).CheckListRights(context.Background())
 	const wantSuccess = "Check the EC2 endpoint: a DescribeInstances dry run returned success, and EC2 returns DryRunOperation for a dry run"
-	if err == nil || err.Error() != wantSuccess || kindOf(err) != machines.KindOther {
+	if err == nil || err.Error() != wantSuccess || kindOf(err) != contracts.FailureOther {
 		t.Errorf("success: error %v, want %q of kind other", err, wantSuccess)
 	}
 }
@@ -384,7 +385,7 @@ func TestFindByToken(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
-	if _, _, err := c.FindByToken(context.Background(), key); kindOf(err) != machines.KindRetry {
+	if _, _, err := c.FindByToken(context.Background(), key); kindOf(err) != contracts.FailureRetry {
 		t.Errorf("error %v, want kind retry", err)
 	}
 }
@@ -485,11 +486,11 @@ func TestTerminate(t *testing.T) {
 	replyErr = apiError("UnauthorizedOperation")
 	_, _, err := c.Terminate(context.Background(), id)
 	const want = "Give the instance role the EC2 rights that the EC2 machine adapter needs: TerminateInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
-	if err == nil || err.Error() != want || kindOf(err) != machines.KindDefect {
+	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("error %v, want %q of kind defect", err, want)
 	}
 	replyErr = apiError("InvalidInstanceID.Malformed")
-	if _, _, err := c.Terminate(context.Background(), id); kindOf(err) != machines.KindDefect {
+	if _, _, err := c.Terminate(context.Background(), id); kindOf(err) != contracts.FailureDefect {
 		t.Errorf("InvalidInstanceID.Malformed: error %v, want kind defect", err)
 	}
 }
@@ -519,7 +520,7 @@ func TestConsole(t *testing.T) {
 	out = aws.String("not base64!")
 	_, err = c.Console(context.Background(), id)
 	const want = "If this repeats, check EC2's service health in this region: GetConsoleOutput returned output for i-0123456789abcdef0 that is not base64: illegal base64 data at input byte 3"
-	if err == nil || err.Error() != want || kindOf(err) != machines.KindOther {
+	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureOther {
 		t.Errorf("error %v, want %q of kind other", err, want)
 	}
 
@@ -529,7 +530,7 @@ func TestConsole(t *testing.T) {
 	if _, err := c.Console(context.Background(), id); len(f.consoles) != 4 {
 		t.Errorf("NotFound: %d calls in all, want 4 with no second call, error %v", len(f.consoles), err)
 	}
-	if _, err := c.Console(context.Background(), id); errorCode(err) != "InvalidInstanceID.NotFound" || kindOf(err) != machines.KindOther {
+	if _, err := c.Console(context.Background(), id); errorCode(err) != "InvalidInstanceID.NotFound" || kindOf(err) != contracts.FailureOther {
 		t.Errorf("error %v, want kind other", err)
 	}
 }
@@ -562,7 +563,7 @@ func TestConsoleNotNitro(t *testing.T) {
 		return nil, apiError("UnsupportedOperation")
 	}
 	_, err = c.Console(context.Background(), id)
-	if errorCode(err) != "UnsupportedOperation" || kindOf(err) != machines.KindDefect || len(f.consoles) != 4 {
+	if errorCode(err) != "UnsupportedOperation" || kindOf(err) != contracts.FailureDefect || len(f.consoles) != 4 {
 		t.Errorf("error %v, %d calls in all, want UnsupportedOperation of kind defect after 4 calls", err, len(f.consoles))
 	}
 }
@@ -599,7 +600,7 @@ func TestRootDevice(t *testing.T) {
 	for _, tc := range cases {
 		reply, replyErr = tc.reply, tc.err
 		_, err := c.RootDevice(context.Background(), id)
-		if err == nil || err.Error() != tc.want || kindOf(err) != machines.KindDefect {
+		if err == nil || err.Error() != tc.want || kindOf(err) != contracts.FailureDefect {
 			t.Errorf("error %v, want %q of kind defect", err, tc.want)
 		}
 	}

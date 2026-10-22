@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 const (
@@ -134,7 +134,7 @@ func defect(t *testing.T, err error, name, prefix string) {
 	if leaks(err.Error()) {
 		t.Fatal("the error contains the marker or the start data")
 	}
-	if e.Kind != machines.KindDefect || e.Command != name || !strings.HasPrefix(e.Message, prefix) {
+	if e.Kind != contracts.FailureDefect || e.Command != name || !strings.HasPrefix(e.Message, prefix) {
 		t.Errorf("the error is %q, kind %s, command %s; want a defect of %s starting with %q", e.Message, e.Kind, e.Command, name, prefix)
 	}
 }
@@ -186,7 +186,7 @@ func TestCommands(t *testing.T) {
 
 	list, err := f.r.List(ctx, testPool)
 	check("list", err)
-	if len(list.Machines) != 1 || list.Machines[0].Key != testKey || list.Machines[0].State != machines.StateRunning {
+	if len(list.Machines) != 1 || list.Machines[0].Key != testKey || list.Machines[0].State != contracts.MachineRunning {
 		t.Errorf("list: %+v", list)
 	}
 
@@ -198,7 +198,7 @@ func TestCommands(t *testing.T) {
 
 	del, err := f.r.Delete(ctx, made.ID)
 	check("delete", err)
-	if del.State != machines.StateDeleting {
+	if del.State != contracts.MachineDeleting {
 		t.Errorf("delete: %+v", del)
 	}
 
@@ -212,10 +212,10 @@ func TestCommands(t *testing.T) {
 }
 
 func TestErrorDocument(t *testing.T) {
-	f := newFixture(t, config{Mode: "fail", Kind: machines.KindLimit, Message: "Raise the instance quota of the account."})
+	f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."})
 	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
 	var e *Error
-	if !errors.As(err, &e) || *e != (Error{Command: "make", Kind: machines.KindLimit, Message: "Raise the instance quota of the account."}) {
+	if !errors.As(err, &e) || *e != (Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."}) {
 		t.Fatalf("the error is %v", err)
 	}
 	if err.Error() != "Raise the instance quota of the account. (machine adapter command make, kind limit)" {
@@ -226,7 +226,7 @@ func TestErrorDocument(t *testing.T) {
 func TestErrorMessageWithSecret(t *testing.T) {
 	// The fake adapter's Serve replaces such a message before the runner reads it.
 	for _, msg := range []string{"echo", "echo64", "Check the code qecr_abc"} {
-		f := newFixture(t, config{Mode: "fail", Kind: machines.KindOther, Message: msg})
+		f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureOther, Message: msg})
 		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
 		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the machine adapter wrote this message in its place")
 	}
@@ -245,7 +245,7 @@ func TestErrorMessageWithSecret(t *testing.T) {
 }
 
 func TestErrorIsOneLine(t *testing.T) {
-	e := &Error{Command: "make", Kind: machines.KindOther, Message: "Raise\nthe\tquota\r\u2028now\u0085."}
+	e := &Error{Command: "make", Kind: contracts.FailureOther, Message: "Raise\nthe\tquota\r\u2028now\u0085."}
 	if got := e.Error(); got != "Raise the quota  now . (machine adapter command make, kind other)" {
 		t.Errorf("the error text is %q", got)
 	}
@@ -258,13 +258,13 @@ func TestDefects(t *testing.T) {
 		prefix string
 	}{
 		{"not json", 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document must be one JSON object"},
-		{`{"id": "-"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id must be"},
-		{`{"id": "` + marker + ` x"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id must be"},
+		{`{"id": "-"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id has a value that the rule not of machines/v1 make-answer.schema.json refuses"},
+		{`{"id": "` + marker + ` x"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id must match the pattern"},
 		{`{"id": "i-1", "version": 1}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document has a member"},
 		{`{"error": {"kind": "retry", "message": "m"}}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document has a member"},
 		{"", 0, "Fix the machine adapter: its answer to make fails a rule of version 1"},
 		{"oops " + marker, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: "},
-		{`{"error": {"kind": "fatal", "message": "m"}}`, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: error: the member kind"},
+		{`{"error": {"kind": "fatal", "message": "m"}}`, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: the member error.kind must be limit, retry, defect or other"},
 		{`{"error": {"kind": "defect", "message": "Run the machine adapter as <command> --settings FILE"}}`, 2, "Fix the machine adapter: it exited with status 2 for make; only status 0 and status 1 are allowed"},
 		{`{"id": "i-1"}`, 3, "Fix the machine adapter: it exited with status 3 for make; only status 0 and status 1 are allowed"},
 	}
@@ -294,10 +294,14 @@ func TestOutputBound(t *testing.T) {
 		t.Errorf("the runner took %s to stop the adapter", time.Since(start))
 	}
 
+	f = newFixture(t, config{Mode: "flood"})
+	_, err = f.r.Log(context.Background(), "i-1")
+	defect(t, err, "log", "Fix the machine adapter: it wrote more than 1048576 bytes on standard output for log, so the provisioner killed its process group")
+
 	f = newFixture(t, config{Mode: "biglog"})
 	log, err := f.r.Log(context.Background(), "i-1")
-	if err != nil || len(log.Log) != machines.MaxLog {
-		t.Errorf("a log of %d bytes, escaped: %d bytes, %v", machines.MaxLog, len(log.Log), err)
+	if want := bigLog(); err != nil || log != want || len(log.Log)*6 < contracts.MaxMachinesAnswer-20 {
+		t.Errorf("a log of %d bytes, escaped: %d bytes, %v", len(want.Log), len(log.Log), err)
 	}
 }
 
@@ -367,14 +371,14 @@ func TestInvalidRequest(t *testing.T) {
 	if err == nil || errors.As(err, &e) || leaks(err.Error()) {
 		t.Fatalf("the error is %v", err)
 	}
-	if err.Error() != "Report this defect in the provisioner: its make request to the machine adapter is not valid: the member key must be dp_ and 16 characters of 0-9 and a-z without i, l, o and u" {
+	if err.Error() != "Report this defect in the provisioner: its make request to the machine adapter is not valid: the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$" {
 		t.Errorf("the error text is %q", err.Error())
 	}
 	if _, err := os.Stat(f.cfg.Report); err == nil {
 		t.Error("the runner started the adapter with an invalid request")
 	}
-	_, err = f.r.Make(context.Background(), testKey, testPool, "standard", make([]byte, machines.MaxStartData+1))
-	if err == nil || !strings.HasSuffix(err.Error(), "the member start_data must be standard base64 of 1 to 16384 bytes") {
+	_, err = f.r.Make(context.Background(), testKey, testPool, "standard", make([]byte, contracts.MaxStartData+1))
+	if err == nil || !strings.HasSuffix(err.Error(), "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero") {
 		t.Errorf("the error is %v", err)
 	}
 }
@@ -407,12 +411,12 @@ func TestFakeRules(t *testing.T) {
 		t.Errorf("a make with another key returned %+v, %v", other, err)
 	}
 	del, err := f.r.Delete(ctx, "i-ffffffffffffffff0")
-	if err != nil || del.State != machines.StateGone {
+	if err != nil || del.State != contracts.MachineGone {
 		t.Errorf("the delete of an unknown id returned %+v, %v", del, err)
 	}
 	_, err = f.r.Make(ctx, testKey, testPool, "huge", startData)
 	var e *Error
-	if !errors.As(err, &e) || e.Kind != machines.KindDefect || e.Message != "Add the size to the adapter's settings: the adapter has no size of this name" {
+	if !errors.As(err, &e) || e.Kind != contracts.FailureDefect || e.Message != "Add the size to the adapter's settings: the adapter has no size of this name" {
 		t.Errorf("a make with an unknown size returned %v", err)
 	}
 }

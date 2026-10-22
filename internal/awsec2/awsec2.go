@@ -1,5 +1,5 @@
 // Package awsec2 is the EC2 machine adapter, qory-machines-aws-ec2: a
-// [machines.Handler] that makes, lists, reads and deletes EC2 instances with the calls
+// [adapterio.Handler] that makes, lists, reads and deletes EC2 instances with the calls
 // of package machine. Check and make read the adapter's settings file aws-ec2.json;
 // list, log and delete need no setting and do not read it. Every command calls EC2
 // only with the host's instance role.
@@ -12,13 +12,11 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"regexp"
 	"slices"
-	"strings"
-	"unicode/utf8"
 
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/machine"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The placeholder tags of check's dry run, in the shapes of a pool id and a key. The
@@ -32,9 +30,6 @@ const (
 // out.
 var listStates = []string{machine.StatePending, machine.StateRunning, machine.StateStopping, machine.StateStopped, machine.StateShuttingDown}
 
-// keyShape is the shape of a key in the qory:key tag.
-var keyShape = regexp.MustCompile(machines.KeyPattern)
-
 // Handler runs the commands of the EC2 machine adapter.
 type Handler struct {
 	// client returns the EC2 client after the check that the credentials come from the
@@ -43,7 +38,7 @@ type Handler struct {
 	log    *slog.Logger
 }
 
-var _ machines.Handler = (*Handler)(nil)
+var _ adapterio.Handler = (*Handler)(nil)
 
 // New returns the handler that calls EC2 with the configuration of
 // [machine.LoadConfig]. It writes its log lines to stderr.
@@ -65,65 +60,65 @@ func loadClient(ctx context.Context) (*machine.Client, error) {
 // each type once, and sends one DescribeInstances dry run, the call of list. It makes
 // no machine. It checks no right of TerminateInstances or GetConsoleOutput, because
 // their calls need the id of an instance that exists.
-func (h *Handler) Check(ctx context.Context, path string, _ machines.CheckRequest) (machines.CheckAnswer, error) {
+func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
-		return machines.CheckAnswer{}, err
+		return contracts.MachinesCheckAnswer{}, err
 	}
 	c, err := h.client(ctx)
 	if err != nil {
-		return machines.CheckAnswer{}, failure(err)
+		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
 	root, err := c.RootDevice(ctx, s.ImageID)
 	if err != nil {
-		return machines.CheckAnswer{}, failure(err)
+		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
 	instanceTypes := slices.Compact(slices.Sorted(maps.Values(s.Sizes)))
 	for _, t := range instanceTypes {
 		if err := c.CheckRights(ctx, spec(s, t, root, checkPool, checkKey, nil)); err != nil {
-			return machines.CheckAnswer{}, failure(err)
+			return contracts.MachinesCheckAnswer{}, failure(err)
 		}
 	}
 	if err := c.CheckListRights(ctx); err != nil {
-		return machines.CheckAnswer{}, failure(err)
+		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
-	return machines.CheckAnswer{}, nil
+	return contracts.MachinesCheckAnswer{}, nil
 }
 
 // Make makes one machine of the size's instance type, with the start data as its user
 // data and the key as the client token. A second make with the same key returns the
 // first machine's id, also when that machine is terminated and EC2 still returns it.
-func (h *Handler) Make(ctx context.Context, path string, req machines.MakeRequest) (machines.MakeAnswer, error) {
+func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
-		return machines.MakeAnswer{}, err
+		return contracts.MachinesMakeAnswer{}, err
 	}
 	instanceType, ok := s.Sizes[req.Size]
 	if !ok {
-		return machines.MakeAnswer{}, &machines.Error{Kind: machines.KindDefect, Message: fmt.Sprintf("Add the size %s to sizes in %s: the make request has a size that sizes does not contain", req.Size, settingsFile)}
+		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Add the size %s to sizes in %s: the make request has a size that sizes does not contain", req.Size, settingsFile)}
 	}
 	c, err := h.client(ctx)
 	if err != nil {
-		return machines.MakeAnswer{}, failure(err)
+		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
 	root, err := c.RootDevice(ctx, s.ImageID)
 	if err != nil {
-		return machines.MakeAnswer{}, failure(err)
+		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	m, err := c.Create(ctx, spec(s, instanceType, root, req.Pool, req.Key, req.StartData))
+	m, err := c.Create(ctx, spec(s, instanceType, root, req.Pool, req.Key, startData))
 	if machine.TokenTerminated(err) {
 		found, ok, findErr := c.FindByToken(ctx, req.Key)
 		if findErr != nil {
-			return machines.MakeAnswer{}, failure(findErr)
+			return contracts.MachinesMakeAnswer{}, failure(findErr)
 		}
 		if ok {
-			return machines.MakeAnswer{ID: found.ID}, nil
+			return contracts.MachinesMakeAnswer{ID: found.ID}, nil
 		}
 	}
 	if err != nil {
-		return machines.MakeAnswer{}, failure(err)
+		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	return machines.MakeAnswer{ID: m.ID}, nil
+	return contracts.MachinesMakeAnswer{ID: m.ID}, nil
 }
 
 // spec is the machine spec of the settings s with the instance type, the image's root
@@ -142,103 +137,90 @@ func spec(s Settings, instanceType, root, pool, key string, userData []byte) mac
 }
 
 // List lists the pool's instances that are not terminated, with the key from the
-// qory:key tag and the start time from LaunchTime. An instance whose qory:key tag is
-// not a key is left out, with a log line.
-func (h *Handler) List(ctx context.Context, _ string, req machines.ListRequest) (machines.ListAnswer, error) {
+// qory:key tag and the start time from LaunchTime, in UTC and whole seconds. An
+// instance whose qory:key tag is not a key is left out, with a log line.
+func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {
-		return machines.ListAnswer{}, failure(err)
+		return contracts.MachinesListAnswer{}, failure(err)
 	}
 	ms, err := c.List(ctx, req.Pool, listStates...)
 	if err != nil {
-		return machines.ListAnswer{}, failure(err)
+		return contracts.MachinesListAnswer{}, failure(err)
 	}
-	a := machines.ListAnswer{Machines: []machines.Machine{}}
+	a := contracts.MachinesListAnswer{Machines: []contracts.Machine{}}
 	for _, m := range ms {
 		state, ok := listState(m.State)
 		if !ok {
 			continue
 		}
-		if !keyShape.MatchString(m.Key) {
+		if adapterio.CheckKey(m.Key) != nil {
 			h.log.Warn("Set the instance's qory:key tag to the key of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:key tag is not a key", "instance", m.ID)
 			continue
 		}
-		a.Machines = append(a.Machines, machines.Machine{ID: m.ID, Key: m.Key, State: state, Started: m.LaunchTime.UTC()})
+		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, Key: m.Key, State: state, Started: contracts.FormatTime(m.LaunchTime)})
 	}
 	return a, nil
 }
 
 // listState maps an EC2 instance state to the state of a list answer. It returns false
 // for terminated and for a state that EC2 does not document.
-func listState(s string) (machines.State, bool) {
+func listState(s string) (string, bool) {
 	switch s {
 	case machine.StatePending:
-		return machines.StateStarting, true
+		return contracts.MachineStarting, true
 	case machine.StateRunning, machine.StateStopping:
-		return machines.StateRunning, true
+		return contracts.MachineRunning, true
 	case machine.StateStopped:
-		return machines.StateStopped, true
+		return contracts.MachineStopped, true
 	case machine.StateShuttingDown:
-		return machines.StateDeleting, true
+		return contracts.MachineDeleting, true
 	}
 	return "", false
 }
 
-// Log reads the machine's latest console output and keeps its last 768 KiB as valid
-// UTF-8.
-func (h *Handler) Log(ctx context.Context, _ string, req machines.LogRequest) (machines.LogAnswer, error) {
+// Log reads the machine's latest console output and keeps the end that fits a log
+// answer, as adapterio.LogAnswer cuts it: valid UTF-8 with U+0000 replaced, at most
+// 768 KiB, and an answer of at most 1 MiB.
+func (h *Handler) Log(ctx context.Context, _ string, req contracts.MachinesLog) (contracts.MachinesLogAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {
-		return machines.LogAnswer{}, failure(err)
+		return contracts.MachinesLogAnswer{}, failure(err)
 	}
 	text, err := c.Console(ctx, req.ID)
 	if err != nil {
-		return machines.LogAnswer{}, failure(err)
+		return contracts.MachinesLogAnswer{}, failure(err)
 	}
-	return machines.LogAnswer{Log: lastPart(text, machines.MaxLog)}, nil
-}
-
-// lastPart returns the last bytes of text, at most limit, as valid UTF-8: each invalid
-// byte sequence becomes U+FFFD, then the text is cut at the start of a character.
-func lastPart(text string, limit int) string {
-	text = strings.ToValidUTF8(text, string(utf8.RuneError))
-	if len(text) <= limit {
-		return text
-	}
-	text = text[len(text)-limit:]
-	for len(text) > 0 && !utf8.RuneStart(text[0]) {
-		text = text[1:]
-	}
-	return text
+	return adapterio.LogAnswer(text), nil
 }
 
 // Delete terminates the machine. An id that EC2 does not know, and a machine that is
 // terminated, return gone; any other machine returns deleting.
-func (h *Handler) Delete(ctx context.Context, _ string, req machines.DeleteRequest) (machines.DeleteAnswer, error) {
+func (h *Handler) Delete(ctx context.Context, _ string, req contracts.MachinesDelete) (contracts.MachinesDeleteAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {
-		return machines.DeleteAnswer{}, failure(err)
+		return contracts.MachinesDeleteAnswer{}, failure(err)
 	}
 	state, found, err := c.Terminate(ctx, req.ID)
 	if err != nil {
-		return machines.DeleteAnswer{}, failure(err)
+		return contracts.MachinesDeleteAnswer{}, failure(err)
 	}
 	if !found || state == machine.StateTerminated {
-		return machines.DeleteAnswer{State: machines.StateGone}, nil
+		return contracts.MachinesDeleteAnswer{State: contracts.MachineGone}, nil
 	}
-	return machines.DeleteAnswer{State: machines.StateDeleting}, nil
+	return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
 }
 
-// failure returns err as a *machines.Error: a *machines.Error unchanged, a failed EC2
-// call with its kind, and any other error with the kind other.
+// failure returns err as a *adapterio.Failure: a *adapterio.Failure unchanged, a
+// failed EC2 call with its kind, and any other error with the kind other.
 func failure(err error) error {
-	var done *machines.Error
+	var done *adapterio.Failure
 	if errors.As(err, &done) {
 		return done
 	}
 	var call *machine.Error
 	if errors.As(err, &call) {
-		return &machines.Error{Kind: call.Kind, Message: call.Error()}
+		return &adapterio.Failure{Kind: call.Kind, Message: call.Error()}
 	}
-	return &machines.Error{Kind: machines.KindOther, Message: err.Error()}
+	return &adapterio.Failure{Kind: contracts.FailureOther, Message: err.Error()}
 }

@@ -13,7 +13,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // Settings are the EC2 adapter's settings, from its settings file aws-ec2.json.
@@ -63,7 +64,7 @@ var (
 )
 
 // ReadSettings reads the settings file at path, as [ParseSettings] reads its bytes. A
-// file larger than 64 KiB is refused. Its errors are *machines.Error of the kind
+// file larger than 64 KiB is refused. Its errors are *adapterio.Failure of the kind
 // defect.
 func ReadSettings(path string) (Settings, error) {
 	f, err := os.Open(path)
@@ -98,7 +99,7 @@ func fileError(err error, op string) error {
 // ParseSettings reads the settings document b: one JSON object, each member once,
 // every member known and present, each value of its type and within its bounds. An
 // error starts with the fix, names the settings file, and quotes no value and no
-// member name of b. Its errors are *machines.Error of the kind defect.
+// member name of b. Its errors are *adapterio.Failure of the kind defect.
 func ParseSettings(b []byte) (Settings, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
 		return Settings{}, settingsError("Write " + settingsFile + " as one JSON object: the file is empty.")
@@ -151,7 +152,7 @@ func ParseSettings(b []byte) (Settings, error) {
 
 // settingsError is a failure of the kind defect with message.
 func settingsError(message string) error {
-	return &machines.Error{Kind: machines.KindDefect, Message: message}
+	return &adapterio.Failure{Kind: contracts.FailureDefect, Message: message}
 }
 
 // matching is a string that shape matches.

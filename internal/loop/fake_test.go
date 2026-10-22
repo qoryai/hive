@@ -16,7 +16,7 @@ import (
 
 	"github.com/qoryai/hive/internal/journal"
 	"github.com/qoryai/hive/internal/loop"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 const (
@@ -28,7 +28,7 @@ const (
 	dispatchE = "dp_abcdefghjkmnpq03"
 	dispatchF = "dp_abcdefghjkmnpq04"
 	// runCode is a marker run code in the shape of the contract. No other test value
-	// contains 12 of its characters in a row, the window of machines.ContainsSecret.
+	// contains 12 of its characters in a row, the window of adapterio.ContainsSecret.
 	runCode    = "qecr_MARKER00000000000000000000.MARKERruncode000000000"
 	gatewayURL = "https://gateway.example.com:8443"
 	lifetime   = 60
@@ -228,7 +228,7 @@ func (a *fakeApiary) claimCount() int {
 type fakeMachines struct {
 	mu        sync.Mutex
 	clock     *fakeClock
-	machines  []machines.Machine
+	machines  []contracts.Machine
 	made      int
 	calls     []string
 	checkErr  error
@@ -251,7 +251,7 @@ func (m *fakeMachines) Check(context.Context) error {
 	return m.checkErr
 }
 
-func (m *fakeMachines) Make(_ context.Context, key, pool, size string, startData []byte) (machines.MakeAnswer, error) {
+func (m *fakeMachines) Make(_ context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	if m.makeStarted != nil {
 		m.makeStarted <- struct{}{}
 		<-m.makeGate
@@ -261,41 +261,41 @@ func (m *fakeMachines) Make(_ context.Context, key, pool, size string, startData
 	m.calls = append(m.calls, "make "+key+" "+pool+" "+size)
 	m.startData = bytes.Clone(startData)
 	if m.makeErr != nil {
-		return machines.MakeAnswer{}, m.makeErr
+		return contracts.MachinesMakeAnswer{}, m.makeErr
 	}
 	// One key makes at most one machine.
 	for _, x := range m.machines {
 		if x.Key == key {
-			return machines.MakeAnswer{ID: x.ID}, nil
+			return contracts.MachinesMakeAnswer{ID: x.ID}, nil
 		}
 	}
 	m.made++
 	id := machineID(m.made)
-	m.machines = append(m.machines, machines.Machine{ID: id, Key: key, State: machines.StateRunning, Started: m.clock.Now()})
-	return machines.MakeAnswer{ID: id}, nil
+	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
+	return contracts.MachinesMakeAnswer{ID: id}, nil
 }
 
-func (m *fakeMachines) List(_ context.Context, p string) (machines.ListAnswer, error) {
+func (m *fakeMachines) List(_ context.Context, p string) (contracts.MachinesListAnswer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, "list "+p)
 	if m.listErr != nil {
-		return machines.ListAnswer{}, m.listErr
+		return contracts.MachinesListAnswer{}, m.listErr
 	}
-	return machines.ListAnswer{Machines: slices.Clone(m.machines)}, nil
+	return contracts.MachinesListAnswer{Machines: slices.Clone(m.machines)}, nil
 }
 
-func (m *fakeMachines) Log(_ context.Context, id string) (machines.LogAnswer, error) {
+func (m *fakeMachines) Log(_ context.Context, id string) (contracts.MachinesLogAnswer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, "log "+id)
 	if m.logErr != nil {
-		return machines.LogAnswer{}, m.logErr
+		return contracts.MachinesLogAnswer{}, m.logErr
 	}
-	return machines.LogAnswer{Log: m.logText}, nil
+	return contracts.MachinesLogAnswer{Log: m.logText}, nil
 }
 
-func (m *fakeMachines) Delete(_ context.Context, id string) (machines.DeleteAnswer, error) {
+func (m *fakeMachines) Delete(_ context.Context, id string) (contracts.MachinesDeleteAnswer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, "delete "+id)
@@ -303,33 +303,33 @@ func (m *fakeMachines) Delete(_ context.Context, id string) (machines.DeleteAnsw
 		err := m.deleteErr[0]
 		m.deleteErr = m.deleteErr[1:]
 		if err != nil {
-			return machines.DeleteAnswer{}, err
+			return contracts.MachinesDeleteAnswer{}, err
 		}
 	}
 	for i := range m.machines {
 		if m.machines[i].ID == id {
-			m.machines[i].State = machines.StateDeleting
+			m.machines[i].State = contracts.MachineDeleting
 		}
 	}
-	return machines.DeleteAnswer{State: machines.StateDeleting}, nil
+	return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
 }
 
 // add adds a machine to the adapter's list.
-func (m *fakeMachines) add(id, key string, state machines.State, started time.Time) {
+func (m *fakeMachines) add(id, key, state string, started time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.machines = append(m.machines, machines.Machine{ID: id, Key: key, State: state, Started: started})
+	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: state, Started: contracts.FormatTime(started)})
 }
 
 // drop takes the machine id out of the adapter's list.
 func (m *fakeMachines) drop(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.machines = slices.DeleteFunc(m.machines, func(x machines.Machine) bool { return x.ID == id })
+	m.machines = slices.DeleteFunc(m.machines, func(x contracts.Machine) bool { return x.ID == id })
 }
 
 // setState sets the state of the machine id.
-func (m *fakeMachines) setState(id string, state machines.State) {
+func (m *fakeMachines) setState(id string, state string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.machines {

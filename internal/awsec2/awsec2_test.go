@@ -9,15 +9,15 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
+	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/machine"
-	"github.com/qoryai/hive/machines"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // Neutral example values of the requests.
@@ -27,23 +27,26 @@ const (
 	testID   = "i-0123456789abcdef0"
 )
 
-// serve runs command through machines.Serve with h, the settings file path and the
+// serve runs command through adapterio.Serve with h, the settings file path and the
 // request, and returns the exit status and standard output.
 func serve(t *testing.T, h *Handler, command, path, request string) (int, string) {
 	t.Helper()
 	var out bytes.Buffer
-	status := machines.Serve(context.Background(), []string{command, "--settings", path}, strings.NewReader(request), &out, h)
+	status := adapterio.Serve(context.Background(), []string{command, "--settings", path}, strings.NewReader(request), &out, h)
 	return status, out.String()
 }
 
 // wantFailure fails t unless the command exited with status 1 and wrote the error
-// document of kind and message.
-func wantFailure(t *testing.T, status int, out string, kind machines.Kind, message string) {
+// document of kind and message, cut to its first 200 characters.
+func wantFailure(t *testing.T, status int, out, kind, message string) {
 	t.Helper()
-	if status != machines.ExitFailure {
+	if r := []rune(message); len(r) > adapterio.MaxMessage {
+		message = string(r[:adapterio.MaxMessage])
+	}
+	if status != adapterio.ExitFailure {
 		t.Fatalf("exit status %d, want 1; output %s", status, out)
 	}
-	doc, err := machines.DecodeErrorAnswer([]byte(strings.TrimSuffix(out, "\n")))
+	doc, err := adapterio.DecodeError([]byte(strings.TrimSuffix(out, "\n")))
 	if err != nil {
 		t.Fatalf("output %q: %v", out, err)
 	}
@@ -63,12 +66,12 @@ func image(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) {
 }
 
 // launched returns an instance with id, state, the qory:key tag key and a launch time
-// in UTC+2.
+// in UTC+2 with half a second.
 func launched(id, state, key string) types.Instance {
 	return types.Instance{
 		InstanceId: aws.String(id),
 		State:      &types.InstanceState{Name: types.InstanceStateName(state)},
-		LaunchTime: aws.Time(time.Date(2026, 10, 22, 12, 0, 0, 0, time.FixedZone("UTC+2", 2*3600))),
+		LaunchTime: aws.Time(time.Date(2026, 10, 22, 12, 0, 0, 500_000_000, time.FixedZone("UTC+2", 2*3600))),
 		Tags: []types.Tag{
 			{Key: aws.String("qory:managed"), Value: aws.String("true")},
 			{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
@@ -92,7 +95,7 @@ func TestCheck(t *testing.T) {
 	path := writeSettings(t, `{"subnet_id": "subnet-0123456789abcdef0", "security_group_id": "sg-0123456789abcdef0", "image_id": "ami-0123456789abcdef0",
 		"sizes": {"standard": "t3.medium", "large": "m7g.large", "medium": "t3.medium"}}`)
 	status, out := serve(t, h, "check", path, `{"version": 1}`)
-	if status != machines.ExitOK || out != "{}\n" {
+	if status != adapterio.ExitOK || out != "{}\n" {
 		t.Fatalf("exit status %d, output %q", status, out)
 	}
 	if len(f.images) != 1 || !reflect.DeepEqual(f.images[0].ImageIds, []string{"ami-0123456789abcdef0"}) {
@@ -129,13 +132,13 @@ func TestCheck(t *testing.T) {
 		return nil, apiError("UnauthorizedOperation")
 	}
 	status, out = serve(t, h, "check", path, `{"version": 1}`)
-	wantFailure(t, status, out, machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
+	wantFailure(t, status, out, contracts.FailureDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
 
 	f.run = func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return nil, apiError("UnauthorizedOperation")
 	}
 	status, out = serve(t, h, "check", path, `{"version": 1}`)
-	wantFailure(t, status, out, machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
+	wantFailure(t, status, out, contracts.FailureDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
 }
 
 // TestCheckStopsEarly pins that check makes no EC2 call when the settings or the
@@ -144,16 +147,16 @@ func TestCheckStopsEarly(t *testing.T) {
 	f := &fakeAPI{}
 	h, _, built := testHandler(f)
 	status, out := serve(t, h, "check", writeSettings(t, `{}`), `{"version": 1}`)
-	wantFailure(t, status, out, machines.KindDefect, "Add the missing members to the EC2 adapter's settings file aws-ec2.json: subnet_id, security_group_id, image_id, sizes.")
+	wantFailure(t, status, out, contracts.FailureDefect, "Add the missing members to the EC2 adapter's settings file aws-ec2.json: subnet_id, security_group_id, image_id, sizes.")
 	if *built != 0 || f.calls() != 0 {
 		t.Errorf("%d clients built and %d EC2 calls, want none", *built, f.calls())
 	}
 
 	h.client = func(context.Context) (*machine.Client, error) {
-		return nil, &machines.Error{Kind: machines.KindDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
+		return nil, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
 	}
 	status, out = serve(t, h, "check", writeSettings(t, validSettings), `{"version": 1}`)
-	wantFailure(t, status, out, machines.KindDefect, "Set AWS_REGION: the environment has no region, and the instance metadata returned none")
+	wantFailure(t, status, out, contracts.FailureDefect, "Set AWS_REGION: the environment has no region, and the instance metadata returned none")
 	if f.calls() != 0 {
 		t.Errorf("%d EC2 calls, want none", f.calls())
 	}
@@ -163,7 +166,7 @@ func TestCheckStopsEarly(t *testing.T) {
 	}
 	h, _, _ = testHandler(f)
 	status, out = serve(t, h, "check", writeSettings(t, validSettings), `{"version": 1}`)
-	wantFailure(t, status, out, machines.KindDefect, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound")
+	wantFailure(t, status, out, contracts.FailureDefect, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound")
 	if len(f.runs) != 0 {
 		t.Errorf("%d RunInstances calls, want none", len(f.runs))
 	}
@@ -181,7 +184,7 @@ func TestMake(t *testing.T) {
 	data := []byte("#!/bin/sh\necho start\n")
 	for range 2 {
 		status, out := serve(t, h, "make", path, makeRequest("large", data))
-		if status != machines.ExitOK || out != `{"id":"`+testID+`"}`+"\n" {
+		if status != adapterio.ExitOK || out != `{"id":"`+testID+`"}`+"\n" {
 			t.Fatalf("exit status %d, output %q", status, out)
 		}
 	}
@@ -226,7 +229,7 @@ func TestMakeUnknownSize(t *testing.T) {
 	f := &fakeAPI{}
 	h, _, built := testHandler(f)
 	status, out := serve(t, h, "make", writeSettings(t, validSettings), makeRequest("huge", []byte("x")))
-	wantFailure(t, status, out, machines.KindDefect, "Add the size huge to sizes in the EC2 adapter's settings file aws-ec2.json: the make request has a size that sizes does not contain")
+	wantFailure(t, status, out, contracts.FailureDefect, "Add the size huge to sizes in the EC2 adapter's settings file aws-ec2.json: the make request has a size that sizes does not contain")
 	if *built != 0 || f.calls() != 0 {
 		t.Errorf("%d clients built and %d EC2 calls, want none", *built, f.calls())
 	}
@@ -250,7 +253,7 @@ func TestMakeTerminated(t *testing.T) {
 	path := writeSettings(t, validSettings)
 	found = []types.Instance{launched(testID, "terminated", testKey)}
 	status, out := serve(t, h, "make", path, makeRequest("standard", []byte("x")))
-	if status != machines.ExitOK || out != `{"id":"`+testID+`"}`+"\n" {
+	if status != adapterio.ExitOK || out != `{"id":"`+testID+`"}`+"\n" {
 		t.Fatalf("exit status %d, output %q", status, out)
 	}
 	if want := []types.Filter{{Name: aws.String("client-token"), Values: []string{testKey}}}; !reflect.DeepEqual(f.describes[0].Filters, want) {
@@ -259,7 +262,7 @@ func TestMakeTerminated(t *testing.T) {
 
 	found = nil
 	status, out = serve(t, h, "make", path, makeRequest("standard", []byte("x")))
-	wantFailure(t, status, out, machines.KindOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated")
+	wantFailure(t, status, out, contracts.FailureOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated")
 }
 
 // TestMakeErrorKinds pins the kind of each class of RunInstances error in the error
@@ -271,29 +274,29 @@ func TestMakeErrorKinds(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString(data)
 	cases := []struct {
 		err  error
-		kind machines.Kind
+		kind string
 	}{
-		{apiError("InstanceLimitExceeded"), machines.KindLimit},
-		{apiError("VcpuLimitExceeded"), machines.KindLimit},
-		{apiError("InsufficientFreeAddressesInSubnet"), machines.KindLimit},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, machines.KindLimit},
-		{apiError("RequestLimitExceeded"), machines.KindRetry},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, machines.KindRetry},
-		{context.DeadlineExceeded, machines.KindRetry},
-		{apiError("UnauthorizedOperation"), machines.KindDefect},
-		{apiError("InvalidParameterValue"), machines.KindDefect},
-		{apiError("IdempotentParameterMismatch"), machines.KindDefect},
-		{apiError("AuthFailure"), machines.KindOther},
-		{errors.New("unexpected end of the answer"), machines.KindOther},
+		{apiError("InstanceLimitExceeded"), contracts.FailureLimit},
+		{apiError("VcpuLimitExceeded"), contracts.FailureLimit},
+		{apiError("InsufficientFreeAddressesInSubnet"), contracts.FailureLimit},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit},
+		{apiError("RequestLimitExceeded"), contracts.FailureRetry},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, contracts.FailureRetry},
+		{context.DeadlineExceeded, contracts.FailureRetry},
+		{apiError("UnauthorizedOperation"), contracts.FailureDefect},
+		{apiError("InvalidParameterValue"), contracts.FailureDefect},
+		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect},
+		{apiError("AuthFailure"), contracts.FailureOther},
+		{errors.New("unexpected end of the answer"), contracts.FailureOther},
 	}
 	for _, tc := range cases {
 		f := &fakeAPI{image: image, run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, tc.err }}
 		h, log, _ := testHandler(f)
 		status, out := serve(t, h, "make", writeSettings(t, validSettings), makeRequest("standard", data))
-		if status != machines.ExitFailure {
+		if status != adapterio.ExitFailure {
 			t.Fatalf("%v: exit status %d", tc.err, status)
 		}
-		doc, err := machines.DecodeErrorAnswer([]byte(strings.TrimSuffix(out, "\n")))
+		doc, err := adapterio.DecodeError([]byte(strings.TrimSuffix(out, "\n")))
 		if err != nil || doc.Error.Kind != tc.kind {
 			t.Errorf("%v: document %+v, error %v, want kind %s", tc.err, doc, err, tc.kind)
 		}
@@ -322,7 +325,7 @@ func TestList(t *testing.T) {
 	}}
 	h, log, _ := testHandler(f)
 	status, out := serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`)
-	if status != machines.ExitOK {
+	if status != adapterio.ExitOK {
 		t.Fatalf("exit status %d, output %s", status, out)
 	}
 	const started = `"started":"2026-10-22T10:00:00Z"`
@@ -351,7 +354,7 @@ func TestList(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return &ec2.DescribeInstancesOutput{}, nil
 	}
-	if status, out := serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`); status != machines.ExitOK || out != `{"machines":[]}`+"\n" {
+	if status, out := serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`); status != adapterio.ExitOK || out != `{"machines":[]}`+"\n" {
 		t.Errorf("no machine: exit status %d, output %q", status, out)
 	}
 
@@ -359,7 +362,7 @@ func TestList(t *testing.T) {
 		return nil, apiError("UnauthorizedOperation")
 	}
 	status, out = serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`)
-	wantFailure(t, status, out, machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
+	wantFailure(t, status, out, contracts.FailureDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
 }
 
 // TestLog pins log: GetConsoleOutput with Latest for the id, and the decoded text.
@@ -370,8 +373,8 @@ func TestLog(t *testing.T) {
 	}}
 	h, _, _ := testHandler(f)
 	status, out := serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	a, err := machines.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
-	if status != machines.ExitOK || err != nil || a.Log != text {
+	a, err := adapterio.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
+	if status != adapterio.ExitOK || err != nil || a.Log != text {
 		t.Fatalf("exit status %d, output %q, error %v", status, out, err)
 	}
 	if want := (&ec2.GetConsoleOutputInput{InstanceId: aws.String(testID), Latest: aws.Bool(true)}); !reflect.DeepEqual(f.consoles[0], want) {
@@ -382,7 +385,7 @@ func TestLog(t *testing.T) {
 		return nil, apiError("InvalidInstanceID.NotFound")
 	}
 	status, out = serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	wantFailure(t, status, out, machines.KindOther, "Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return InvalidInstanceID.NotFound for an instance that exists: GetConsoleOutput failed: api error InvalidInstanceID.NotFound: test message for InvalidInstanceID.NotFound")
+	wantFailure(t, status, out, contracts.FailureOther, "Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return InvalidInstanceID.NotFound for an instance that exists: GetConsoleOutput failed: api error InvalidInstanceID.NotFound: test message for InvalidInstanceID.NotFound")
 }
 
 // TestLogNotNitro pins that log returns the console text of an instance that is not
@@ -398,8 +401,8 @@ func TestLogNotNitro(t *testing.T) {
 	}}
 	h, _, _ := testHandler(f)
 	status, out := serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	a, err := machines.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
-	if status != machines.ExitOK || err != nil || a.Log != text {
+	a, err := adapterio.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
+	if status != adapterio.ExitOK || err != nil || a.Log != text {
 		t.Fatalf("exit status %d, output %q, error %v", status, out, err)
 	}
 	if len(f.consoles) != 2 || f.consoles[1].Latest != nil {
@@ -407,35 +410,32 @@ func TestLogNotNitro(t *testing.T) {
 	}
 }
 
-// TestLogLastPart pins that log keeps the last 768 KiB of a longer console text,
-// starting at a whole character, and that it writes each run of invalid UTF-8 as one
-// U+FFFD before the cut.
-func TestLogLastPart(t *testing.T) {
-	head := strings.Repeat("h", 100)
-	tail := "é" + strings.Repeat("t", machines.MaxLog-2)
-	cases := []struct{ in, want string }{
-		{"ok", "ok"},
-		{"a\xffb", "a�b"},
-		{head + tail, tail},
-		{head + "x" + tail, "é" + strings.Repeat("t", machines.MaxLog-2)},
-		{head + strings.Repeat("t", machines.MaxLog-1) + "é", strings.Repeat("t", machines.MaxLog-2) + "é"},
-	}
-	for i, tc := range cases {
-		got := lastPart(tc.in, machines.MaxLog)
-		if got != tc.want || !utf8.ValidString(got) || len(got) > machines.MaxLog {
-			t.Errorf("case %d: %d bytes, want %d", i, len(got), len(tc.want))
+// TestLogCut pins that log keeps the end of a long console text that fits a log
+// answer: U+0000 and each run of invalid UTF-8 become U+FFFD, the text is at most
+// 768 KiB, and the answer, with its line feed, at most 1 MiB.
+func TestLogCut(t *testing.T) {
+	for i, c := range []struct {
+		console, end string
+		size         int
+	}{
+		{strings.Repeat("a\xff", adapterio.MaxLog/2), "a\uFFFD", adapterio.MaxLog},
+		{strings.Repeat("boot\x00\x1b[0m\n", adapterio.MaxLog/4) + "end", "boot\uFFFD\x1b[0m\nend", 0},
+	} {
+		f := &fakeAPI{console: func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+			return &ec2.GetConsoleOutputOutput{Output: aws.String(base64.StdEncoding.EncodeToString([]byte(c.console)))}, nil
+		}}
+		h, _, _ := testHandler(f)
+		status, out := serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
+		a, err := adapterio.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
+		if status != adapterio.ExitOK || err != nil || len(out) > contracts.MaxMachinesAnswer || len(a.Log) > adapterio.MaxLog || !strings.HasSuffix(a.Log, c.end) || strings.Contains(a.Log, "\x00") {
+			t.Errorf("case %d: exit status %d, %d bytes of output, %d bytes of log, error %v", i, status, len(out), len(a.Log), err)
 		}
-	}
-
-	big := strings.Repeat("a\xff", machines.MaxLog/2)
-	f := &fakeAPI{console: func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
-		return &ec2.GetConsoleOutputOutput{Output: aws.String(base64.StdEncoding.EncodeToString([]byte(big)))}, nil
-	}}
-	h, _, _ := testHandler(f)
-	status, out := serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	a, err := machines.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
-	if status != machines.ExitOK || err != nil || len(a.Log) != machines.MaxLog || !strings.HasSuffix(a.Log, "�") {
-		t.Errorf("exit status %d, %d bytes, error %v", status, len(a.Log), err)
+		if c.size != 0 && len(a.Log) != c.size {
+			t.Errorf("case %d: %d bytes of log, want %d", i, len(a.Log), c.size)
+		}
+		if c.size == 0 && len(out) < contracts.MaxMachinesAnswer-6 {
+			t.Errorf("case %d: %d bytes of output, want the end that fits 1 MiB", i, len(out))
+		}
 	}
 }
 
@@ -468,7 +468,7 @@ func TestDelete(t *testing.T) {
 	for i, tc := range cases {
 		reply, replyErr = tc.reply, tc.err
 		status, out := serve(t, h, "delete", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-		if want := `{"state":"` + tc.state + `"}` + "\n"; status != machines.ExitOK || out != want {
+		if want := `{"state":"` + tc.state + `"}` + "\n"; status != adapterio.ExitOK || out != want {
 			t.Errorf("case %d: exit status %d, output %q, want %q", i, status, out, want)
 		}
 	}
@@ -478,17 +478,17 @@ func TestDelete(t *testing.T) {
 
 	reply, replyErr = nil, apiError("RequestLimitExceeded")
 	status, out := serve(t, h, "delete", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	wantFailure(t, status, out, machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: TerminateInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded")
+	wantFailure(t, status, out, contracts.FailureRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: TerminateInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded")
 }
 
 // TestFailure pins the conversion of each kind of error to the error document.
 func TestFailure(t *testing.T) {
-	done := &machines.Error{Kind: machines.KindLimit, Message: "m"}
+	done := &adapterio.Failure{Kind: contracts.FailureLimit, Message: "m"}
 	if got := failure(done); got != done {
-		t.Errorf("a *machines.Error: %#v", got)
+		t.Errorf("a *adapterio.Failure: %#v", got)
 	}
-	var e *machines.Error
-	if !errors.As(failure(errors.New("plain")), &e) || e.Kind != machines.KindOther || e.Message != "plain" {
+	var e *adapterio.Failure
+	if !errors.As(failure(errors.New("plain")), &e) || e.Kind != contracts.FailureOther || e.Message != "plain" {
 		t.Errorf("a plain error: %#v", e)
 	}
 }
