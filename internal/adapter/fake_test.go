@@ -41,7 +41,9 @@ func TestMain(m *testing.M) {
 
 // config is the fake adapter's settings file.
 type config struct {
-	// Mode is serve, fail, raw, flood, biglog, hang, sleep, daemon, orphan or signal.
+	// Mode is serve, stderr, fail, raw, flood, biglog, hang, sleep, daemon, orphan or
+	// signal. Mode stderr serves as serve does, after it writes [stderrLines] of the
+	// start data to standard error.
 	// Mode daemon leaves a child that holds standard output; mode orphan leaves a
 	// child that does not. Both write Stdout and exit with status 0.
 	Mode string `json:"mode"`
@@ -182,7 +184,26 @@ func fake(args []string) int {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "fake adapter: %s ran\n", args[0])
+	if _, data, err := adapterio.DecodeMake(stdin); err == nil && cfg.Mode == "stderr" {
+		_, _ = os.Stderr.WriteString(stderrLines(data))
+	}
 	return adapterio.Serve(context.Background(), args, bytes.NewReader(stdin), os.Stdout, &handler{cfg: cfg})
+}
+
+// stderrLines is what mode stderr writes to standard error for the start data data:
+// a plain line, the run code, a window of the start data in base64, a line longer
+// than the bound with the run code after the bound, and a last line with no line feed.
+func stderrLines(data []byte) string {
+	var doc struct {
+		RunCode string `json:"run_code"`
+	}
+	_ = json.Unmarshal(data, &doc)
+	window := base64.StdEncoding.EncodeToString(data)[20 : 20+adapterio.StartDataWindow]
+	return "plain line\n" +
+		"redeem " + strings.TrimPrefix(doc.RunCode, "qecr_") + "\n" +
+		"window " + window + " end\n" +
+		strings.Repeat("c", maxStderrLine+10) + doc.RunCode + "\n" +
+		"last line"
 }
 
 // handler is the fake adapter's [adapterio.Handler].

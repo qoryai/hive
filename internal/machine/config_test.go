@@ -12,6 +12,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+
 	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/integrations/contracts"
 )
@@ -25,9 +28,13 @@ type imdsServer struct {
 	paths map[string]string
 	mu    sync.Mutex
 	gets  []string
+	all   int
 }
 
 func (s *imdsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	s.all++
+	s.mu.Unlock()
 	if r.Method == http.MethodPut && r.URL.Path == "/latest/api/token" {
 		if r.Header.Get("X-Aws-Ec2-Metadata-Token-Ttl-Seconds") == "" {
 			s.t.Error("the token request has no TTL header")
@@ -68,23 +75,28 @@ func wantKind(t *testing.T, err error, kind string) {
 	}
 }
 
-// isolateAWSEnv clears every variable and file the SDK's default chain reads, so a
-// test reads only what it sets. The metadata endpoint is set to endpoint.
+// requests returns how many requests the server received.
+func (s *imdsServer) requests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.all
+}
+
+// isolateAWSEnv clears every variable that the SDK reads for the region, the
+// credentials and the endpoints, sets HOME to an empty folder, and points LoadConfig
+// at the metadata endpoint.
 func isolateAWSEnv(t *testing.T, endpoint string) {
-	empty := filepath.Join(t.TempDir(), "empty")
-	if err := os.WriteFile(empty, nil, 0o600); err != nil {
-		t.Fatal(err)
+	for _, v := range refusedVariables {
+		t.Setenv(v.name, "")
 	}
-	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
-		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
-		"AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-		"AWS_EC2_METADATA_DISABLED", "AWS_DEFAULTS_MODE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_EC2"} {
+	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_DEFAULTS_MODE", "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE"} {
 		t.Setenv(k, "")
 	}
-	t.Setenv("AWS_CONFIG_FILE", empty)
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", empty)
-	t.Setenv("AWS_EC2_METADATA_SERVICE_ENDPOINT", endpoint)
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AWS_EC2_METADATA_V1_DISABLED", "true")
+	before := imdsEndpoint
+	imdsEndpoint = endpoint
+	t.Cleanup(func() { imdsEndpoint = before })
 }
 
 // The instance role's test credentials. The key id and the secret are markers that
@@ -150,41 +162,121 @@ func TestLoadConfigRegion(t *testing.T) {
 	}
 }
 
-// TestLoadConfigRefusesOtherCredentials pins that credentials from the environment
-// or a shared credentials file are refused, with an error that starts with the fix
-// and contains none of the keys, even when the instance role is there too.
-func TestLoadConfigRefusesOtherCredentials(t *testing.T) {
-	const keyID, secret = "AKIAENVMARKER00001", "env-secret-marker-93be"
-	const prefix = "Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from "
-	for name, set := range map[string]func(t *testing.T){
-		"environment": func(t *testing.T) {
-			t.Setenv("AWS_ACCESS_KEY_ID", keyID)
-			t.Setenv("AWS_SECRET_ACCESS_KEY", secret)
-		},
-		"credentials file": func(t *testing.T) {
-			file := filepath.Join(t.TempDir(), "credentials")
-			if err := os.WriteFile(file, []byte("[default]\naws_access_key_id = "+keyID+"\naws_secret_access_key = "+secret+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", file)
-		},
-	} {
+// TestLoadConfigRefusesVariables pins that each variable that selects another
+// credential source, a config or credentials file, another metadata address, another
+// EC2 endpoint or another certificate authority is refused with an error of the kind
+// defect that starts with the fix, before any request to the metadata service. The
+// error does not contain the variable's value.
+func TestLoadConfigRefusesVariables(t *testing.T) {
+	const value = "value-marker-41c7"
+	want := map[string]string{
+		"AWS_ACCESS_KEY_ID":                      "Unset AWS_ACCESS_KEY_ID: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_ACCESS_KEY":                         "Unset AWS_ACCESS_KEY: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_SECRET_ACCESS_KEY":                  "Unset AWS_SECRET_ACCESS_KEY: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_SECRET_KEY":                         "Unset AWS_SECRET_KEY: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_SESSION_TOKEN":                      "Unset AWS_SESSION_TOKEN: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_WEB_IDENTITY_TOKEN_FILE":            "Unset AWS_WEB_IDENTITY_TOKEN_FILE: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_ROLE_ARN":                           "Unset AWS_ROLE_ARN: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI":     "Unset AWS_CONTAINER_CREDENTIALS_FULL_URI: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "Unset AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: the EC2 machine adapter uses only the instance role's credentials",
+		"AWS_PROFILE":                            "Unset AWS_PROFILE: the EC2 machine adapter reads no AWS config or credentials file",
+		"AWS_DEFAULT_PROFILE":                    "Unset AWS_DEFAULT_PROFILE: the EC2 machine adapter reads no AWS config or credentials file",
+		"AWS_CONFIG_FILE":                        "Unset AWS_CONFIG_FILE: the EC2 machine adapter reads no AWS config or credentials file",
+		"AWS_SHARED_CREDENTIALS_FILE":            "Unset AWS_SHARED_CREDENTIALS_FILE: the EC2 machine adapter reads no AWS config or credentials file",
+		"AWS_EC2_METADATA_SERVICE_ENDPOINT":      "Unset AWS_EC2_METADATA_SERVICE_ENDPOINT: the EC2 machine adapter reads the instance role's credentials from the instance metadata service at its standard address",
+		"AWS_EC2_METADATA_DISABLED":              "Unset AWS_EC2_METADATA_DISABLED: the EC2 machine adapter reads the instance role's credentials from the instance metadata service at its standard address",
+		"AWS_ENDPOINT_URL":                       "Unset AWS_ENDPOINT_URL: the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials",
+		"AWS_ENDPOINT_URL_EC2":                   "Unset AWS_ENDPOINT_URL_EC2: the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials",
+		"AWS_CA_BUNDLE":                          "Unset AWS_CA_BUNDLE: the EC2 machine adapter checks the EC2 endpoint's certificate only against the host's certificate authorities",
+	}
+	if len(want) != len(refusedVariables) {
+		t.Fatalf("%d refused variables, want %d", len(refusedVariables), len(want))
+	}
+	for name, message := range want {
 		t.Run(name, func(t *testing.T) {
-			srv, _ := newIMDS(t, rolePaths())
+			srv, s := newIMDS(t, rolePaths())
 			isolateAWSEnv(t, srv.URL)
 			t.Setenv("AWS_REGION", "test-region-1")
-			set(t)
+			t.Setenv(name, value)
 			_, err := LoadConfig(context.Background())
-			if err == nil || !strings.HasPrefix(err.Error(), prefix) || !strings.HasSuffix(err.Error(), ", not EC2RoleProvider") {
-				t.Fatalf("error %v, want the prefix %q", err, prefix)
+			if err == nil || err.Error() != message {
+				t.Fatalf("error %v, want %q", err, message)
 			}
 			wantKind(t, err, contracts.FailureDefect)
-			for _, marker := range []string{keyID, secret, roleKeyID, roleSecret, roleToken} {
-				if strings.Contains(err.Error(), marker) {
-					t.Errorf("the error contains the marker %q", marker)
-				}
+			if strings.Contains(err.Error(), value) {
+				t.Error("the error contains the variable's value")
+			}
+			if n := s.requests(); n != 0 {
+				t.Errorf("%d requests to the metadata service, want 0", n)
 			}
 		})
+	}
+}
+
+// TestLoadConfigIgnoresSharedFiles pins that the config and credentials files in
+// HOME, and AWS_DEFAULT_REGION, change neither the region, the credentials, the
+// metadata address nor the EC2 endpoint.
+func TestLoadConfigIgnoresSharedFiles(t *testing.T) {
+	const keyID, secret = "AKIAFILEMARKER0001", "file-secret-marker-0c2d"
+	paths := rolePaths()
+	paths["/latest/dynamic/instance-identity/document"] = `{"region": "test-region-2", "instanceId": "i-0123456789abcdef0"}`
+	srv, _ := newIMDS(t, paths)
+	isolateAWSEnv(t, srv.URL)
+	t.Setenv("AWS_DEFAULT_REGION", "test-region-8")
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("a request reached the endpoint of the shared config file")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(other.Close)
+	dir := filepath.Join(os.Getenv("HOME"), ".aws")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"config":      "[default]\nregion = test-region-9\nendpoint_url = " + other.URL + "\nec2_metadata_service_endpoint = " + other.URL + "\ncredential_process = /nonexistent/credential-process\n",
+		"credentials": "[default]\naws_access_key_id = " + keyID + "\naws_secret_access_key = " + secret + "\n",
+	}
+	for name, text := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := LoadConfig(context.Background())
+	if err != nil || cfg.Region != "test-region-2" {
+		t.Fatalf("region %q, error %v", cfg.Region, err)
+	}
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	if err != nil || creds.Source != "EC2RoleProvider" || creds.AccessKeyID != roleKeyID {
+		t.Errorf("credentials from %q with the key id %q, error %v", creds.Source, creds.AccessKeyID, err)
+	}
+	if cfg.BaseEndpoint != nil {
+		t.Errorf("the configuration has the endpoint %q", *cfg.BaseEndpoint)
+	}
+	if e := ec2.NewFromConfig(cfg).Options().BaseEndpoint; e != nil {
+		t.Errorf("the EC2 client has the endpoint %q", *e)
+	}
+}
+
+// TestLoadConfigDefaultsModeAuto pins that AWS_DEFAULTS_MODE=auto does not apply: the
+// configuration has the defaults mode legacy and no runtime environment, which auto
+// would set from a region read from the instance metadata, and the metadata service
+// gets only the requests for the credentials.
+func TestLoadConfigDefaultsModeAuto(t *testing.T) {
+	paths := rolePaths()
+	paths["/latest/dynamic/instance-identity/document"] = `{"region": "test-region-2", "instanceId": "i-0123456789abcdef0"}`
+	srv, s := newIMDS(t, paths)
+	isolateAWSEnv(t, srv.URL)
+	t.Setenv("AWS_REGION", "test-region-1")
+	t.Setenv("AWS_DEFAULTS_MODE", "auto")
+	cfg, err := LoadConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultsMode != aws.DefaultsModeLegacy || cfg.RuntimeEnvironment != (aws.RuntimeEnvironment{}) {
+		t.Errorf("defaults mode %q, runtime environment %+v; want legacy and none", cfg.DefaultsMode, cfg.RuntimeEnvironment)
+	}
+	if n := s.documentReads(); n != 0 {
+		t.Errorf("%d reads of the region from the metadata, want 0", n)
 	}
 }
 

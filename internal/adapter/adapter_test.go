@@ -211,6 +211,30 @@ func TestCommands(t *testing.T) {
 	}
 }
 
+// TestStderrFiltered pins that the adapter's standard error reaches the runner's
+// stderr line by line: a line with the run code or a window of the start data is
+// replaced, a line over the bound is cut and its rest dropped, and the last line gets
+// a line feed.
+func TestStderrFiltered(t *testing.T) {
+	f := newFixture(t, config{Mode: "stderr"})
+	if _, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData); err != nil {
+		t.Fatal(err)
+	}
+	want := "fake adapter: make ran\n" +
+		"plain line\n" +
+		hiddenStderrLine + "\n" +
+		hiddenStderrLine + "\n" +
+		strings.Repeat("c", maxStderrLine) + cutStderrLine + "\n" +
+		"last line\n"
+	got := f.stderr.String()
+	if leaks(got) {
+		t.Fatal("the adapter's stderr contains the marker or the start data")
+	}
+	if got != want {
+		t.Errorf("the adapter's stderr is\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestErrorDocument(t *testing.T) {
 	f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."})
 	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)

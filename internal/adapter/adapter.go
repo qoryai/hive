@@ -5,11 +5,13 @@
 // The runner starts the adapter as <command> <name> --settings <file> in a new process
 // group, writes the request on its standard input and reads at most
 // contracts.MaxMachinesAnswer bytes, 1 MiB, of its standard output for every command.
-// The adapter's standard error goes to the runner's stderr writer unchanged. The adapter's environment is the
+// The adapter's standard error goes to the runner's stderr writer line by line: a line
+// that contains what looks like a run code or a piece of the start data is replaced by
+// a fixed text, and a line is cut at 4096 bytes. The adapter's environment is the
 // provisioner's environment without any variable whose name starts with QORY_. The
-// start data travels only on standard input. The runner's errors never contain the
-// adapter's standard output or standard error, except the message of a valid error
-// document.
+// start data travels only on standard input, and the runner clears its copy of the
+// request after the adapter ends. The runner's errors never contain the adapter's
+// standard output or standard error, except the message of a valid error document.
 package adapter
 
 import (
@@ -22,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -89,7 +92,8 @@ type Runner struct {
 
 // New returns a runner of the adapter program command with its settings file
 // settings, from adapter.command and adapter.settings of the provisioner's settings.
-// The adapter's standard error goes to stderr unchanged.
+// The adapter's standard error goes to stderr line by line, filtered as the package
+// documentation states.
 func New(command, settings string, stderr io.Writer) *Runner {
 	return &Runner{command: command, settings: settings, stderr: stderr, timeout: timeout, waitDelay: waitDelay}
 }
@@ -141,6 +145,8 @@ func run[A any](ctx context.Context, r *Runner, name string, req any, startData 
 	if err != nil {
 		return zero, fmt.Errorf("Report this defect in the provisioner: its %s request to the machine adapter is not valid: %w", name, err)
 	}
+	// The body of a make request contains the start data in base64.
+	defer clear(body)
 	limit := r.timeout(name)
 	cmdCtx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
@@ -149,7 +155,11 @@ func run[A any](ctx context.Context, r *Runner, name string, req any, startData 
 	cmd := exec.CommandContext(cmdCtx, r.command, name, "--settings", r.settings)
 	cmd.Stdin = bytes.NewReader(body)
 	cmd.Stdout = out
-	cmd.Stderr = r.stderr
+	if r.stderr != nil {
+		stderr := &stderrFilter{w: r.stderr, startData: startData}
+		defer stderr.close()
+		cmd.Stderr = stderr
+	}
 	cmd.Env = environment()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// killed records a kill of the process group that reached at least one process,
@@ -244,6 +254,84 @@ func environment() []string {
 		}
 	}
 	return out
+}
+
+// maxStderrLine is the most bytes of one line of the adapter's standard error that
+// the runner passes on.
+const maxStderrLine = 4096
+
+// The texts that [stderrFilter] writes in place of a line or after a cut line.
+const (
+	hiddenStderrLine = "[hidden: the machine adapter's line contained what looks like a run code or the start data]"
+	cutStderrLine    = " [cut: the machine adapter's line is longer than 4096 bytes]"
+)
+
+// stderrFilter passes the adapter's standard error to w one line at a time. It keeps
+// the first [maxStderrLine] bytes of a line and drops the rest. When the bytes kept
+// contain what looks like a run code or a piece of startData, as
+// [adapterio.ContainsSecret] finds it, it writes [hiddenStderrLine] in place of the
+// line. Each line goes out with a line feed, also the last one, which close writes.
+// It drops the errors of w, so that exec keeps reading the adapter's standard error.
+// The mutex orders close with a write that still runs after cmd.Wait returned
+// [exec.ErrWaitDelay].
+type stderrFilter struct {
+	mu        sync.Mutex
+	w         io.Writer
+	startData []byte
+	line      []byte
+	cut       bool
+	closed    bool
+}
+
+func (f *stderrFilter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(p)
+	if f.closed {
+		return n, nil
+	}
+	for {
+		i := bytes.IndexByte(p, '\n')
+		if i < 0 {
+			f.keep(p)
+			return n, nil
+		}
+		f.keep(p[:i])
+		f.flush()
+		p = p[i+1:]
+	}
+}
+
+// keep adds b to the line, up to [maxStderrLine] bytes.
+func (f *stderrFilter) keep(b []byte) {
+	if room := maxStderrLine - len(f.line); len(b) > room {
+		b, f.cut = b[:room], true
+	}
+	f.line = append(f.line, b...)
+}
+
+// flush writes the line kept, filtered, with a line feed, and starts a new line.
+func (f *stderrFilter) flush() {
+	text := string(f.line)
+	switch {
+	case adapterio.ContainsSecret(text, f.startData):
+		text = hiddenStderrLine
+	case f.cut:
+		text += cutStderrLine
+	}
+	_, _ = io.WriteString(f.w, text+"\n")
+	clear(f.line)
+	f.line, f.cut = f.line[:0], false
+}
+
+// close writes the last line when it has no line feed, and drops every later write.
+func (f *stderrFilter) close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.line) > 0 || f.cut {
+		f.flush()
+	}
+	f.closed = true
 }
 
 // capped keeps at most limit bytes. On the first write that would cross the bound it

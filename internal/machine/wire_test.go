@@ -128,6 +128,7 @@ func wantRunForm() url.Values {
 		"BlockDeviceMapping.1.Ebs.Encrypted":          {"true"},
 		"UserData":                                    {base64.StdEncoding.EncodeToString(testSpec().UserData)},
 	}
+	f.Set("BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
 	for i, rt := range []string{"instance", "volume"} {
 		p := fmt.Sprintf("TagSpecification.%d.", i+1)
 		f.Set(p+"ResourceType", rt)

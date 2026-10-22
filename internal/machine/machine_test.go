@@ -91,7 +91,7 @@ func TestCreateInput(t *testing.T) {
 		},
 		BlockDeviceMappings: []types.BlockDeviceMapping{{
 			DeviceName: aws.String("/dev/sda1"),
-			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true)},
+			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(true)},
 		}},
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},

@@ -365,6 +365,30 @@ func TestList(t *testing.T) {
 	wantFailure(t, status, out, contracts.FailureDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
 }
 
+// TestListNoLaunchTime pins that an instance that EC2 returns with no launch time is
+// left out of the list answer, with one log line, so the provisioner does not take
+// its start as 0001-01-01.
+func TestListNoLaunchTime(t *testing.T) {
+	noTime := launched("i-0000000000000002a", "running", "dp_000000000000002a")
+	noTime.LaunchTime = nil
+	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: []types.Instance{
+			noTime,
+			launched("i-0000000000000002b", "running", "dp_000000000000002b"),
+		}}}}, nil
+	}}
+	h, log, _ := testHandler(f)
+	status, out := serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`)
+	want := `{"machines":[{"id":"i-0000000000000002b","key":"dp_000000000000002b","state":"running","started":"2026-10-22T10:00:00Z"}]}` + "\n"
+	if status != adapterio.ExitOK || out != want {
+		t.Errorf("exit status %d, output\n%s\nwant\n%s", status, out, want)
+	}
+	const line = `level=WARN msg="Check the instance in EC2: list leaves out an instance that DescribeInstances returned with no launch time" instance=i-0000000000000002a`
+	if !strings.Contains(log.String(), line) || strings.Count(log.String(), "\n") != 1 {
+		t.Errorf("log\n%s\nwant the line\n%s", log, line)
+	}
+}
+
 // TestLog pins log: GetConsoleOutput with Latest for the id, and the decoded text.
 func TestLog(t *testing.T) {
 	const text = "boot\r\nqory-machine-exit status=0\r\n"
