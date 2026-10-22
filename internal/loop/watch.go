@@ -22,11 +22,13 @@ func (l *loop) watch(ctx context.Context) {
 
 // watchOnce lists the pool's machines once and acts on each entry that was in the
 // journal before the list, except the dispatches of the claim path:
-//   - A claimed entry stays from a release that returned 409 machine_exists. When
-//     the list has a machine with its key, the entry adopts the machine: it becomes
-//     made with the machine's id, and the rules of a made entry apply. The entry is
-//     removed when the machine is deleting, or when no machine is listed once the
-//     entry's lifetime and 15 minutes have passed since the claim.
+//   - A claimed entry stays after a release that returned 409 machine_exists, or
+//     after a release when Journal.Remove failed before the entry left the journal.
+//     When the list has a machine with its key, the entry adopts the machine: it
+//     becomes made with the machine's id, and the rules of a made entry apply. The
+//     entry is removed when the machine is deleting, or when no machine is listed
+//     once the entry's lifetime and 15 minutes have passed since the claim, or since
+//     the start of Run, for an entry that the journal had at the start.
 //   - A made or dispatched entry whose machine is not listed is removed only after
 //     [ListGrace]. Inside the grace, it gets dispatched as usual.
 //

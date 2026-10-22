@@ -246,7 +246,8 @@ type loop struct {
 // madeAt is the time from which the list grace of the dispatch id counts.
 func (l *loop) madeAt(id string) time.Time { return l.timeOf(l.made, id) }
 
-// claimedAt is the time of the claim of the dispatch id.
+// claimedAt is the time of the claim of the dispatch id, or the start of Run, for an
+// entry that the journal had at the start.
 func (l *loop) claimedAt(id string) time.Time { return l.timeOf(l.claimed, id) }
 
 // timeOf is the time of the dispatch id in times, or the start.

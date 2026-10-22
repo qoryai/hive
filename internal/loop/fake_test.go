@@ -210,6 +210,13 @@ func (a *fakeApiary) takeCalls() []string {
 	return out
 }
 
+// takeCallsKeep returns the calls since the last takeCalls, and keeps them.
+func (a *fakeApiary) takeCallsKeep() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.calls)
+}
+
 // claimCount is the number of calls of Claim.
 func (a *fakeApiary) claimCount() int {
 	a.mu.Lock()
@@ -567,6 +574,13 @@ type syncFailure struct {
 	loop.Journal
 	mu   sync.Mutex
 	fail bool
+}
+
+// setFail makes the next Remove return the error.
+func (j *syncFailure) setFail() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.fail = true
 }
 
 func (j *syncFailure) Remove(id string) error {

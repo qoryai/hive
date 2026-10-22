@@ -394,18 +394,39 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	}
 }
 
-// TestAFailedFolderSyncStillLetsTheLoopClaim cleans up a machine whose dispatch
-// ended. The removal of its entry returns the error of a failed sync of the folder
-// after the entry left the journal. With max_machines 1, the loop claims again.
+// TestAFailedFolderSyncStillLetsTheLoopClaim fills the journal with max_machines 1,
+// so the claim path waits for an entry to leave. A watch then cleans up the machine,
+// whose dispatch ended, and the removal of its entry returns the error of a failed
+// sync of the folder after the entry left the journal. The loop claims again.
 func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
 	h := newHarness(t)
 	h.config.MaxMachines = 1
-	failing := &syncFailure{fail: true}
+	failing := &syncFailure{}
 	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
-	h.apiary.setDispatched(dispatchA, loop.ErrGone)
 	h.start()
-	h.claim(newClaim(dispatchA))
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+	// Once a watch sends dispatched, the claim path has left the dispatch, and it
+	// waits for an entry to leave the journal. The watch skips the dispatch while the
+	// claim path works on it, so the test runs watches until one sends dispatched.
+	sent := func() int {
+		return len(slices.DeleteFunc(h.apiary.takeCallsKeep(), func(c string) bool {
+			return c != "dispatched "+dispatchA+" "+machineID(1)
+		}))
+	}
+	for deadline := time.Now().Add(patience); sent() < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("no watch sent dispatched")
+		}
+		h.tick()
+	}
+	if n := h.apiary.claimCount(); n != 1 {
+		t.Fatalf("the loop asked for %d claims with a full journal", n)
+	}
+	failing.setFail()
+	h.apiary.setDispatched(dispatchA, loop.ErrGone)
+	h.tick()
 	equal(t, "the journal", h.entries(), nil)
+	h.idle()
 	if len(h.find("removing a dispatch from the journal failed")) != 1 {
 		t.Error("the log has no line for the failed removal")
 	}
