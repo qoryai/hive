@@ -24,9 +24,9 @@ const serveUsageText = `usage:
   qory-provisioner serve [--settings FILE] [--state-dir DIR]
 
 flags:
-  -settings FILE
+  --settings FILE
     	the provisioner's settings FILE (default "/etc/qory-provisioner/settings.json")
-  -state-dir DIR
+  --state-dir DIR
     	the state folder DIR: the access key, the enrolment and the journal of live dispatches (default "/var/lib/qory-provisioner")
 `
 
@@ -37,6 +37,16 @@ standard error.
 
 On the first start, while the state folder has no access key, serve enrols one with
 the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
+
+Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
+machines and deletes each machine whose dispatch has no entry in the journal, with the
+log line "found a machine with no journal entry". Two provisioners of one node pool
+therefore delete each other's machines, also machines that run a dispatch.
+
+When you rotate the key, which means a new provisioner with a new access key for the
+node pool, stop the old provisioner before you start the new one. A new provisioner
+with a new state folder starts with an empty journal, so it deletes the machines that
+the old one made, also those that run a dispatch.
 
 serve runs until SIGTERM or SIGINT. It then stops claiming, leaves every machine as it
 is, and exits with status 0. A second SIGTERM or SIGINT ends serve at once. serve exits
@@ -103,7 +113,7 @@ func TestServeHelpIsPinned(t *testing.T) {
 // TestServeUnknownFlag pins that a flag serve does not know prints the flag parser's
 // message and serve's usage, with exit status 2.
 func TestServeUnknownFlag(t *testing.T) {
-	want := "flag provided but not defined: -bogus\n" + serveUsageText
+	want := "flag provided but not defined: --bogus\n" + serveUsageText
 	code, errs := runArgs("serve", "--bogus")
 	if code != 2 || errs != want {
 		t.Errorf("exit %d, stderr %q, want %q", code, errs, want)
