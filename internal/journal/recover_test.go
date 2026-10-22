@@ -14,6 +14,8 @@ func TestRecover(t *testing.T) {
 	release := journal.Action{Kind: journal.Release, Reason: journal.ReasonRestarted}
 	drop := journal.Action{Kind: journal.Drop}
 	resume := journal.Action{Kind: journal.Resume, MachineID: oddID}
+	// keep resumes with the entry's machine id, when the list has no machine.
+	keep := journal.Action{Kind: journal.Resume, MachineID: machine}
 	lookups := []struct {
 		name   string
 		lookup journal.Lookup
@@ -30,10 +32,10 @@ func TestRecover(t *testing.T) {
 		want           []journal.Action
 	}{
 		{journal.PhaseClaimed, "", []journal.Action{release, resume, resume, resume, drop}},
-		{journal.PhaseMade, machine, []journal.Action{drop, resume, resume, resume, drop}},
-		{journal.PhaseDispatched, machine, []journal.Action{drop, resume, resume, resume, drop}},
+		{journal.PhaseMade, machine, []journal.Action{keep, resume, resume, resume, drop}},
+		{journal.PhaseDispatched, machine, []journal.Action{keep, resume, resume, resume, drop}},
 	} {
-		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine}
+		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: lifetime}
 		for i, l := range lookups {
 			if got := journal.Recover(e, l.lookup); got != c.want[i] {
 				t.Errorf("%s, %s: %+v, want %+v", c.phase, l.name, got, c.want[i])
@@ -45,7 +47,7 @@ func TestRecover(t *testing.T) {
 // TestResumeUsesTheMachineFound resumes with the machine id of the lookup. A claimed
 // entry has no machine id, so the lookup is the only source of one.
 func TestResumeUsesTheMachineFound(t *testing.T) {
-	e := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed}
+	e := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
 	got := journal.Recover(e, journal.Lookup{Found: true, MachineID: longID, State: "running"})
 	if want := (journal.Action{Kind: journal.Resume, MachineID: longID}); got != want {
 		t.Errorf("%+v, want %+v", got, want)
