@@ -22,8 +22,8 @@ func wantFits(t *testing.T, message string) {
 
 // TestMessagesFit checks that each fixed message of this package, with typical values,
 // fits in adapterio.MaxMessage: a settings path of 60 characters, which comes last,
-// and a size name of 40 characters. The messages of package machine have their own
-// test.
+// and a size name of 40 characters. Package machine tests its messages in
+// messages_test.go.
 func TestMessagesFit(t *testing.T) {
 	const ok = `"subnet_id": "subnet-0123456789abcdef0", "security_group_id": "sg-0123456789abcdef0", "image_id": "ami-0123456789abcdef0"`
 	for _, doc := range []string{

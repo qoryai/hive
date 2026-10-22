@@ -58,7 +58,7 @@ func (e *Error) Error() string {
 	case e.Code == codeUnauthorized:
 		return fmt.Sprintf("Give the instance role the EC2 rights that the EC2 machine adapter needs: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code == codeTokenMismatch:
-		return fmt.Sprintf("Report this defect in the provisioner, unless %s changed since the first make for this key: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Report a provisioner defect, unless %s changed since the first make: %s reused a key with other parameters (%s): %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeTokenTerminated:
 		return fmt.Sprintf("No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: %v", e.Err)
 	case e.Kind == contracts.FailureRetry && errors.As(e.Err, &maxAttempts):

@@ -7,7 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"reflect"
 	"runtime/debug"
+	"strconv"
+	"strings"
 )
 
 // ProgramVersion is the version set with ldflags when there is one, as it is given, or
@@ -39,9 +42,10 @@ type Help struct {
 }
 
 // Parse parses args into fs. -h prints the whole help; a flag fs refuses prints the
-// command's usage and flags alone, after the flag parser's message.
+// flag parser's message and the command's usage and flags alone. The help and the
+// messages write each flag as --name; the parser accepts -name and --name.
 func (h Help) Parse(fs *flag.FlagSet, args []string, stderr io.Writer) error {
-	fs.SetOutput(stderr)
+	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	err := fs.Parse(args)
 	switch {
@@ -50,18 +54,57 @@ func (h Help) Parse(fs *flag.FlagSet, args []string, stderr io.Writer) error {
 		h.Usage(stderr, fs)
 		fmt.Fprintf(stderr, "\nexamples:\n%s\n", h.Example)
 	case err != nil:
+		fmt.Fprintln(stderr, twoDashes.Replace(err.Error()))
 		h.Usage(stderr, fs)
 	}
 	return err
 }
 
-// Usage prints the command's usage line, and the flags of fs when it has any.
+// twoDashes rewrites the flag names in the messages of package flag, which write
+// -name, to --name.
+var twoDashes = strings.NewReplacer(
+	"not defined: -", "not defined: --",
+	"needs an argument: -", "needs an argument: --",
+	"for flag -", "for flag --",
+	"\" for -", "\" for --",
+)
+
+// Usage prints the command's usage line, and the flags of fs when it has any, each
+// as --name with its value name, its usage and its default when that is not the
+// zero value, in the layout of flag.PrintDefaults.
 func (h Help) Usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "usage:\n  %s\n", h.Use)
-	flags := false
-	fs.VisitAll(func(*flag.Flag) { flags = true })
-	if flags {
-		fmt.Fprint(w, "\nflags:\n")
-		fs.PrintDefaults()
+	first := true
+	fs.VisitAll(func(f *flag.Flag) {
+		if first {
+			fmt.Fprint(w, "\nflags:\n")
+			first = false
+		}
+		name, usage := flag.UnquoteUsage(f)
+		line := "  --" + f.Name
+		if name != "" {
+			line += " " + name
+		}
+		line += "\n    \t" + strings.ReplaceAll(usage, "\n", "\n    \t")
+		if def, ok := defaultText(f); ok {
+			line += " (default " + def + ")"
+		}
+		fmt.Fprintln(w, line)
+	})
+}
+
+// defaultText is the default of f as flag.PrintDefaults writes it, with a string
+// quoted, and false when the default is the zero value of the flag's type.
+func defaultText(f *flag.Flag) (string, bool) {
+	if t := reflect.TypeOf(f.Value); t.Kind() == reflect.Pointer {
+		if zero, ok := reflect.New(t.Elem()).Interface().(flag.Value); ok && f.DefValue == zero.String() {
+			return "", false
+		}
 	}
+	if g, ok := f.Value.(flag.Getter); ok {
+		if _, ok := g.Get().(string); ok {
+			return strconv.Quote(f.DefValue), true
+		}
+	}
+	return f.DefValue, true
 }
