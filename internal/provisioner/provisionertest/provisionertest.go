@@ -1,5 +1,6 @@
 // Package provisionertest is a fake Qory Apiary for the provisioner's tests: an
-// httptest server of provisioner/v1: claim, dispatched, handover and release.
+// httptest server of provisioner/v1 at revision 4: claim, dispatched, release and
+// machine-log.
 //
 // It checks every request as Qory Apiary does, in the contract's order: a body over a
 // mebibyte gets an unsigned 413, a POST of another content type an unsigned 415, a
@@ -7,22 +8,23 @@
 // under the pool's key, and a signature that fails, or that the fake has seen before,
 // gets the unsigned 401. The answers of the next checks are signed under
 // [Server.Signer]: an instance id outside its pattern gets a signed 400 bad_request;
-// another revision than 3 a signed 400 unsupported_contract_version; a body that fails
+// another revision than 4 a signed 400 unsupported_contract_version; a body that fails
 // its schema a signed 400 invalid_request. The fake marks a signature as seen once the
 // body passes its schema, as Qory Apiary does. A time more than 300 seconds from
 // [Server.Now] then gets the unsigned 401. After those checks the fake signs every
 // answer: a reply that [Server.Script] queued for the route, else the model's.
 //
-// The model keeps a queue of runs, which [Server.Offer] fills, and the dispatches it
-// made of them. A claim takes the first run waiting into a new dispatch, or is held up
+// The model keeps a queue of work, which [Server.Offer] fills, and the dispatches it
+// made of it. A claim takes the first work waiting into a new dispatch, or is held up
 // to its wait_seconds and [Server.Hold] for one, then gets a signed 204. Each
-// dispatch's refusals follow the contract's order: 403 for an unknown dispatch, 410 for
-// one that ended, 409 handed_over for a second handover, 409 lease_expired once its
-// lease lapsed before its handover or [Server.Expire] made it stale, and 409
-// not_dispatched for a handover before dispatched. A handover with run_code true gets
-// the run-code form of the answer, with the run's [Run.RunCode], and any other
-// handover the run-key form. A release ends the dispatch. The
-// fake records every request in order, [Server.Calls].
+// dispatch's refusals follow the contract's order: 403 for an unknown dispatch; for a
+// dispatched or a release, 410 for one that ended, 409 lease_expired for one whose
+// lease lapsed before its first dispatched or that [Server.Expire] made stale; for a
+// release, 409 machine_exists after dispatched or after [Server.Redeem]; and for a
+// machine log, 409 machine_log_exists for a second one. Every dispatched of a live
+// dispatch gets a signed 204, and the fake records the external of the first one. A
+// release ends the dispatch, and so does [Server.End]. The fake records every request
+// in order, [Server.Calls].
 package provisionertest
 
 import (
@@ -30,12 +32,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -61,14 +61,16 @@ const (
 	PoolID     = "np_f1xt0re000000000"
 )
 
-// Lease is a dispatch's lease when its [Run] has none, Qory Apiary's.
-const Lease = 600 * time.Second
+// The values a claim's answer has when its [Work] has none: the dispatch's lease, the
+// gateway URL and max_lifetime_minutes.
+const (
+	Lease              = 600 * time.Second
+	GatewayURL         = "https://gateway.example.com"
+	MaxLifetimeMinutes = 1470
+)
 
 // Window is how far a request's time may be from [Server.Now], either way.
 const Window = 300 * time.Second
-
-// maxBody is the largest request body the fake reads; a larger one is a 413.
-const maxBody = 1 << 20
 
 // Route is one endpoint of the fake.
 type Route string
@@ -77,38 +79,24 @@ type Route string
 const (
 	RouteClaim      Route = "claim"
 	RouteDispatched Route = "dispatched"
-	RouteHandover   Route = "handover"
 	RouteRelease    Route = "release"
+	RouteMachineLog Route = "machine-log"
 	// RouteUnknown is any other path, which gets a signed 404 not_found once its
 	// signature verifies.
 	RouteUnknown Route = "unknown"
 )
 
-// Run is a run waiting in the queue, as [Server.Offer] puts it there. Each member left
-// empty is filled in: a new run id, the step explore, read access, the target
-// code.example.com acme/shop, the contract fixture's domain, work item for the step
-// explore, and inputs of the step, a new run key, and [Lease]. With NoTarget the run has
-// no target and no access, and its domain and inputs are the fixture's of an explore
-// run with no target. The handover's answer has RunSettings as it is.
-type Run struct {
-	RunID    string
-	Step     string
-	Access   string
-	Target   *contracts.Target
-	NoTarget bool
-	Domain   string
-	WorkItem *contracts.WorkItem
-	// RunSettings is the handover answer's run_settings; nil sends none.
-	RunSettings *contracts.RunSettings
-	Inputs      json.RawMessage
-	// RunKey is the run key of the handover's answer, of the contract's form:
-	// qrk_, base64url, a dot and base64url.
-	RunKey string
-	// RunCode is the run code of the run-code form of the handover's answer, of the
-	// contract's form: qecr_, 26 upper-case Crockford base32 characters, a dot and 22
-	// base64url characters.
-	RunCode string
-	Lease   time.Duration
+// Work is a request for one machine waiting in the queue, as [Server.Offer] puts it
+// there. Each member left empty is filled in: a new run code, [GatewayURL],
+// [MaxLifetimeMinutes] and [Lease]. An empty Machine sends no machine.
+type Work struct {
+	Machine string
+	// RunCode is the claim answer's run code, of the contract's form: qecr_, 26
+	// upper-case Crockford base32 characters, a dot and 22 base64url characters.
+	RunCode            string
+	GatewayURL         string
+	MaxLifetimeMinutes int
+	Lease              time.Duration
 }
 
 // Reply is one scripted answer, which [Server.Script] queues for a route. With Status
@@ -120,8 +108,8 @@ type Reply struct {
 	// Code is a refusal's code, the body {"error": Code} when Body is empty.
 	Code string
 	Body string
-	// Edit changes the model's 200 answer, a claim's or a handover's, before it is
-	// signed: another revision, step or run id, say.
+	// Edit changes the model's 200 answer to a claim before it is signed: another
+	// revision or another run code, say.
 	Edit func(doc map[string]any)
 	// Unsigned leaves the answer unsigned, and WrongKey signs it under a key that is not
 	// pinned.
@@ -167,22 +155,26 @@ type Call struct {
 const (
 	StateClaimed    = "claimed"
 	StateDispatched = "dispatched"
-	StateHandedOver = "handed_over"
 	StateEnded      = "ended"
 )
 
-// Dispatch is one dispatch the fake made of a claimed run, and what became of it.
+// Dispatch is one dispatch the fake made of claimed work, and what became of it.
 type Dispatch struct {
 	ID         string
-	Run        Run
+	Work       Work
 	LeaseUntil time.Time
 	State      string
-	// Stale is a dispatch whose lease lapsed before its handover, and HandedOver one
-	// whose handover got the 200.
-	Stale      bool
-	HandedOver bool
-	// Release is the release that ended it, if one did.
-	Release *contracts.Release
+	// Stale is a dispatch whose lease lapsed before its first dispatched, and Redeemed
+	// one whose run code [Server.Redeem] marked as redeemed.
+	Stale    bool
+	Redeemed bool
+	// Dispatched is how many dispatched got the 204, and External the external of the
+	// first one, if it had one.
+	Dispatched int
+	External   *contracts.External
+	// Release is the release that ended it, if one did, and MachineLog its machine log.
+	Release    *contracts.Release
+	MachineLog *contracts.MachineLog
 }
 
 // Server is the fake Qory Apiary. Set its fields before the first request.
@@ -204,7 +196,7 @@ type Server struct {
 	closing chan struct{}
 
 	mu         sync.Mutex
-	queue      []Run
+	queue      []Work
 	wake       chan struct{}
 	dispatches map[string]*Dispatch
 	order      []string
@@ -261,19 +253,19 @@ func (s *Server) Client() *provisioner.Client {
 	return c
 }
 
-// Offer queues runs, filled in as listed under [Run], and returns their run ids.
-func (s *Server) Offer(runs ...Run) []string {
+// Offer queues work, filled in as listed under [Work], and returns it filled in.
+func (s *Server) Offer(work ...Work) []Work {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var ids []string
-	for _, r := range runs {
-		r = filled(r)
-		s.queue = append(s.queue, r)
-		ids = append(ids, r.RunID)
+	var out []Work
+	for _, w := range work {
+		w = filled(w)
+		s.queue = append(s.queue, w)
+		out = append(out, w)
 	}
 	close(s.wake)
 	s.wake = make(chan struct{})
-	return ids
+	return out
 }
 
 // Script queues replies for route, each answering one request that passed the checks
@@ -284,16 +276,26 @@ func (s *Server) Script(route Route, replies ...Reply) {
 	s.scripts[route] = append(s.scripts[route], replies...)
 }
 
-// Expire makes the dispatch stale, as a lease lapsed before its handover.
+// Expire makes the dispatch stale, as a lease that lapsed before its first dispatched.
 func (s *Server) Expire(dispatchID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d := s.dispatches[dispatchID]; d != nil && d.State != StateHandedOver && d.State != StateEnded {
+	if d := s.dispatches[dispatchID]; d != nil && d.State == StateClaimed {
 		d.Stale = true
 	}
 }
 
-// End ends the dispatch, as its work item closed or its run ended.
+// Redeem marks the dispatch's run code as redeemed by a machine.
+func (s *Server) Redeem(dispatchID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d := s.dispatches[dispatchID]; d != nil {
+		d.Redeemed = true
+	}
+}
+
+// End ends the dispatch, as Qory Apiary does when the machine has not redeemed the run
+// code within 15 minutes of the claim, or when the work it is for ends.
 func (s *Server) End(dispatchID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -354,80 +356,24 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-// The contract fixtures a run is filled in from, by the fixture's name: the step, or
-// [withoutTarget].
-var (
-	fixtureWorkItem   contracts.WorkItem
-	fixtureInputs     = map[string]json.RawMessage{}
-	fixtureDomain     = map[string]string{}
-	dispatchPathShape = regexp.MustCompile(`^/v1/dispatches/([^/]+)/(dispatched|handover|release)$`)
-)
+// dispatchPathShape is the path of a request about one dispatch.
+var dispatchPathShape = regexp.MustCompile(`^/v1/dispatches/([^/]+)/(dispatched|release|machine-log)$`)
 
-// withoutTarget is the fixture of an explore run with no target.
-const withoutTarget = "explore-without-target"
-
-func init() {
-	for _, name := range []string{provisioner.StepExplore, provisioner.StepPrebuild, withoutTarget} {
-		b, err := fs.ReadFile(contracts.ProvisionerFS, "fixtures/handover-answer/"+name+".json")
-		if err != nil {
-			panic(err)
-		}
-		var doc contracts.HandoverAnswer
-		if err := json.Unmarshal(b, &doc); err != nil {
-			panic(err)
-		}
-		fixtureInputs[name], fixtureDomain[name] = doc.Inputs, doc.Domain
-		if doc.WorkItem != nil && name == provisioner.StepExplore {
-			fixtureWorkItem = *doc.WorkItem
-		}
+// filled is w with every empty member filled in, as listed under [Work].
+func filled(w Work) Work {
+	if w.RunCode == "" {
+		w.RunCode = newRunCode()
 	}
-}
-
-// filled is r with every empty member filled in, as listed under [Run].
-func filled(r Run) Run {
-	if r.RunID == "" {
-		r.RunID = newRunID()
+	if w.GatewayURL == "" {
+		w.GatewayURL = GatewayURL
 	}
-	if r.Step == "" {
-		r.Step = provisioner.StepExplore
+	if w.MaxLifetimeMinutes == 0 {
+		w.MaxLifetimeMinutes = MaxLifetimeMinutes
 	}
-	fixture := r.Step
-	if r.NoTarget {
-		fixture, r.Target, r.Access = withoutTarget, nil, ""
-	} else {
-		if r.Access == "" {
-			r.Access = "read"
-		}
-		if r.Target == nil {
-			r.Target = &contracts.Target{System: "code.example.com", Path: "acme/shop"}
-		}
+	if w.Lease == 0 {
+		w.Lease = Lease
 	}
-	if r.Domain == "" {
-		r.Domain = fixtureDomain[fixture]
-		if r.Domain == "" {
-			r.Domain = "software"
-		}
-	}
-	if r.WorkItem == nil && r.Step == provisioner.StepExplore {
-		w := fixtureWorkItem
-		r.WorkItem = &w
-	}
-	if r.Inputs == nil {
-		r.Inputs = fixtureInputs[fixture]
-		if r.Inputs == nil {
-			r.Inputs = json.RawMessage(`{"version":1}`)
-		}
-	}
-	if r.RunKey == "" {
-		r.RunKey = "qrk_" + random(48) + "." + random(64)
-	}
-	if r.RunCode == "" {
-		r.RunCode = newRunCode()
-	}
-	if r.Lease == 0 {
-		r.Lease = Lease
-	}
-	return r
+	return w
 }
 
 // newRunCode is a new run code, of the form of the contract's run_code: qecr_, 26
@@ -447,16 +393,6 @@ func random(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
-}
-
-// newRunID is a new run id, a version 4 UUID in the canonical lower-case form.
-func newRunID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	h := hex.EncodeToString(b)
-	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
 // crockford are the characters of an id after its prefix.
@@ -486,7 +422,7 @@ func refusal(status int, code string) answer {
 
 // serve checks one request in the contract's order and sends its answer.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	body, _ := io.ReadAll(io.LimitReader(r.Body, contracts.MaxRequest+1))
 	route, id := routeOf(r)
 	c := Call{Route: route, Target: r.URL.RequestURI(), DispatchID: id, Header: r.Header.Clone(), Body: body}
 	sig := r.Header.Get(accesskey.HeaderSignature)
@@ -556,7 +492,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 // signs the answer.
 func (s *Server) decide(r *http.Request, c *Call, route Route, id string, body []byte) (answer, Reply, bool) {
 	switch {
-	case len(body) > maxBody:
+	case len(body) > contracts.MaxRequest:
 		return refusal(http.StatusRequestEntityTooLarge, "payload_too_large"), Reply{}, false
 	case r.Method == http.MethodPost && r.Header.Get("Content-Type") != "application/json":
 		return refusal(http.StatusUnsupportedMediaType, "unsupported_media_type"), Reply{}, false
@@ -623,12 +559,10 @@ func twice(h http.Header) bool {
 
 // routeOf is the route of r's path, whatever its method, and the dispatch in the path.
 func routeOf(r *http.Request) (Route, string) {
-	p := r.URL.Path
-	switch {
-	case p == "/v1/pools/claim":
+	if r.URL.Path == "/v1/pools/claim" {
 		return RouteClaim, ""
 	}
-	if m := dispatchPathShape.FindStringSubmatch(p); m != nil {
+	if m := dispatchPathShape.FindStringSubmatch(r.URL.Path); m != nil {
 		return Route(m[2]), m[1]
 	}
 	return RouteUnknown, ""
@@ -650,8 +584,8 @@ func timeOf(body []byte) time.Time {
 var schemaOf = map[Route]func() (*jsonschema.Schema, error){
 	RouteClaim:      sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("claim.schema.json") }),
 	RouteDispatched: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("dispatched.schema.json") }),
-	RouteHandover:   sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("handover.schema.json") }),
 	RouteRelease:    sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("release.schema.json") }),
+	RouteMachineLog: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("machine-log.schema.json") }),
 }
 
 // validBody reports whether body is one JSON document with no member twice, with its
@@ -705,43 +639,35 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 	if d == nil {
 		return refusal(http.StatusForbidden, "forbidden")
 	}
-	if d.State != StateHandedOver && d.State != StateEnded && !s.now().Before(d.LeaseUntil) {
+	if route == RouteMachineLog {
+		if d.MachineLog != nil {
+			return refusal(http.StatusConflict, "machine_log_exists")
+		}
+		var ml contracts.MachineLog
+		_ = json.Unmarshal(body, &ml)
+		d.MachineLog = &ml
+		return answer{status: http.StatusNoContent}
+	}
+	if d.State == StateClaimed && !s.now().Before(d.LeaseUntil) {
 		d.Stale = true
 	}
 	switch {
 	case d.State == StateEnded:
 		return refusal(http.StatusGone, "gone")
-	case route == RouteHandover && d.State == StateHandedOver:
-		return refusal(http.StatusConflict, "handed_over")
-	case d.Stale:
+	case d.State == StateClaimed && d.Stale:
 		return refusal(http.StatusConflict, "lease_expired")
 	}
-	switch route {
-	case RouteDispatched:
+	if route == RouteDispatched {
 		if d.State == StateClaimed {
-			d.State = StateDispatched
+			var dp contracts.Dispatched
+			_ = json.Unmarshal(body, &dp)
+			d.State, d.External = StateDispatched, dp.External
 		}
+		d.Dispatched++
 		return answer{status: http.StatusNoContent}
-	case RouteHandover:
-		if d.State != StateDispatched {
-			return refusal(http.StatusConflict, "not_dispatched")
-		}
-		d.State, d.HandedOver = StateHandedOver, true
-		ans := answer{status: http.StatusOK, header: http.Header{"Cache-Control": {"no-store"}}}
-		var h contracts.Handover
-		_ = json.Unmarshal(body, &h)
-		if h.RunCode {
-			ans.body, _ = json.Marshal(contracts.HandoverAnswer{
-				Version: 1, Revision: provisioner.Revision, RunID: d.Run.RunID, RunCode: d.Run.RunCode, Step: d.Run.Step,
-			})
-			return ans
-		}
-		ans.body, _ = json.Marshal(contracts.HandoverAnswer{
-			Version: 1, Revision: provisioner.Revision, RunID: d.Run.RunID, RunKey: d.Run.RunKey, Step: d.Run.Step,
-			Domain: d.Run.Domain, Access: d.Run.Access, Target: d.Run.Target, WorkItem: d.Run.WorkItem,
-			RunSettings: d.Run.RunSettings, Inputs: d.Run.Inputs,
-		})
-		return ans
+	}
+	if d.State == StateDispatched || d.Redeemed {
+		return refusal(http.StatusConflict, "machine_exists")
 	}
 	var rel contracts.Release
 	_ = json.Unmarshal(body, &rel)
@@ -749,8 +675,8 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 	return answer{status: http.StatusNoContent}
 }
 
-// claim takes the first run waiting into a new dispatch, or holds the claim up to its
-// wait_seconds and [Server.Hold] for one, then sends a signed 204.
+// claim takes the first work waiting into a new dispatch, or holds the claim up to its
+// wait_seconds and [Server.Hold] for some, then sends a signed 204.
 func (s *Server) claim(ctx context.Context, body []byte) answer {
 	var cl contracts.Claim
 	_ = json.Unmarshal(body, &cl)
@@ -760,20 +686,17 @@ func (s *Server) claim(ctx context.Context, body []byte) answer {
 		s.mu.Lock()
 		if len(s.queue) > 0 {
 			defer s.mu.Unlock()
-			run := s.queue[0]
+			w := s.queue[0]
 			s.queue = s.queue[1:]
-			d := &Dispatch{ID: newDispatchID(), Run: run, LeaseUntil: s.now().Add(run.Lease).UTC().Truncate(time.Second), State: StateClaimed}
+			d := &Dispatch{ID: newDispatchID(), Work: w, LeaseUntil: s.now().Add(w.Lease).UTC().Truncate(time.Second), State: StateClaimed}
 			s.dispatches[d.ID] = d
 			s.order = append(s.order, d.ID)
-			doc := contracts.ClaimAnswer{
-				Version: 1, Revision: provisioner.Revision, DispatchID: d.ID, RunID: run.RunID, PoolID: PoolID,
-				LeaseUntil: contracts.FormatTime(d.LeaseUntil), Step: run.Step, Access: run.Access, Target: run.Target,
-			}
-			if run.Step != provisioner.StepPrebuild {
-				doc.WorkItem = run.WorkItem
-			}
-			b, _ := json.Marshal(doc)
-			return answer{status: http.StatusOK, body: b}
+			b, _ := json.Marshal(contracts.ClaimAnswer{
+				Version: 1, Revision: provisioner.Revision, DispatchID: d.ID, PoolID: PoolID,
+				LeaseUntil: contracts.FormatTime(d.LeaseUntil), Machine: w.Machine, RunCode: w.RunCode,
+				GatewayURL: w.GatewayURL, MaxLifetimeMinutes: w.MaxLifetimeMinutes,
+			})
+			return answer{status: http.StatusOK, body: b, header: http.Header{"Cache-Control": {"no-store"}}}
 		}
 		wake := s.wake
 		s.mu.Unlock()
@@ -789,7 +712,7 @@ func (s *Server) claim(ctx context.Context, body []byte) answer {
 	}
 }
 
-// String is the dispatch's id, step and state, never its run key.
+// String is the dispatch's id, its machine type and its state, never its run code.
 func (d Dispatch) String() string {
-	return fmt.Sprintf("%s %s %s", d.ID, d.Run.Step, d.State)
+	return fmt.Sprintf("%s %q %s", d.ID, d.Work.Machine, d.State)
 }

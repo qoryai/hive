@@ -57,8 +57,8 @@ const reachFix = "check the route from this host to the Qory Apiary URL: "
 // retryLine is the line logged before a try is sent again.
 const retryLine = "a try failed, so the client sends the request again after the wait"
 
-// do sends req until Qory Apiary returns a signed status below 500, or a handover's
-// signed 503 unavailable, up to [tries] tries. Each try is built anew, its time from
+// do sends req until Qory Apiary returns a signed status below 500, up to [tries]
+// tries. Each try is built anew, its time from
 // [Client.nextTime], so its bytes and its signature are new. A try fails with no
 // answer, with an answer over its bound or with no valid signature, whatever its
 // status, a 429 among them, or with any other signed server error: such a try changes
@@ -99,9 +99,6 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 			failure = &Refusal{What: req.what, Status: ans.status, Resent: ans.resent, kind: req.kind}
 		case ans.status >= 500:
 			failure = c.refused(req.what, req.kind, ans)
-			if errors.Is(failure, ErrUnavailable) {
-				return ans, nil
-			}
 		default:
 			return ans, nil
 		}
@@ -128,8 +125,8 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 	}
 }
 
-// build is req's body with the time t, checked for what looks like a secret and
-// against its schema before it is sent. Its error contains the request and the
+// build is req's body with the time t, checked for what looks like a secret, against
+// contracts.MaxRequest and against its schema before it is sent. Its error contains the request and the
 // schema, never a value.
 func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	b, err := json.Marshal(req.body(contracts.FormatTime(t)))
@@ -138,6 +135,9 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	}
 	if secret(string(b)) {
 		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret, a run key or a run code, so the client did not send it", req.what)
+	}
+	if len(b) > contracts.MaxRequest {
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request is larger than %d bytes, so the client did not send it", req.what, contracts.MaxRequest)
 	}
 	s, err := schema(req.schema)
 	if err != nil {
