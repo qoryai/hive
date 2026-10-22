@@ -59,8 +59,8 @@ func (a apiary) Release(ctx context.Context, dispatchID, reason string) error {
 	return toLoop(a.client.Release(ctx, dispatchID, reason))
 }
 
-// MachineLog uploads the machine's log of the dispatch. The contract refuses a machine
-// log neither 410 gone nor 409 lease_expired, so its error matches no loop sentinel.
+// MachineLog uploads the machine's log of the dispatch. The contract never refuses a
+// machine log with 410 gone or 409 lease_expired, so its error matches no loop sentinel.
 func (a apiary) MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error {
 	return toLoop(a.client.MachineLog(ctx, dispatchID, log, truncated))
 }

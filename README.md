@@ -9,7 +9,7 @@ This repository builds two programs:
   settings file, `aws-ec2.json`.
 
 `serve` claims dispatches from Qory Apiary, makes one machine for each through the
-machine adapter, and deletes each machine once its run ends. It runs until SIGTERM.
+machine adapter, and deletes each machine once its dispatch ends. It runs until SIGTERM.
 `qory-provisioner serve -h` prints its flags.
 
 ## Build

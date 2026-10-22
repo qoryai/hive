@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -80,6 +82,8 @@ type serving struct {
 	stop   chan os.Signal
 	stderr *buffer
 	code   chan int
+	// resets counts the calls of env.reset.
+	resets atomic.Int32
 }
 
 // start runs serve with f's files, and QORY_ENROLMENT_CODE set to markerCode.
@@ -92,7 +96,7 @@ func (f *provisionerFixture) start() *serving {
 		return ""
 	}
 	go func() {
-		s.code <- run([]string{"serve", "--settings", f.settings, "--state-dir", f.state}, env{stderr: s.stderr, getenv: getenv, stop: s.stop})
+		s.code <- run([]string{"serve", "--settings", f.settings, "--state-dir", f.state}, env{stderr: s.stderr, getenv: getenv, stop: s.stop, reset: func() { s.resets.Add(1) }})
 	}()
 	return s
 }
@@ -174,11 +178,13 @@ func TestServeRuns(t *testing.T) {
 	work := f.srv.Offer(provisionertest.Work{RunCode: markerRunCode, GatewayURL: "https://gateway.example.com:8443", MaxLifetimeMinutes: 60})[0]
 
 	s := f.start()
-	waitFor(t, "the dispatched", func() bool {
-		d := f.srv.Dispatches()
-		return len(d) == 1 && d[0].State == provisionertest.StateDispatched
-	})
+	// The loop logs sent dispatched after the client got the 204 and the journal
+	// recorded it; the fake records dispatched before it sends the 204.
+	waitFor(t, "the line sent dispatched", func() bool { return strings.Contains(s.stderr.String(), `msg="sent dispatched"`) })
 	code := s.end(t)
+	if n := s.resets.Load(); n != 1 {
+		t.Errorf("serve reset the signals %d times after SIGTERM, want 1", n)
+	}
 	stderr := s.stderr.String()
 	f.checkNoLeak(t, stderr)
 	if code != 0 {
@@ -256,6 +262,42 @@ func TestServeStopsEarly(t *testing.T) {
 	}
 	if !strings.Contains(s.stderr.String(), `msg="the provisioner stopped"`) {
 		t.Errorf("stderr has no line that the provisioner stopped:\n%s", s.stderr.String())
+	}
+}
+
+// TestFailed checks the exit status and the log line of a failure: 1 and an error
+// line before the stop signal, 1 and an error line after it for an error that is not a
+// cancelled step, such as a journal write, and 0 and an INFO line for a step that the
+// signal cancelled.
+func TestFailed(t *testing.T) {
+	live := context.Background()
+	stopped, cancel := context.WithCancel(live)
+	cancel()
+	journalErr := errors.New("check the state folder: writing the journal failed: no space left on device")
+	checkErr := errors.New("Fix the machine adapter's settings or the rights it uses, then start the provisioner again: the machine adapter's check failed: the provisioner cancelled the machine adapter's check before it started: context canceled")
+	for _, c := range []struct {
+		name  string
+		ctx   context.Context
+		err   error
+		code  int
+		lines []string
+	}{
+		{"a failure", live, journalErr, 1, []string{`level=ERROR msg="the provisioner stopped on an error" error="check the state folder: writing the journal failed: no space left on device"`}},
+		{"a failure after the signal", stopped, journalErr, 1, []string{`level=ERROR msg="the provisioner stopped on an error" error="check the state folder: writing the journal failed: no space left on device"`}},
+		{"a cancelled step", stopped, checkErr, 0, []string{`level=INFO msg="the stop signal cancelled a step" error="Fix the machine adapter's settings`, `level=INFO msg="the provisioner stopped"`}},
+		{"a cancelled enrolment", stopped, fmt.Errorf("Check that this host reaches https://apiary.example.com: %w", context.Canceled), 0, []string{`level=INFO msg="the stop signal cancelled a step"`, `level=INFO msg="the provisioner stopped"`}},
+	} {
+		var b buffer
+		code := failed(c.ctx, slog.New(slog.NewTextHandler(&b, nil)), c.err)
+		got := b.String()
+		if code != c.code || strings.Count(got, "\n") != len(c.lines) {
+			t.Errorf("%s: exit %d, log\n%s\nwant exit %d and %d lines", c.name, code, got, c.code, len(c.lines))
+		}
+		for _, line := range c.lines {
+			if !strings.Contains(got, line) {
+				t.Errorf("%s: the log has no %s:\n%s", c.name, line, got)
+			}
+		}
 	}
 }
 

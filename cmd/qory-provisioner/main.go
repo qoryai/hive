@@ -1,12 +1,13 @@
 // Command qory-provisioner is the provisioner's program. Its one command,
 // `qory-provisioner serve`, claims dispatches from Qory Apiary, makes one machine for
-// each through the machine adapter, and deletes each machine once its run ends. It runs
-// until SIGTERM or SIGINT. The program writes its log on standard error and nothing on
-// standard output.
+// each through the machine adapter, and deletes each machine once its dispatch ends. It
+// runs until SIGTERM or SIGINT. The program writes its log on standard error and nothing
+// on standard output.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -30,7 +32,8 @@ import (
 func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
-	os.Exit(run(os.Args[1:], env{stderr: os.Stderr, getenv: os.Getenv, stop: stop}))
+	reset := func() { signal.Stop(stop) }
+	os.Exit(run(os.Args[1:], env{stderr: os.Stderr, getenv: os.Getenv, stop: stop, reset: reset}))
 }
 
 // version is the program's version, set when it is built with
@@ -43,11 +46,13 @@ func init() {
 }
 
 // env is what the program reads from its process: its error stream, its environment
-// and the signals that stop it. A test sets each one.
+// and the signals that stop it. reset is called after the first signal, so that the
+// next one ends the process with the signal's default action. A test sets each one.
 type env struct {
 	stderr io.Writer
 	getenv func(string) string
 	stop   <-chan os.Signal
+	reset  func()
 }
 
 // usage is what the program prints when it is run without a command it knows, or with
@@ -85,15 +90,16 @@ var serveHelp = cli.Help{
 	Short: "Run the provisioner until SIGTERM",
 	Use:   "qory-provisioner serve [--settings FILE] [--state-dir DIR]",
 	Long: `serve claims dispatches from Qory Apiary, makes one machine for each through the
-machine adapter, and deletes each machine once its run ends. It writes its log on
+machine adapter, and deletes each machine once its dispatch ends. It writes its log on
 standard error.
 
 On the first start, while the state folder has no access key, serve enrols one with
 the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
 
 serve runs until SIGTERM or SIGINT. It then stops claiming, leaves every machine as it
-is, and exits with status 0. It exits with status 1 when a failure stops it, and with
-status 2 on a usage error.`,
+is, and exits with status 0. A second SIGTERM or SIGINT ends serve at once. serve exits
+with status 1 when a failure stops it, also one while it stops, and with status 2 on a
+usage error.`,
 	Example: `  QORY_ENROLMENT_CODE=qecp_… qory-provisioner serve
   qory-provisioner serve --settings /etc/qory-provisioner/settings.json --state-dir /var/lib/qory-provisioner`,
 }
@@ -135,6 +141,9 @@ func serve(args []string, e env) int {
 		select {
 		case s := <-e.stop:
 			log.Info("received a stop signal: the provisioner stops claiming", slog.String("signal", s.String()))
+			if e.reset != nil {
+				e.reset()
+			}
 			cancel()
 		case <-ctx.Done():
 		}
@@ -193,14 +202,21 @@ func start(ctx context.Context, f serveFlags, e env, log *slog.Logger) int {
 }
 
 // failed logs err, a failure that stops the provisioner, and returns the exit status
-// 1. After the stop signal, it logs err as a warning and returns 0: a step that the
-// signal cuts short, such as the machine adapter's check, returns an error too.
+// 1. After the stop signal, an error of a step that the signal cancelled, such as the
+// machine adapter's check, is logged at level INFO and returns 0.
 func failed(ctx context.Context, log *slog.Logger, err error) int {
-	if ctx.Err() != nil {
-		log.Warn("a step failed after the stop signal", slog.String("error", err.Error()))
+	if ctx.Err() != nil && cancelled(err) {
+		log.Info("the stop signal cancelled a step", slog.String("error", err.Error()))
 		log.Info("the provisioner stopped")
 		return 0
 	}
 	log.Error("the provisioner stopped on an error", slog.String("error", err.Error()))
 	return 1
+}
+
+// cancelled reports whether err is a step that ended because its context was
+// cancelled. The loop's errors keep the text of their cause but not the cause itself,
+// so the text is checked too.
+func cancelled(err error) bool {
+	return errors.Is(err, context.Canceled) || strings.Contains(err.Error(), context.Canceled.Error())
 }

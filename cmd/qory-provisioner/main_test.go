@@ -32,15 +32,16 @@ flags:
 
 // serveHelpText is serve's help, word for word.
 const serveHelpText = `serve claims dispatches from Qory Apiary, makes one machine for each through the
-machine adapter, and deletes each machine once its run ends. It writes its log on
+machine adapter, and deletes each machine once its dispatch ends. It writes its log on
 standard error.
 
 On the first start, while the state folder has no access key, serve enrols one with
 the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
 
 serve runs until SIGTERM or SIGINT. It then stops claiming, leaves every machine as it
-is, and exits with status 0. It exits with status 1 when a failure stops it, and with
-status 2 on a usage error.
+is, and exits with status 0. A second SIGTERM or SIGINT ends serve at once. serve exits
+with status 1 when a failure stops it, also one while it stops, and with status 2 on a
+usage error.
 
 ` + serveUsageText + `
 examples:
