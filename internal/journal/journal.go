@@ -2,11 +2,10 @@
 // <state folder>/dispatches, with one line per live dispatch, and [Recover], which
 // returns what to do with each line after a restart.
 //
-// The journal never contains a run key, a run code or the inputs of a run. An entry has
-// five fields, a dispatch id, a run id, a step, a phase and an instance id, and no
-// field for a secret. Each field is checked against a fixed shape before it is written
-// and after it is read. A step that contains qak_, qrk_, qecr_ or qecp_, the start of
-// an access key secret, a run key, a run code or an enrolment code, is out of shape.
+// An entry has three fields, a dispatch id, a phase and a machine id, and no field for
+// a secret or for inputs. Each field is checked against a fixed shape before it is
+// written and after it is read. A machine id that contains qak_, qrk_, qecr_ or qecp_,
+// the start of a secret, is out of shape.
 package journal
 
 import (
@@ -29,59 +28,52 @@ const File = "dispatches"
 // machines one provisioner runs at once.
 const maxSize = 1 << 20
 
-// noInstance is the instance id field of a line whose dispatch has no machine.
-const noInstance = "-"
+// noMachine is the machine id field of a line whose dispatch has no machine id.
+const noMachine = "-"
 
-// The phases of a dispatch, in order. Up to handover, no machine exists. From
-// handed_over on, the request that creates the machine may have been sent, so a
-// restart looks the machine up by its client token, the dispatch id.
+// The phases of a dispatch, in order. In claimed, no make has returned, so a machine
+// may exist without a machine id in the journal: a restart looks the machine up in
+// the adapter's list by its key, the dispatch id. From made on, the entry has the
+// machine id that the adapter's make returned.
 const (
-	// PhaseClaimed is a claimed run.
+	// PhaseClaimed is a claimed dispatch for which no make has returned.
 	PhaseClaimed = "claimed"
-	// PhaseDispatched is a run for which Qory Apiary accepted dispatched.
+	// PhaseMade is a dispatch whose make returned a machine id, before dispatched
+	// is posted.
+	PhaseMade = "made"
+	// PhaseDispatched is a dispatch for which dispatched is posted.
 	PhaseDispatched = "dispatched"
-	// PhaseHandover is a run whose handover may have been sent.
-	PhaseHandover = "handover"
-	// PhaseHandedOver is a run handed over, whose machine may have been created.
-	PhaseHandedOver = "handed_over"
-	// PhaseCreated is a run whose machine exists, with its instance id.
-	PhaseCreated = "created"
-	// PhaseStopped is a run whose machine stopped.
-	PhaseStopped = "stopped"
 )
 
 // secretPrefixes are the starts of an access key secret, a run key, a run code and an
-// enrolment code. A step that contains one is out of shape.
+// enrolment code. A machine id that contains one is out of shape.
 var secretPrefixes = []string{"qak_", "qrk_", "qecr_", "qecp_"}
 
 // phases is every phase, in order.
-var phases = []string{PhaseClaimed, PhaseDispatched, PhaseHandover, PhaseHandedOver, PhaseCreated, PhaseStopped}
+var phases = []string{PhaseClaimed, PhaseMade, PhaseDispatched}
 
 var (
 	// dispatchIDShape is dp_ and 16 lower-case Crockford base32 characters.
 	dispatchIDShape = regexp.MustCompile(`^dp_[0-9a-hjkmnp-tv-z]{16}$`)
-	// runIDShape is a lower-case UUID.
-	runIDShape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	// stepShape is a step, as the provisioner contract writes one.
-	stepShape = regexp.MustCompile(`^[a-z][a-z_]{0,39}$`)
-	// instanceIDShape is an EC2 instance id: i- and 8 or 17 hex digits.
-	instanceIDShape = regexp.MustCompile(`^i-(?:[0-9a-f]{8}|[0-9a-f]{17})$`)
+	// machineIDShape is the machine id of the adapter protocol: 1 to 128 printable
+	// ASCII characters other than a space.
+	machineIDShape = regexp.MustCompile(`^[!-~]{1,128}$`)
 )
 
-// Entry is one live dispatch. InstanceID is empty before [PhaseCreated] and is the
-// machine's instance id from [PhaseCreated] on. An entry has no field for a run key, a
-// run code or inputs.
+// Entry is one live dispatch. MachineID is empty in [PhaseClaimed] and is the machine
+// id that the adapter's make returned from [PhaseMade] on. The journal treats a
+// machine id as opaque. An entry has no field for a secret or for inputs.
 type Entry struct {
-	DispatchID, RunID, Step, Phase, InstanceID string
+	DispatchID, Phase, MachineID string
 }
 
-// line is e as the journal writes it: the five fields, with - for no instance id.
+// line is e as the journal writes it: the three fields, with - for no machine id.
 func (e Entry) line() string {
-	instance := e.InstanceID
-	if instance == "" {
-		instance = noInstance
+	machine := e.MachineID
+	if machine == "" {
+		machine = noMachine
 	}
-	return e.DispatchID + " " + e.RunID + " " + e.Step + " " + e.Phase + " " + instance + "\n"
+	return e.DispatchID + " " + e.Phase + " " + machine + "\n"
 }
 
 // check returns the first field of e that is out of shape, as a phrase that quotes no
@@ -90,27 +82,26 @@ func (e Entry) check() string {
 	switch {
 	case !dispatchIDShape.MatchString(e.DispatchID):
 		return "the dispatch id is not dp_ and 16 Crockford base32 characters"
-	case !runIDShape.MatchString(e.RunID):
-		return "the run id is not a lower-case UUID"
-	case !stepShape.MatchString(e.Step):
-		return "the step is not 1 to 40 lower-case letters and underscores that start with a letter"
-	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.Step, p) }):
-		return "the step contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	case !slices.Contains(phases, e.Phase):
-		return "the phase is not claimed, dispatched, handover, handed_over, created or stopped"
-	}
-	machine := e.Phase == PhaseCreated || e.Phase == PhaseStopped
-	switch {
-	case machine && !instanceIDShape.MatchString(e.InstanceID):
-		return "the instance id is not i- and 8 or 17 hex digits"
-	case !machine && e.InstanceID != "":
-		return "the instance id is set before the phase created"
+		return "the phase is not claimed, made or dispatched"
+	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.MachineID, p) }):
+		return "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
+	case e.Phase == PhaseClaimed && e.MachineID != "":
+		return "the machine id is set in the phase claimed"
+	case e.Phase == PhaseClaimed:
+		return ""
+	case e.MachineID == "":
+		return "the phase made or dispatched has no machine id"
+	case !machineIDShape.MatchString(e.MachineID):
+		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
+	case e.MachineID == noMachine:
+		return "the machine id is -, which the journal writes for no machine id"
 	}
 	return ""
 }
 
 // Journal is the file <state folder>/dispatches, mode 0600, of at most 1 MiB: one line
-// per live dispatch, "dispatch_id run_id step phase instance_id", in the order of
+// per live dispatch, "dispatch_id phase machine_id", in the order of
 // their claims. Each change writes the whole file to a new file, synced, renames it
 // over the journal and syncs the folder, so a crash leaves the journal before the
 // change or after it. A Journal is safe for use from several goroutines.
@@ -166,10 +157,10 @@ func Open(dir string) (*Journal, error) {
 }
 
 // parse takes the first line off b and splits it into an entry. The cause is not ""
-// when the line has no line feed, or is not five fields that are not empty, separated
+// when the line has no line feed, or is not three fields that are not empty, separated
 // by single spaces.
 func parse(b *[]byte) (Entry, string) {
-	const cause = "the line is not five fields separated by single spaces and ended by a line feed"
+	const cause = "the line is not three fields separated by single spaces and ended by a line feed"
 	i := bytes.IndexByte(*b, '\n')
 	if i < 0 {
 		*b = nil
@@ -177,12 +168,12 @@ func parse(b *[]byte) (Entry, string) {
 	}
 	fields := strings.Split(string((*b)[:i]), " ")
 	*b = (*b)[i+1:]
-	if len(fields) != 5 || slices.Contains(fields, "") {
+	if len(fields) != 3 || slices.Contains(fields, "") {
 		return Entry{}, cause
 	}
-	e := Entry{fields[0], fields[1], fields[2], fields[3], fields[4]}
-	if e.InstanceID == noInstance {
-		e.InstanceID = ""
+	e := Entry{fields[0], fields[1], fields[2]}
+	if e.MachineID == noMachine {
+		e.MachineID = ""
 	}
 	return e, ""
 }

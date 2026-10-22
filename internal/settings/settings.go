@@ -12,8 +12,10 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -29,73 +31,58 @@ type Settings struct {
 	// 127.0.0.1 or [::1]. The scheme and the host are in lower case, with no trailing
 	// slash.
 	ApiaryURL string
-	// RunSubnetID is the subnet each machine starts in, subnet- and 8 or 17 hexadecimal
-	// digits.
-	RunSubnetID string
-	// RunSecurityGroupID is the security group of each machine, sg- and 8 or 17
-	// hexadecimal digits.
-	RunSecurityGroupID string
-	// MachineImageID is the image each machine starts from, ami- and 8 or 17
-	// hexadecimal digits.
-	MachineImageID string
-	// MachineTypes maps a machine type's name to an EC2 instance type, such as small to
-	// t3.medium: 1 to 20 entries.
-	MachineTypes map[string]string
-	// GatewayName is the DNS name of the gateway a machine's run connects to.
-	GatewayName string
-	// GatewayPort is the gateway's port, 1 to 65535.
-	GatewayPort int
-	// MaxMachines is the most machines that run at once, 1 to 100.
+	// GatewayAddress is the gateway's IP address on the machines' network. It has no
+	// zone, and it is not an unspecified, multicast or loopback address.
+	GatewayAddress netip.Addr
+	// MaxMachines is the most machines that exist at once, 1 to 100.
 	MaxMachines int
-	// MaxLifetimeMinutes is the most minutes a machine runs before it powers off, 5 to
-	// 720.
-	MaxLifetimeMinutes int
+	// Adapter is the machine adapter: its program and its settings file.
+	Adapter Adapter
 }
 
-// The defaults of the members that may be left out.
-const (
-	// DefaultMaxMachines is max_machines when the member is left out.
-	DefaultMaxMachines = 1
-	// DefaultMaxLifetimeMinutes is max_lifetime_minutes when the member is left out.
-	DefaultMaxLifetimeMinutes = 60
-)
+// Adapter is the machine adapter's program and its settings file. Each is an absolute
+// path that filepath.Clean leaves unchanged, of at most 4096 bytes.
+type Adapter struct {
+	// Command is the adapter program's path.
+	Command string
+	// Settings is the path of the adapter's settings file.
+	Settings string
+}
+
+// DefaultMaxMachines is max_machines when the member is left out.
+const DefaultMaxMachines = 1
 
 // members are the settings' members, in the order an error lists the missing ones.
-var members = []string{
-	"apiary_url", "run_subnet_id", "run_security_group_id", "machine_image_id", "machine_types",
-	"gateway_name", "gateway_port", "max_machines", "max_lifetime_minutes",
-}
+var members = []string{"apiary_url", "gateway_address", "max_machines", "adapter"}
 
 // optional are the members that may be left out.
-var optional = []string{"max_machines", "max_lifetime_minutes"}
+var optional = []string{"max_machines"}
+
+// adapterMembers are the members of adapter, in the order an error lists the missing
+// ones. Neither may be left out.
+var adapterMembers = []string{"command", "settings"}
 
 // maxFile is the most bytes a settings file may contain.
 const maxFile = 64 << 10
 
+// maxPath is the most bytes of adapter.command and adapter.settings.
+const maxPath = 4096
+
+// pathRule is the rule of adapter.command and adapter.settings, before an example.
+const pathRule = "an absolute path of at most 4096 bytes, with no . or .. element, no double slash, no trailing slash and no NUL byte, such as "
+
 // The rule of each member, which the error of a wrong value states. An error never
 // quotes the value.
 var rules = map[string]string{
-	"apiary_url":            "an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1]",
-	"run_subnet_id":         "subnet- and 8 or 17 lower-case hexadecimal digits",
-	"run_security_group_id": "sg- and 8 or 17 lower-case hexadecimal digits",
-	"machine_image_id":      "ami- and 8 or 17 lower-case hexadecimal digits",
-	"machine_types":         "an object of 1 to 20 members, each a name of 1 to 40 lower-case letters, digits and dashes that starts with a letter, set to an EC2 instance type such as t3.medium",
-	"gateway_name":          "a DNS name in lower case, such as gateway.example.com",
-	"gateway_port":          "a whole number from 1 to 65535",
-	"max_machines":          "a whole number from 1 to 100, or leave it out for 1",
-	"max_lifetime_minutes":  "a whole number from 5 to 720, or leave it out for 60",
+	"apiary_url":       "an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1]",
+	"gateway_address":  "the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address",
+	"max_machines":     "a whole number from 1 to 100, or leave it out for 1",
+	"adapter":          "an object with two members, command and settings",
+	"adapter.command":  pathRule + "/usr/local/bin/qory-machines-aws-ec2",
+	"adapter.settings": pathRule + "/etc/qory-provisioner/aws-ec2.json",
 }
 
-var (
-	subnetShape        = regexp.MustCompile(`^subnet-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	securityGroupShape = regexp.MustCompile(`^sg-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	imageShape         = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	typeNameShape      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
-	instanceTypeShape  = regexp.MustCompile(`^[a-z][a-z0-9-]*\.[a-z0-9]+$`)
-	labelShape         = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	digits             = regexp.MustCompile(`^[0-9]+$`)
-	integerShape       = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
-)
+var integerShape = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
 
 // Read reads the settings file at path, as [Parse] reads its bytes. A file larger than
 // 64 KiB is refused.
@@ -151,25 +138,10 @@ func Parse(b []byte) (Settings, error) {
 	case err != nil || doc == nil:
 		return Settings{}, errors.New("Write the settings file as one JSON object.")
 	}
-	var unknown, missing []string
-	for name := range doc {
-		if !slices.Contains(members, name) {
-			unknown = append(unknown, strconv.Quote(name))
-		}
+	if err := checkNames(doc, members, optional, ""); err != nil {
+		return Settings{}, err
 	}
-	if len(unknown) > 0 {
-		slices.Sort(unknown)
-		return Settings{}, fmt.Errorf("Remove the unknown members from the settings file: %s.", strings.Join(unknown, ", "))
-	}
-	for _, name := range members {
-		if _, ok := doc[name]; !ok && !slices.Contains(optional, name) {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		return Settings{}, fmt.Errorf("Add the missing members to the settings file: %s.", strings.Join(missing, ", "))
-	}
-	s := Settings{MaxMachines: DefaultMaxMachines, MaxLifetimeMinutes: DefaultMaxLifetimeMinutes}
+	s := Settings{MaxMachines: DefaultMaxMachines}
 	for _, name := range members {
 		raw, ok := doc[name]
 		if !ok {
@@ -179,25 +151,19 @@ func Parse(b []byte) (Settings, error) {
 		switch name {
 		case "apiary_url":
 			s.ApiaryURL, good = origin(raw)
-		case "run_subnet_id":
-			s.RunSubnetID, good = matching(raw, subnetShape)
-		case "run_security_group_id":
-			s.RunSecurityGroupID, good = matching(raw, securityGroupShape)
-		case "machine_image_id":
-			s.MachineImageID, good = matching(raw, imageShape)
-		case "machine_types":
-			s.MachineTypes, good = machineTypes(raw)
-		case "gateway_name":
-			s.GatewayName, good = dnsName(raw)
-		case "gateway_port":
-			s.GatewayPort, good = integer(raw, 1, 65535)
+		case "gateway_address":
+			s.GatewayAddress, good = address(raw)
 		case "max_machines":
 			s.MaxMachines, good = integer(raw, 1, 100)
-		case "max_lifetime_minutes":
-			s.MaxLifetimeMinutes, good = integer(raw, 5, 720)
+		case "adapter":
+			var err error
+			if s.Adapter, err = adapter(raw); err != nil {
+				return Settings{}, err
+			}
+			good = true
 		}
 		if !good {
-			return Settings{}, fmt.Errorf("Set %s in the settings file to %s.", name, rules[name])
+			return Settings{}, wrong(name)
 		}
 	}
 	return s, nil
@@ -280,12 +246,6 @@ func text(raw jsontext.Value) (string, bool) {
 	return s, true
 }
 
-// matching is a string that shape matches.
-func matching(raw jsontext.Value, shape *regexp.Regexp) (string, bool) {
-	s, ok := text(raw)
-	return s, ok && shape.MatchString(s)
-}
-
 // integer is a JSON number written as a whole number, with no fraction and no
 // exponent, from lo to hi.
 func integer(raw jsontext.Value, lo, hi int) (int, bool) {
@@ -297,39 +257,79 @@ func integer(raw jsontext.Value, lo, hi int) (int, bool) {
 	return n, err == nil && lo <= n && n <= hi
 }
 
-// machineTypes is an object of 1 to 20 members, each a name typeNameShape matches set
-// to an instance type instanceTypeShape matches.
-func machineTypes(raw jsontext.Value) (map[string]string, bool) {
-	var m map[string]jsontext.Value
-	if raw.Kind() != '{' || jsonv2.Unmarshal(raw, &m) != nil || len(m) < 1 || len(m) > 20 {
-		return nil, false
-	}
-	types := make(map[string]string, len(m))
-	for name, v := range m {
-		t, ok := matching(v, instanceTypeShape)
-		if !ok || !typeNameShape.MatchString(name) {
-			return nil, false
+// checkNames is the error of the object doc, at the path prefix, that has a member
+// not in names, or lacks a member of names that is not in optional, or nil. It quotes
+// the unknown names, which the check for a secret has already read.
+func checkNames(doc map[string]jsontext.Value, names, optional []string, prefix string) error {
+	var unknown, missing []string
+	for name := range doc {
+		if !slices.Contains(names, name) {
+			unknown = append(unknown, strconv.Quote(prefix+name))
 		}
-		types[name] = t
 	}
-	return types, true
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return fmt.Errorf("Remove the unknown members from the settings file: %s.", strings.Join(unknown, ", "))
+	}
+	for _, name := range names {
+		if _, ok := doc[name]; !ok && !slices.Contains(optional, name) {
+			missing = append(missing, prefix+name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("Add the missing members to the settings file: %s.", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
-// dnsName is a DNS name in lower case: at most 253 characters, labels of 1 to 63
-// letters, digits and dashes that neither start nor end with a dash, and a last label
-// that is not all digits, so an IPv4 address is no name.
-func dnsName(raw jsontext.Value) (string, bool) {
+// wrong is the error of the member name, such as adapter.command, whose value breaks
+// its rule. It states the rule, never the value.
+func wrong(name string) error {
+	return fmt.Errorf("Set %s in the settings file to %s.", name, rules[name])
+}
+
+// address is an IPv4 or IPv6 address with no zone and no port. An unspecified,
+// multicast or loopback address is refused, also when it is an IPv4 address mapped
+// into IPv6.
+func address(raw jsontext.Value) (netip.Addr, bool) {
 	s, ok := text(raw)
-	if !ok || len(s) > 253 {
-		return "", false
+	if !ok {
+		return netip.Addr{}, false
 	}
-	labels := strings.Split(s, ".")
-	for _, l := range labels {
-		if !labelShape.MatchString(l) {
-			return "", false
-		}
+	a, err := netip.ParseAddr(s)
+	u := a.Unmap()
+	if err != nil || a.Zone() != "" || u.IsUnspecified() || u.IsMulticast() || u.IsLoopback() {
+		return netip.Addr{}, false
 	}
-	return s, !digits.MatchString(labels[len(labels)-1])
+	return a, true
+}
+
+// adapter is the object of exactly the members command and settings, each a path
+// cleanPath takes.
+func adapter(raw jsontext.Value) (Adapter, error) {
+	var doc map[string]jsontext.Value
+	if raw.Kind() != '{' || jsonv2.Unmarshal(raw, &doc) != nil {
+		return Adapter{}, wrong("adapter")
+	}
+	if err := checkNames(doc, adapterMembers, nil, "adapter."); err != nil {
+		return Adapter{}, err
+	}
+	var a Adapter
+	var good bool
+	if a.Command, good = cleanPath(doc["command"]); !good {
+		return Adapter{}, wrong("adapter.command")
+	}
+	if a.Settings, good = cleanPath(doc["settings"]); !good {
+		return Adapter{}, wrong("adapter.settings")
+	}
+	return a, nil
+}
+
+// cleanPath is an absolute path of at most maxPath bytes that filepath.Clean leaves
+// unchanged, with no NUL byte, which no file's path contains.
+func cleanPath(raw jsontext.Value) (string, bool) {
+	s, ok := text(raw)
+	return s, ok && len(s) <= maxPath && filepath.IsAbs(s) && filepath.Clean(s) == s && !strings.ContainsRune(s, 0)
 }
 
 // origin is Qory Apiary's origin, as [CheckOrigin] takes it, with one trailing slash
