@@ -1,16 +1,21 @@
 // Package machine makes, lists, reads and terminates EC2 instances for the EC2 machine
 // adapter, qory-machines-aws-ec2: one instance per key of a make request. It calls EC2
-// with the host's instance role, through the AWS SDK's default credential chain.
+// at its standard endpoint with the host's instance role, whose credentials it reads
+// from the instance metadata service; see [LoadConfig].
 package machine
 
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/ec2rolecreds"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
@@ -60,27 +65,113 @@ func NewFromConfig(cfg aws.Config) *Client {
 	return New(ec2.NewFromConfig(cfg))
 }
 
-// LoadConfig loads the AWS configuration from the SDK's default chain. The region
-// comes from AWS_REGION or AWS_DEFAULT_REGION, then the shared config file, then the
-// instance metadata. LoadConfig then retrieves the credentials once, and returns an
-// error unless they come from the host's instance role: the adapter uses no stored AWS
-// key. Its errors are *adapterio.Failure.
+// The reasons of the refusals of [refusedVariables].
+const (
+	reasonCredentials = "the EC2 machine adapter uses only the instance role's credentials"
+	reasonFiles       = "the EC2 machine adapter reads no AWS config or credentials file"
+	reasonMetadata    = "the EC2 machine adapter reads the instance role's credentials from the instance metadata service at its standard address"
+	reasonEndpoint    = "the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials"
+	reasonCABundle    = "the EC2 machine adapter checks the EC2 endpoint's certificate only against the host's certificate authorities"
+)
+
+// refusedVariables are the AWS SDK's environment variables that select another
+// credential source, an AWS config or credentials file, another address of the
+// instance metadata service, another EC2 endpoint or another certificate authority.
+// [LoadConfig] returns an error when any of them is set and not empty.
+var refusedVariables = []struct{ name, reason string }{
+	{"AWS_ACCESS_KEY_ID", reasonCredentials},
+	{"AWS_ACCESS_KEY", reasonCredentials},
+	{"AWS_SECRET_ACCESS_KEY", reasonCredentials},
+	{"AWS_SECRET_KEY", reasonCredentials},
+	{"AWS_SESSION_TOKEN", reasonCredentials},
+	{"AWS_WEB_IDENTITY_TOKEN_FILE", reasonCredentials},
+	{"AWS_ROLE_ARN", reasonCredentials},
+	{"AWS_CONTAINER_CREDENTIALS_FULL_URI", reasonCredentials},
+	{"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", reasonCredentials},
+	{"AWS_PROFILE", reasonFiles},
+	{"AWS_DEFAULT_PROFILE", reasonFiles},
+	{"AWS_CONFIG_FILE", reasonFiles},
+	{"AWS_SHARED_CREDENTIALS_FILE", reasonFiles},
+	{"AWS_EC2_METADATA_SERVICE_ENDPOINT", reasonMetadata},
+	{"AWS_EC2_METADATA_DISABLED", reasonMetadata},
+	{"AWS_ENDPOINT_URL", reasonEndpoint},
+	{"AWS_ENDPOINT_URL_EC2", reasonEndpoint},
+	{"AWS_CA_BUNDLE", reasonCABundle},
+}
+
+// imdsEndpoint is the address of the instance metadata service. "" is the SDK's
+// standard address: http://169.254.169.254, or http://[fd00:ec2::254] when
+// AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE is IPv6. Tests set a local server.
+var imdsEndpoint string
+
+// LoadConfig loads the AWS configuration of the EC2 machine adapter. Its errors are
+// *adapterio.Failure.
+//   - When a variable of [refusedVariables] is set, it returns an error of the kind
+//     defect before any call.
+//   - It reads no shared config or credentials file, so no profile applies.
+//   - The region comes from AWS_REGION, or else from the instance metadata.
+//     AWS_DEFAULT_REGION does not apply.
+//   - The credentials come only from the instance role, which the SDK's role provider
+//     reads from the instance metadata service at its standard address, with no HTTP
+//     proxy.
+//   - The configuration has no EC2 endpoint, so the EC2 client calls the standard
+//     endpoint of the region.
+//
+// LoadConfig retrieves the credentials once, so a host with no instance role fails
+// here.
 func LoadConfig(ctx context.Context) (aws.Config, error) {
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithEC2IMDSRegion())
+	for _, v := range refusedVariables {
+		if os.Getenv(v.name) != "" {
+			return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Unset %s: %s", v.name, v.reason)}
+		}
+	}
+	env, err := config.NewEnvConfig()
 	if err != nil {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Fix the AWS variables in the EC2 machine adapter's environment: reading them failed: %v", err)}
+	}
+	meta := metadataClient(env)
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		out, err := meta.GetRegion(ctx, nil)
+		if err != nil {
+			return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
+		}
+		region = out.Region
+	}
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithSharedConfigFiles([]string{}),
+		config.WithSharedCredentialsFiles([]string{}),
+		config.WithRegion(region),
+		config.WithCredentialsProvider(ec2rolecreds.New(func(o *ec2rolecreds.Options) { o.Client = meta })),
+	)
+	if err != nil {
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Fix the AWS variables in the EC2 machine adapter's environment: loading the AWS configuration failed: %v", err)}
 	}
 	if cfg.Region == "" {
 		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
+	}
+	if cfg.BaseEndpoint != nil {
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Report this defect in the EC2 machine adapter: its AWS configuration has an EC2 endpoint, and the adapter calls EC2 only at its standard endpoint"}
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
 		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: %v", err)}
 	}
 	if creds.Source != ec2rolecreds.ProviderName {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Remove AWS_ACCESS_KEY_ID, AWS_PROFILE and any ~/.aws folder from the EC2 machine adapter's environment, so the AWS SDK uses the instance role: the credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Report this defect in the EC2 machine adapter: its AWS credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
 	}
 	return cfg, nil
+}
+
+// metadataClient is the client of the instance metadata service at [imdsEndpoint],
+// with the endpoint mode and the IMDSv1 setting of env. Its HTTP client uses no
+// proxy: the service is reachable only from the host, and with HTTP_PROXY set the
+// SDK's client would send the plain HTTP requests for the credentials to the proxy.
+func metadataClient(env config.EnvConfig) *imds.Client {
+	return imds.NewFromConfig(aws.Config{ConfigSources: []any{env}}, func(o *imds.Options) {
+		o.Endpoint = imdsEndpoint
+		o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) { tr.Proxy = nil })
+	})
 }
 
 // Machine is one EC2 instance as DescribeInstances or RunInstances returns it.

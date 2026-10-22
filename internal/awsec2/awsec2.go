@@ -2,7 +2,8 @@
 // [adapterio.Handler] that makes, lists, reads and deletes EC2 instances with the calls
 // of package machine. Check and make read the adapter's settings file aws-ec2.json;
 // list, log and delete need no setting and do not read it. Every command calls EC2
-// only with the host's instance role.
+// at its standard endpoint with the host's instance role: [machine.LoadConfig] returns
+// an error when the environment selects another credential source or endpoint.
 package awsec2
 
 import (
