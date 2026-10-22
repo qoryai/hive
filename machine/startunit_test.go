@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -47,9 +48,10 @@ var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed"
 // stub is the script behind every stub. It appends its name and arguments to
 // $STUB_LOG, one line per call. The curl stub returns $STUB_TOKEN for the token PUT and
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
-// stdin. The runuser stub logs HOME and links the run code file to $STUB_KEEP, so the
-// test can read it after the script removes it; with $STUB_TERM set, it sends SIGTERM
-// to the script.
+// stdin. The runuser stub logs HOME and NOTIFY_SOCKET, and links the run code file to
+// $STUB_KEEP, so the test can read it after the script removes it; with $STUB_TERM set,
+// it sends SIGTERM to the script. A STUB_FAIL_ variable makes one stub exit with an
+// error.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
@@ -68,15 +70,22 @@ curl)
 		;;
 	esac
 	;;
-iptables | ip6tables)
+iptables)
 	[[ -z ${STUB_FAIL_IPTABLES:-} ]] || exit 4
+	;;
+ip6tables)
+	[[ -z ${STUB_FAIL_IP6TABLES:-} ]] || exit 4
 	;;
 systemctl)
 	[[ $1 != start || -z ${STUB_FAIL_DOCKER:-} ]] || exit 1
 	;;
+shutdown)
+	[[ -z ${STUB_FAIL_SHUTDOWN:-} ]] || exit 1
+	;;
 systemd-notify | chown) ;;
 runuser)
 	printf 'runuser-home %s\n' "$HOME" >>"$STUB_LOG"
+	printf 'runuser-notify-socket %s\n' "${NOTIFY_SOCKET-unset}" >>"$STUB_LOG"
 	ln "$7" "$STUB_KEEP" 2>/dev/null || true
 	[[ -z ${STUB_TERM:-} ]] || kill -TERM "$PPID"
 	exit "${STUB_QORY_EXIT:-0}"
@@ -88,20 +97,21 @@ esac
 `
 
 // bash returns a bash of version 5 or later: Homebrew's on macOS, or the one on PATH.
+// Without one, the test is skipped.
 func bash(t *testing.T) string {
 	t.Helper()
 	path := "/opt/homebrew/bin/bash"
 	if _, err := os.Stat(path); err != nil {
 		if path, err = exec.LookPath("bash"); err != nil {
-			t.Fatalf("install bash 5: %v", err)
+			t.Skipf("install bash 5 to run this test: %v", err)
 		}
 	}
 	out, err := exec.Command(path, "-c", `printf %s "${BASH_VERSINFO[0]}"`).Output()
 	if err != nil {
-		t.Fatalf("install bash 5: %s: %v", path, err)
+		t.Skipf("install bash 5 to run this test: %s: %v", path, err)
 	}
 	if string(out) < "5" || len(out) != 1 {
-		t.Fatalf("install bash 5: %s is version %s", path, out)
+		t.Skipf("install bash 5 to run this test: %s is version %s", path, out)
 	}
 	return path
 }
@@ -180,7 +190,7 @@ func newEnv(t *testing.T, path string) *env {
 	write(t, e.root+"/home/qory/.config/qory/forager.yaml", forager)
 	write(t, e.root+"/etc/hosts", "127.0.0.1 localhost\n")
 	write(t, e.root+"/dev/urandom", string(randomBytes())+"more bytes after the 32 that head reads")
-	write(t, e.userData, startData(runCode, gatewayURL, gatewayAddress))
+	write(t, e.userData, startData(runCode, gatewayURL, gatewayAddress, 60))
 	return e
 }
 
@@ -204,11 +214,12 @@ func randomBytes() []byte {
 // password is the engine proxy password that the script makes from randomBytes.
 var password = base64.RawURLEncoding.EncodeToString(randomBytes())
 
-func startData(code, url, address string) string {
+func startData(code, url, address string, lifetime int) string {
 	b, err := json.Marshal(map[string]any{
-		"version":  1,
-		"run_code": code,
-		"gateway":  map[string]any{"url": url, "address": address},
+		"version":              1,
+		"run_code":             code,
+		"gateway":              map[string]any{"url": url, "address": address},
+		"max_lifetime_minutes": lifetime,
 	})
 	if err != nil {
 		panic(err)
@@ -224,8 +235,8 @@ type result struct {
 }
 
 // run runs the script once and checks what every run must leave: no secret marker in
-// stdout, stderr or the stubs' arguments, no run code file, and systemctl poweroff as
-// the last command.
+// stdout, stderr or the stubs' arguments, no token marker in stdout or stderr, no run
+// code file, and systemctl poweroff as the last command.
 func (e *env) run(t *testing.T, sh string, vars ...string) result {
 	t.Helper()
 	cmd := exec.Command(sh, "qory-machine-start")
@@ -236,6 +247,7 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 		"STUB_TOKEN=" + token,
 		"STUB_USERDATA=" + e.userData,
 		"STUB_KEEP=" + e.keep,
+		"NOTIFY_SOCKET=/run/systemd/notify",
 	}, vars...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -258,6 +270,13 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 			if strings.Contains(out, s) {
 				t.Errorf("%s contains the secret marker %s:\n%s", name, s, out)
 			}
+		}
+	}
+	// The curl stub logs the token header that it reads on stdin, so only stdout and
+	// stderr are checked for the token.
+	for name, out := range map[string]string{"stdout": r.stdout, "stderr": r.stderr} {
+		if strings.Contains(out, token) {
+			t.Errorf("%s contains the token marker %s:\n%s", name, token, out)
 		}
 	}
 	if _, err := os.Lstat(e.root + "/run/qory-machine/run-code"); !errors.Is(err, fs.ErrNotExist) {
@@ -288,16 +307,20 @@ func read(t *testing.T, path string) string {
 }
 
 // TestStartUnitRunsQory follows one boot: the script reads the start data, drops the
-// metadata service's packets, writes the hosts line and the engine proxy files, starts
-// docker.service, runs qory with the run code file, and powers the machine off.
+// metadata service's packets, writes the hosts line, schedules the power-off at the end
+// of the lifetime, writes the engine proxy files, starts docker.service, runs qory with
+// the run code file, and powers the machine off.
 func TestStartUnitRunsQory(t *testing.T) {
 	sh := bash(t)
 	path := commands(t, sh)
 	cases := []struct {
 		name, forager, url, address, hostsLine, daemonJSON string
+		lifetime                                           int
 		wantDaemon                                         map[string]any
 	}{
 		{name: "IPv4", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
+		{name: "lifetime 15", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 15},
+		{name: "lifetime 1470", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 1470},
 		{name: "IPv6, no port", forager: forager, url: "https://gateway.example.com", address: "fd00:ec2::5", hostsLine: "fd00:ec2::5 gateway.example.com"},
 		{name: "IPv4 in IPv6", forager: forager, url: gatewayURL, address: "::ffff:10.0.1.5", hostsLine: "::ffff:10.0.1.5 gateway.example.com"},
 		{name: "quoted machine", forager: "machine: \"aws-ec2\"  # the machine key\n", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
@@ -316,7 +339,11 @@ func TestStartUnitRunsQory(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t, path)
 			write(t, e.root+"/home/qory/.config/qory/forager.yaml", c.forager)
-			write(t, e.userData, startData(runCode, c.url, c.address))
+			lifetime := c.lifetime
+			if lifetime == 0 {
+				lifetime = 60
+			}
+			write(t, e.userData, startData(runCode, c.url, c.address, lifetime))
 			if c.daemonJSON != "" {
 				if err := os.MkdirAll(e.root+"/etc/docker", 0o755); err != nil {
 					t.Fatal(err)
@@ -336,6 +363,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP",
 				"iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP",
 				"ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP",
+				"shutdown -P +" + strconv.Itoa(lifetime),
 				"chown qory " + e.root + "/etc/qory/engine-proxy.json",
 				"chown -R qory " + e.root + "/etc/docker/certs.d",
 				"systemd-notify --ready",
@@ -343,6 +371,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine",
 				"runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + c.url,
 				"runuser-home " + e.root + "/home/qory",
+				"runuser-notify-socket unset",
 				"systemctl poweroff",
 			}
 			if !slices.Equal(r.log, want) {
@@ -402,6 +431,23 @@ func TestStartUnitRunsQory(t *testing.T) {
 	}
 }
 
+// readOnly replaces path with an empty folder of mode 0555. Appending to a folder fails
+// for every user; creating a file in it fails for every user except root, so a test
+// run by root is skipped unless path is the file that the script appends to.
+func readOnly(t *testing.T, path string) {
+	t.Helper()
+	if os.Geteuid() == 0 && !strings.HasSuffix(path, "/etc/hosts") {
+		t.Skip("root can write into a folder of mode 0555")
+	}
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o755) })
+}
+
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
 // one line to stderr, runs no qory after an invalid input, and powers the machine off.
 func TestStartUnitFails(t *testing.T) {
@@ -409,40 +455,66 @@ func TestStartUnitFails(t *testing.T) {
 	path := commands(t, sh)
 	const (
 		json1       = "Launch this machine with start data that is one JSON object. The user data is not one JSON object."
-		member      = "Remove the unknown members from the start data. Version 1 has only version, run_code and gateway, and gateway has only url and address."
+		member      = "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address."
 		version     = "Set version to 1 in the start data. This script reads only start data version 1."
+		lifetime    = "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer."
 		code        = "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>."
 		gateway     = "Set gateway in the start data to an object with url and address. The gateway value is not an object."
 		url         = "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid."
 		address     = "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address."
 		foragerPath = "{root}/home/qory/.config/qory/forager.yaml"
 	)
-	good := func(code, url, address string) string { return startData(code, url, address) }
+	good := func(code, url, address string) string { return startData(code, url, address, 60) }
+	// doc is start data with the raw JSON texts of version and max_lifetime_minutes.
+	doc := func(version, lifetime string) string {
+		return `{"version": ` + version + `, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": ` + lifetime + `}`
+	}
 	cases := []struct {
 		name, userData, forager string
 		daemonJSON              string
-		vars                    []string
-		status                  int
-		ran                     string // a command the script ran before it stopped, or ""
-		want                    string
+		// readOnly is a folder under the root that the script cannot write.
+		readOnly string
+		vars     []string
+		status   int
+		ran      string // a command the script ran before it stopped, or ""
+		want     string
+		// orWant is a second accepted line, for input that jq versions parse differently.
+		orWant string
 	}{
 		{name: "not JSON", userData: `{"version": 1,`, want: json1},
 		{name: "empty", userData: ``, want: json1},
 		{name: "two objects", userData: good(runCode, gatewayURL, gatewayAddress) + good(runCode, gatewayURL, gatewayAddress), want: json1},
 		{name: "an array", userData: `[1]`, want: json1},
-		{name: "a lifetime", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: member},
-		{name: "a gateway member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5", "port": 1}}`, want: member},
-		{name: "version 2", userData: `{"version": 2, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: version},
-		{name: "version as text", userData: `{"version": "1", "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: version},
-		{name: "no version", userData: `{"run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: version},
-		{name: "no run code", userData: `{"version": 1, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: code},
-		{name: "run code as a number", userData: `{"version": 1, "run_code": 5, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: code},
+		{name: "an unknown member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60, "port": 1}`, want: member},
+		{name: "a gateway member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5", "port": 1}, "max_lifetime_minutes": 60}`, want: member},
+		{name: "version 2", userData: doc("2", "60"), want: version},
+		{name: "version 1.0", userData: doc("1.0", "60"), want: version},
+		{name: "version 1e0", userData: doc("1e0", "60"), want: version},
+		{name: "version 10e-1", userData: doc("10e-1", "60"), want: version},
+		{name: "version 01", userData: doc("01", "60"), want: version},
+		{name: "version twice", userData: doc(`1, "version": 1`, "60"), want: version},
+		{name: "version as text", userData: doc(`"1"`, "60"), want: version},
+		{name: "no lifetime", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: lifetime},
+		{name: "lifetime 14", userData: doc("1", "14"), want: lifetime},
+		{name: "lifetime 1471", userData: doc("1", "1471"), want: lifetime},
+		{name: "lifetime 0", userData: doc("1", "0"), want: lifetime},
+		{name: "lifetime 60.0", userData: doc("1", "60.0"), want: lifetime},
+		{name: "lifetime 6e1", userData: doc("1", "6e1"), want: lifetime},
+		{name: "lifetime 060", userData: doc("1", "060"), want: lifetime},
+		{name: "lifetime -60", userData: doc("1", "-60"), want: lifetime},
+		// jq 1.8 reads +60 as the number 60.
+		{name: "lifetime +60", userData: doc("1", "+60"), want: lifetime, orWant: json1},
+		{name: "lifetime as text", userData: doc("1", `"60"`), want: lifetime},
+		{name: "lifetime twice", userData: doc("1", `60, "max_lifetime_minutes": 60`), want: lifetime},
+		{name: "no version", userData: `{"run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: version},
+		{name: "no run code", userData: `{"version": 1, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
+		{name: "run code as a number", userData: `{"version": 1, "run_code": 5, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
 		{name: "run code in lower case", userData: good(strings.ToLower(runCode), gatewayURL, gatewayAddress), want: code},
 		{name: "run code with I", userData: good("qecr_IARKER00000000000000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
 		{name: "run code with three parts", userData: good(runCode+".MARKERruncode000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
 		{name: "run code too short", userData: good(runCode[:len(runCode)-1], gatewayURL, gatewayAddress), want: code},
 		{name: "run code with a newline", userData: good(runCode+"\n", gatewayURL, gatewayAddress), want: code},
-		{name: "gateway as text", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": "https://gateway.example.com"}`, want: gateway},
+		{name: "gateway as text", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": "https://gateway.example.com", "max_lifetime_minutes": 60}`, want: gateway},
 		{name: "URL with a path", userData: good(runCode, gatewayURL+"/v1", gatewayAddress), want: url},
 		{name: "URL with a slash", userData: good(runCode, gatewayURL+"/", gatewayAddress), want: url},
 		{name: "URL with a query", userData: good(runCode, gatewayURL+"?a=1", gatewayAddress), want: url},
@@ -463,6 +535,7 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "address with 9 groups", userData: good(runCode, gatewayURL, "1:2:3:4:5:6:7:8:9"), want: address},
 		{name: "empty address", userData: good(runCode, gatewayURL, ""), want: address},
 		{name: "another machine", forager: "machine: gcp-compute\n", want: "Set machine: aws-ec2 in " + foragerPath + ". This script reads start data only for aws-ec2, and the file sets machine to gcp-compute."},
+		{name: "machine without a space", forager: "machine:aws-ec2\n", want: "Add the line machine: aws-ec2 to " + foragerPath + ". The file has no machine key."},
 		{name: "no machine key", forager: "wall:\n  engine_proxy_file: /etc/qory/engine-proxy.json\n", want: "Add the line machine: aws-ec2 to " + foragerPath + ". The file has no machine key."},
 		{name: "two machine keys", forager: "machine: aws-ec2\nmachine: aws-ec2\n", want: "Keep one machine line in " + foragerPath + ". The file has more than one."},
 		{name: "no forager.yaml", forager: "-", want: "Write machine: aws-ec2 into " + foragerPath + ". The file does not exist or is not readable."},
@@ -472,6 +545,12 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "daemon.json is not an object", daemonJSON: `["not an object"]`, ran: "iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP", want: "Make {root}/etc/docker/daemon.json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."},
 		{name: "docker.service fails", vars: []string{"STUB_FAIL_DOCKER=1"}, ran: "systemctl start docker.service", want: "Read the journal of docker.service for the cause. Starting docker.service failed."},
 		{name: "SIGTERM", vars: []string{"STUB_TERM=1"}, status: 143, ran: "runuser-home {root}/home/qory", want: "No action needed. The script stopped on SIGTERM, and the machine powers off."},
+		{name: "ip6tables fails", vars: []string{"STUB_FAIL_IP6TABLES=1"}, ran: "ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP", want: "Check that ip6tables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to fd00:ec2::254 failed."},
+		{name: "shutdown fails", vars: []string{"STUB_FAIL_SHUTDOWN=1"}, ran: "shutdown -P +60", want: "Check that shutdown -P can schedule a power-off on this machine image. Scheduling the power-off in 60 minutes failed."},
+		{name: "/etc/hosts not writable", readOnly: "/etc/hosts", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/hosts. Appending the gateway's line failed."},
+		{name: "/etc/docker not writable", readOnly: "/etc/docker", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/docker. Writing {root}/etc/docker/daemon.json failed."},
+		{name: "/etc/qory not writable", readOnly: "/etc/qory", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/qory. Writing {root}/etc/qory/engine-proxy.json failed."},
+		{name: "/run/qory-machine not writable", readOnly: "/run/qory-machine", ran: "systemctl start docker.service", want: "Check that root can write {root}/run/qory-machine. Writing {root}/run/qory-machine/run-code failed."},
 		{name: "qory run fails", vars: []string{"STUB_QORY_EXIT=3"}, status: 3, ran: "runuser-home {root}/home/qory", want: "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status 3."},
 	}
 	for _, c := range cases {
@@ -496,6 +575,9 @@ func TestStartUnitFails(t *testing.T) {
 				}
 				write(t, e.root+"/etc/docker/daemon.json", c.daemonJSON)
 			}
+			if c.readOnly != "" {
+				readOnly(t, e.root+c.readOnly)
+			}
 			r := e.run(t, sh, c.vars...)
 			status := c.status
 			if status == 0 {
@@ -505,6 +587,9 @@ func TestStartUnitFails(t *testing.T) {
 				t.Errorf("status %d, want %d", r.status, status)
 			}
 			want := strings.ReplaceAll(c.want, "{root}", e.root) + "\n"
+			if c.orWant != "" && r.stderr == c.orWant+"\n" {
+				want = r.stderr
+			}
 			if r.stderr != want || r.stdout != "" {
 				t.Errorf("stdout %q, stderr %q; want no stdout and stderr\n%q", r.stdout, r.stderr, want)
 			}
@@ -532,6 +617,9 @@ func TestStartUnitFiles(t *testing.T) {
 		"Type=notify",
 		"NotifyAccess=all",
 		"ExecStart=/usr/local/libexec/qory/qory-machine-start",
+		"TimeoutStartSec=120",
+		"SuccessAction=poweroff",
+		"FailureAction=poweroff",
 		"WantedBy=multi-user.target",
 	} {
 		if !slices.Contains(strings.Split(unit, "\n"), line) {
@@ -547,7 +635,7 @@ func TestStartUnitFiles(t *testing.T) {
 	}
 	// An absolute command path would bypass the stubs on PATH.
 	absolute := regexp.MustCompile(`(^|[\s;|&(])/(usr/)?s?bin/`)
-	forbidden := regexp.MustCompile(`(?i)set -x|set -o xtrace|shutdown|max_lifetime`)
+	forbidden := regexp.MustCompile(`set -x|set -o xtrace`)
 	for name, text := range map[string]string{"qory-machine.service": unit, "qory-machine-start": script} {
 		for i, line := range strings.Split(text, "\n") {
 			if m := forbidden.FindString(line); m != "" {
@@ -573,13 +661,17 @@ func TestStartUnitSecretLines(t *testing.T) {
 		`run_code=$(printf '%s' "$data" | jq -rs '.[0].run_code' 2>/dev/null) || problem=json`,
 		`url=$(printf '%s' "$data" | jq -rs '.[0].gateway.url' 2>/dev/null) || problem=json`,
 		`address=$(printf '%s' "$data" | jq -rs '.[0].gateway.address' 2>/dev/null) || problem=json`,
+		`without_version=${data//\"version\"/}`,
+		`if [[ $problem == ok ]] && { ((${#data} - ${#without_version} != 9)) || ! [[ $data =~ $version_text ]]; }; then`,
+		`without_lifetime=${data//\"max_lifetime_minutes\"/}`,
+		`if ((${#data} - ${#without_lifetime} == 22)) && [[ $data =~ $lifetime_text ]] &&`,
 		`if [[ $problem == ok ]] && ! [[ $run_code =~ ^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$ ]]; then`,
 		`{ printf '%s\n' "$password"; printf '%s' "$daemon_base"; } | jq -nR '`,
 		`input as $password |`,
 		`"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 		`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
-		`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" >"$engine_proxy_json" 2>/dev/null ||`,
-		`printf '%s' "$run_code" >"$run_code_file" 2>/dev/null || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
+		`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
+		`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
 	}
 	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)
 	for i, line := range strings.Split(read(t, "qory-machine-start"), "\n") {
