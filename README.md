@@ -8,8 +8,9 @@ This repository builds two programs:
   instances, as package `machines` states the protocol. FILE is the adapter's
   settings file, `aws-ec2.json`.
 
-`serve` is not built in this commit: it prints one error line on standard error and
-exits with status 2.
+`serve` claims dispatches from Qory Apiary, makes one machine for each through the
+machine adapter, and deletes each machine once its run ends. It runs until SIGTERM.
+`qory-provisioner serve -h` prints its flags.
 
 ## Build
 
