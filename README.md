@@ -20,15 +20,17 @@ provisioner's state folder, with the log line `found a machine with no journal
 entry`. Two provisioners of one node pool therefore delete each other's machines,
 also machines that run a dispatch.
 
-For a key rotation, a new provisioner with a new access key for the node pool, stop
-the old provisioner before you start the new one.
+When you rotate the key, which means a new provisioner with a new access key for the
+node pool, stop the old provisioner before you start the new one. The new provisioner
+deletes the machines that the old one made, also those that run a dispatch.
 
 ## Instance role policy
 
 The provisioner makes no AWS call. The EC2 machine adapter calls EC2 with the
 credentials of the instance role of the host that runs both programs. This IAM policy
-contains the actions that the adapter calls, and limits them to the machines of one
-node pool. Replace these example values before you attach it to the instance role:
+contains the actions that the adapter calls. It limits launches to instances tagged
+`qory:managed=true`, and limits deletes and console reads to the machines of one node
+pool. Replace these example values before you attach it to the instance role:
 
 - `<region>` and `<account-id>`: the region and the account of the machines.
 - `subnet-0123456789abcdef0`, `sg-0123456789abcdef0` and `ami-0123456789abcdef0`:

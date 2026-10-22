@@ -41,9 +41,11 @@ the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
 machines and deletes each machine whose dispatch has no entry in the journal, with the
 log line "found a machine with no journal entry". Two provisioners of one node pool
-therefore delete each other's machines, also machines that run a dispatch. For a key
-rotation, a new provisioner with a new access key for the node pool, stop the old
-provisioner before you start the new one.
+therefore delete each other's machines, also machines that run a dispatch.
+
+When you rotate the key, which means a new provisioner with a new access key for the
+node pool, stop the old provisioner before you start the new one. The new provisioner
+deletes the machines that the old one made, also those that run a dispatch.
 
 serve runs until SIGTERM or SIGINT. It then stops claiming, leaves every machine as it
 is, and exits with status 0. A second SIGTERM or SIGINT ends serve at once. serve exits
