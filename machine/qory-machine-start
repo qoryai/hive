@@ -237,9 +237,11 @@ url) fail "Set gateway.url in the start data to https://<host> or https://<host>
 address) fail "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address." ;;
 esac
 
-# 2. Drop every packet to the instance metadata service, from this machine and from its
-# containers. The raw table runs before the nat and filter tables that Docker writes, and
-# these rules go in before docker.service starts.
+# 2. Drop every packet to the instance metadata service that passes this machine's
+# netfilter: the OUTPUT rules match the packets that this machine's processes send, and
+# the PREROUTING rules match the packets that arrive on its interfaces, such as those of
+# containers on a Docker bridge. The raw table runs before the nat and filter tables that
+# Docker writes, and these rules go in before docker.service starts.
 for chain in PREROUTING OUTPUT; do
 	iptables -w -t raw -I "$chain" -d 169.254.169.254 -j DROP 2>/dev/null ||
 		fail "Check that iptables can add rules to the raw table on this machine image. Adding the $chain rule that drops packets to 169.254.169.254 failed."

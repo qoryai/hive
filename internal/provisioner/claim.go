@@ -35,8 +35,10 @@ type Claimed struct {
 	// Machine is the type of machine to create, such as small, or "" when the answer has
 	// none and the provisioner uses its default.
 	Machine string
-	// RunCode is the run code, qecr_…, that the machine redeems. The caller passes it to
-	// the machine and then clears it.
+	// RunCode is the run code, qecr_…, that the machine redeems. The caller copies it
+	// for the machine and then calls Clear, which zeros these bytes. Clear does not
+	// reach a copy: a Go string of the run code cannot be overwritten, and its bytes
+	// stay in memory until the garbage collector reuses them.
 	RunCode Hidden
 	// GatewayURL is the gateway the run code is bound to: https, a host and an optional
 	// port. The caller passes it to the machine with the run code.

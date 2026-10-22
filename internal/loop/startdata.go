@@ -20,6 +20,12 @@ const hiddenRunCode = "[run code]"
 // RunCode is the run code of a claim answer, which the machine redeems once. It
 // formats, logs and encodes as "[run code]", so no log line or error that contains a
 // RunCode shows its text. Only the start data contains the text.
+//
+// The text is a Go string, which no code can overwrite: it stays in memory until the
+// garbage collector reuses its bytes. The loop clears the start data, a byte slice,
+// at the end of the claim that built it, and the adapter runner clears its request
+// body after the adapter ends. The make request's base64 copy of the start data is a
+// string too, and is not cleared.
 type RunCode struct{ text string }
 
 // NewRunCode returns the run code s.
