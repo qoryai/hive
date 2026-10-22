@@ -289,8 +289,9 @@ func (s *Server) Expire(dispatchID string) {
 
 // Redeem marks the dispatch's run code as redeemed by a machine, which ends its lease:
 // the dispatch never goes stale after it. As in the contract, a redemption of a
-// dispatch that ended, or that is stale or reached LeaseUntil with no dispatched, is
-// refused: Redeem then marks nothing and returns false.
+// dispatch that ended, or that is stale or reached LeaseUntil with neither dispatched
+// nor an earlier redemption, is refused: Redeem then marks nothing and returns false.
+// A repeat redemption after an earlier one returns true.
 func (s *Server) Redeem(dispatchID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

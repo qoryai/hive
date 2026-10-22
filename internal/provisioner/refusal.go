@@ -83,10 +83,10 @@ const (
 	kindMachineLog
 )
 
-// refusalsOf are the signed refusals each request's schema lists, in the order Qory
-// Apiary checks them, with the 404 of a route it does not serve and the 429 any request
-// may get, refusal.schema.json. A machine log is never refused 410 gone or 409
-// lease_expired.
+// refusalsOf are the signed refusals of each request: first those its schema lists, in
+// the order the schema states, then the 404 of a route Qory Apiary does not serve and
+// the 429 any request may get, refusal.schema.json. [Refusal.Is] matches by membership
+// alone, not by place. A machine log is never refused 410 gone or 409 lease_expired.
 var refusalsOf = map[kind][]error{
 	kindClaim:      {ErrForbidden, ErrNoGateway, ErrNotFound, ErrRateLimited},
 	kindDispatched: {ErrForbidden, ErrGone, ErrLeaseExpired, ErrNotFound, ErrRateLimited},

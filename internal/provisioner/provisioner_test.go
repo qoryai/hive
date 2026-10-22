@@ -718,6 +718,32 @@ func TestARedeemedDispatchNeverGoesStale(t *testing.T) {
 	}
 }
 
+// TestExpireLeavesARedeemedDispatch redeems a dispatch's run code, with no dispatched,
+// then calls Expire: the dispatch is not stale, a release is 409 machine_exists, and
+// the first dispatched gets the 204.
+func TestExpireLeavesARedeemedDispatch(t *testing.T) {
+	srv, c, _, _ := setup(t)
+	ctx := context.Background()
+	cl := claimed(t, srv, c, provisionertest.Work{})
+	cl.RunCode.Clear()
+	if !srv.Redeem(cl.DispatchID) {
+		t.Fatal("the fake refused the redemption")
+	}
+	srv.Expire(cl.DispatchID)
+	if d, _ := srv.Dispatch(cl.DispatchID); d.Stale || !d.Redeemed || d.State != provisionertest.StateClaimed {
+		t.Errorf("after Expire: %+v", d)
+	}
+	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrMachineExists) {
+		t.Errorf("a release: %v", err)
+	}
+	if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+		t.Errorf("the first dispatched: %v", err)
+	}
+	if !srv.Redeem(cl.DispatchID) {
+		t.Error("the fake refused a repeat redemption")
+	}
+}
+
 // TestARedemptionAfterTheLeaseIsRefused moves the clock to a dispatch's lease_until with
 // no dispatched and no redemption: the fake refuses the redemption, and a release and
 // a first dispatched are 409 lease_expired.
