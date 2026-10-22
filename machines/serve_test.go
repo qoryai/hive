@@ -266,3 +266,38 @@ func TestContainsSecret(t *testing.T) {
 		}
 	}
 }
+
+// TestContainsSecretWindows checks the pieces of the start data in base64 and of the
+// run code after its prefix.
+func TestContainsSecretWindows(t *testing.T) {
+	data := []byte(`{"version":1,"run_code":"qecr_MARKERc0ffee7a1b","gateway":{"url":"https://gateway.example.com:8443","address":"10.0.1.5"}}`)
+	enc := base64.StdEncoding.EncodeToString(data)
+	for _, text := range []string{
+		"Check the start data " + enc[100:116],
+		"Check the start data " + enc[len(enc)-16:],
+		"Check " + enc[57:80] + " now",
+		"Check the code MARKERc0ffee7a1b",
+		"Check the code ARKERc0ffee7a now",
+		"Check the code ERc0ffee7a1b.",
+	} {
+		if !machines.ContainsSecret(text, data) {
+			t.Errorf("a piece is not found in %q", text[:20])
+		}
+	}
+	for _, text := range []string{
+		"Check the start data " + enc[100:115],
+		"Check the code Rc0ffee7a1b.",
+		"Raise the instance quota of the account.",
+	} {
+		if machines.ContainsSecret(text, data) {
+			t.Errorf("%q is found", text[:20])
+		}
+	}
+	if machines.ContainsSecret("Check the code MARKERc0ffee7a1b", []byte("not json")) {
+		t.Error("a run code is found in start data that is not JSON")
+	}
+	short := []byte(`{"run_code":"qecr_abc"}`)
+	if !machines.ContainsSecret("Check abc.", short) {
+		t.Error("a run code shorter than the window is not found")
+	}
+}

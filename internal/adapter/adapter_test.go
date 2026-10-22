@@ -229,11 +229,12 @@ func TestErrorMessageWithSecret(t *testing.T) {
 	}
 	// The runner replaces it when the adapter writes it: the start data, raw (as a
 	// JSON string) or in base64, the run code prefix in any case, and a cut part of
-	// the start data in base64 from several start characters.
+	// the start data in base64 from several start characters, a piece from the middle
+	// of the base64, and the run code without its prefix.
 	const want = "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the provisioner does not show it"
 	raw, _ := json.Marshal(string(startData))
 	enc := base64.StdEncoding.EncodeToString(startData)
-	for _, part := range []string{string(raw[1 : len(raw)-1]), enc, "QECR_abc", enc[:80], enc[1:60], enc[2:50], enc[3:45], enc[21:52]} {
+	for _, part := range []string{string(raw[1 : len(raw)-1]), enc, "QECR_abc", enc[:80], enc[1:60], enc[2:50], enc[3:45], enc[21:52], enc[100:116], "MARKERc0ffee7a1b"} {
 		f := newFixture(t, config{Mode: "raw", Status: 1, Stdout: `{"error": {"kind": "other", "message": "Check the start data ` + part + `"}}`})
 		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
 		defect(t, err, "make", want)
