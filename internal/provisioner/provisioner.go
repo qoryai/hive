@@ -119,8 +119,8 @@ type Config struct {
 // check returns the first problem of the config, or nil. Its error contains no secret.
 func (cfg Config) check() error {
 	switch {
-	case accesskey.ContainsSecret(cfg.URL):
-		return errors.New("set the URL of Qory Apiary to its origin: the URL contains what looks like an access key secret or a run key")
+	case secret(cfg.URL):
+		return errors.New("set the URL of Qory Apiary to its origin: the URL contains what looks like an access key secret, a run key or a run code")
 	case !originShape.MatchString(cfg.URL):
 		return errors.New("set the URL of Qory Apiary to its origin, https://host or http:// to a loopback address, with no path and no trailing slash")
 	case cfg.Key == nil:

@@ -144,3 +144,100 @@ func TestAReleaseOfAHandedOverRunIsNotResentOnASecret(t *testing.T) {
 		t.Errorf("err %v, logged %s", err, log)
 	}
 }
+
+// markerCode is the marker run code, of the contract's form; codeLeaks are its parts
+// that must appear nowhere.
+const markerCode = "qecr_MARKERC0DE0123456789ABCDEF.bWFya2VyLXJ1bi1jb2RlAA"
+
+var codeLeaks = []string{markerCode, "MARKERC0DE0123456789ABCDEF", "bWFya2VyLXJ1bi1jb2RlAA", "qecr_"}
+
+// TestNoRunCodeLeaks hands over the run code of a run whose run code is the marker,
+// after tries that fail with bodies that contain it, with the client's log on; sends
+// run-code answers that break the contract and contain it; stops a release whose
+// reason contains it; and prints, logs and marshals what the client returned. No log
+// line, no error, no printout and no request contains the run code, and the run code
+// handed over is the run's.
+func TestNoRunCodeLeaks(t *testing.T) {
+	srv, c, _, log := setup(t)
+	ctx := context.Background()
+	var out bytes.Buffer
+	run := provisionertest.Run{RunCode: markerCode}
+	body := `{"error":"` + markerCode + `"}`
+	cl := claimed(t, srv, c, run)
+	if err := c.Dispatched(ctx, cl.DispatchID); err != nil {
+		t.Fatal(err)
+	}
+	srv.Script(provisionertest.RouteHandover,
+		provisionertest.Reply{Status: 409, Body: body, Unsigned: true},
+		provisionertest.Reply{Status: 500, Body: body},
+		provisionertest.Reply{Status: 409, Body: body},
+	)
+	if _, err := c.HandoverCode(ctx, cl.DispatchID, cl.RunID); err == nil {
+		t.Fatal("a signed 409 with the run code as its code is used")
+	} else {
+		out.WriteString(err.Error() + "\n")
+	}
+	h, err := c.HandoverCode(ctx, cl.DispatchID, cl.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written(t, h.RunCode) != markerCode || h.RunID != cl.RunID || h.Step != provisioner.StepExplore {
+		t.Fatalf("handed %+v: the run code, the run id or the step is not the run's", h)
+	}
+
+	for _, edit := range []func(map[string]any){
+		func(d map[string]any) { d["revision"] = 2 },
+		func(d map[string]any) { d["extra"] = markerCode },
+		func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-000000000000" },
+		func(d map[string]any) { d["domain"] = "software" },
+		func(d map[string]any) { d["run_code"] = strings.ToLower(markerCode) },
+		func(d map[string]any) { d["run_code"] = markerCode + "!" },
+	} {
+		next := claimed(t, srv, c, run)
+		_ = c.Dispatched(ctx, next.DispatchID)
+		srv.Script(provisionertest.RouteHandover, provisionertest.Reply{Edit: edit})
+		if got, err := c.HandoverCode(ctx, next.DispatchID, next.RunID); err == nil || got.RunCode.Len() != 0 {
+			t.Error("a run-code handover that breaks the contract is used")
+		} else {
+			out.WriteString(err.Error() + "\n")
+		}
+	}
+	if err := c.Release(ctx, cl.DispatchID, "the run code is "+markerCode, true); err == nil {
+		t.Error("a release whose reason contains the run code is sent")
+	} else {
+		out.WriteString(err.Error() + "\n")
+	}
+
+	slog.New(slog.NewTextHandler(&out, nil)).Info("x", "handed", h, "code", h.RunCode)
+	slog.New(slog.NewJSONHandler(&out, nil)).Info("x", "handed", h, "code", h.RunCode)
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x"} {
+		for _, v := range []any{h, &h, h.RunCode, &h.RunCode} {
+			out.WriteString(sprintf(verb, v))
+		}
+	}
+	for _, v := range []any{h, &h, h.RunCode} {
+		b, _ := json.Marshal(v)
+		out.Write(b)
+	}
+	out.WriteString(log.String())
+	if log.Len() == 0 {
+		t.Error("nothing logged")
+	}
+	text := strings.ToLower(out.String())
+	for _, s := range codeLeaks {
+		if strings.Contains(text, strings.ToLower(s)) {
+			t.Errorf("%q is in the output:\n%s", s, out.String())
+		}
+	}
+	for _, call := range srv.Calls() {
+		for _, s := range codeLeaks {
+			if strings.Contains(strings.ToLower(string(call.Body)), strings.ToLower(s)) || strings.Contains(call.Target, s) {
+				t.Errorf("%s: a request contains %q", call.Route, s)
+			}
+		}
+	}
+	h.RunCode.Clear()
+	if h.RunCode.Len() != 0 {
+		t.Error("the run code is kept after Clear")
+	}
+}

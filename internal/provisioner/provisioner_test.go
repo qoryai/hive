@@ -292,6 +292,25 @@ func TestTheBodiesAreTheFixtures(t *testing.T) {
 	if b := fixture(t, "release/retry.json"); !sameJSON(t, last(t, srv).Body, b) {
 		t.Errorf("the release\n%s\nwant\n%s", last(t, srv).Body, b)
 	}
+
+	at("2026-10-15T12:00:20Z")
+	cl = claimed(t, srv, c, provisionertest.Run{})
+	if err := c.Dispatched(ctx, cl.DispatchID); err != nil {
+		t.Fatal(err)
+	}
+	var cf contracts.Handover
+	if err := json.Unmarshal(fixture(t, "handover/run-code.json"), &cf); err != nil {
+		t.Fatal(err)
+	}
+	at(cf.Time)
+	hc, err := c.HandoverCode(ctx, cl.DispatchID, cl.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc.RunCode.Clear()
+	if b := fixture(t, "handover/run-code.json"); !sameJSON(t, last(t, srv).Body, b) {
+		t.Errorf("the run-code handover\n%s\nwant\n%s", last(t, srv).Body, b)
+	}
 }
 
 // TestAClaimSendsItsWait claims with each wait from 0 to 25 seconds: the body has the
@@ -393,6 +412,16 @@ func TestEveryHandoverFixtureIsRead(t *testing.T) {
 			cl := claimed(t, srv, c, provisionertest.Run{RunID: want.RunID, Step: want.Step})
 			_ = c.Dispatched(context.Background(), cl.DispatchID)
 			srv.Script(provisionertest.RouteHandover, provisionertest.Reply{Status: http.StatusOK, Body: body})
+			if want.RunCode != "" {
+				h, err := c.HandoverCode(context.Background(), cl.DispatchID, cl.RunID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if h.RunID != want.RunID || h.Step != want.Step || written(t, h.RunCode) != want.RunCode {
+					t.Errorf("handed %+v: the run id, the step or the run code is not the answer's", h)
+				}
+				return
+			}
 			h, err := c.Handover(context.Background(), cl.DispatchID, cl.RunID)
 			if err != nil {
 				t.Fatal(err)
@@ -940,3 +969,81 @@ func TestA401SaysWhatToCheck(t *testing.T) {
 
 // sprintf is fmt.Sprintf of one value.
 func sprintf(format string, v any) string { return fmt.Sprintf(format, v) }
+
+// TestARunCodeIsHandedOverOnce hands over the run code of a run the fake offers: it is
+// the run's, and the fake records the dispatch as handed over. A second handover of
+// either form is 409 handed_over.
+func TestARunCodeIsHandedOverOnce(t *testing.T) {
+	srv, c, _, _ := setup(t)
+	ctx := context.Background()
+	cl := claimed(t, srv, c, provisionertest.Run{Step: provisioner.StepPrebuild})
+	if err := c.Dispatched(ctx, cl.DispatchID); err != nil {
+		t.Fatal(err)
+	}
+	h, err := c.HandoverCode(ctx, cl.DispatchID, cl.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := srv.Dispatch(cl.DispatchID)
+	if written(t, h.RunCode) != d.Run.RunCode || h.RunID != cl.RunID || h.Step != provisioner.StepPrebuild || !d.HandedOver {
+		t.Errorf("handed %+v, dispatch %+v", h, d)
+	}
+	if _, err := c.HandoverCode(ctx, cl.DispatchID, cl.RunID); !errors.Is(err, provisioner.ErrHandedOver) {
+		t.Errorf("a second run-code handover: %v", err)
+	}
+	if _, err := c.Handover(ctx, cl.DispatchID, cl.RunID); !errors.Is(err, provisioner.ErrHandedOver) {
+		t.Errorf("a run-key handover after the run code: %v", err)
+	}
+}
+
+// TestEachHandoverReadsOnlyItsForm sends, signed, the run-code fixture to a run-key
+// handover, a run-key fixture to a run-code handover, and each invalid fixture of a
+// run code, or of neither form, to both: none is used, and no error or log line
+// contains a run code or a run key.
+func TestEachHandoverReadsOnlyItsForm(t *testing.T) {
+	invalid, err := fs.Glob(contracts.ProvisionerFS, "fixtures/invalid/handover-answer-run-code-*.json")
+	if err != nil || len(invalid) < 6 {
+		t.Fatalf("the fixtures %v: %v", invalid, err)
+	}
+	invalid = append(invalid,
+		"fixtures/invalid/handover-answer-run-key-and-run-code.json",
+		"fixtures/invalid/handover-answer-without-run-key-or-run-code.json")
+	type send struct {
+		name string
+		code bool
+	}
+	sends := []send{{"fixtures/handover-answer/explore-run-code.json", false}, {"fixtures/handover-answer/explore.json", true}}
+	for _, name := range invalid {
+		sends = append(sends, send{name, false}, send{name, true})
+	}
+	for _, s := range sends {
+		name := strings.TrimPrefix(s.name, "fixtures/")
+		body := fixture(t, name)
+		var doc contracts.HandoverAnswer
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		srv, c, _, log := setup(t)
+		cl := claimed(t, srv, c, provisionertest.Run{RunID: doc.RunID, Step: doc.Step})
+		_ = c.Dispatched(context.Background(), cl.DispatchID)
+		srv.Script(provisionertest.RouteHandover, provisionertest.Reply{Status: http.StatusOK, Body: string(body)})
+		var err error
+		if s.code {
+			var h provisioner.HandedCode
+			h, err = c.HandoverCode(context.Background(), cl.DispatchID, cl.RunID)
+			if !errors.Is(err, provisioner.ErrAnswerUnusable) || h.RunCode.Len() != 0 {
+				t.Fatalf("a run-code handover answered with %s: %v", name, err)
+			}
+		} else {
+			var h provisioner.Handed
+			h, err = c.Handover(context.Background(), cl.DispatchID, cl.RunID)
+			if !errors.Is(err, provisioner.ErrAnswerUnusable) || h.RunKey.Len() != 0 || h.Inputs.Len() != 0 {
+				t.Fatalf("a run-key handover answered with %s: %v", name, err)
+			}
+		}
+		text := strings.ToLower(log.String() + err.Error())
+		if strings.Contains(text, "qecr_") || strings.Contains(text, "qecn_") || accesskey.ContainsSecret(text) {
+			t.Errorf("%s: the error or the log contains a run code or a run key: %s", name, text)
+		}
+	}
+}

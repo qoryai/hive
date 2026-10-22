@@ -17,13 +17,20 @@ import (
 // maxRunKey is the most characters a handover's run_key has, handover-answer.schema.json.
 const maxRunKey = 2048
 
-// runKeyShape is a handover's run_key. The schema checks every other member of the
-// answer.
-var runKeyShape = regexp.MustCompile(`^qrk_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
+// runKeyShape is a handover's run_key, and runCodeShape its run_code. The schema
+// checks every other member of the answer.
+var (
+	runKeyShape  = regexp.MustCompile(`^qrk_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
+	runCodeShape = regexp.MustCompile(`^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$`)
+)
 
-// standIn takes the run key's place in the copy of a handover's answer that the schema
-// checks: a value of the run key's form that is no run key.
-var standIn = []byte(`"qrk_0.0"`)
+// standIn and codeStandIn take the place of the run key and of the run code in the
+// copy of a handover's answer that the schema checks: values of their form that are no
+// run key and no run code.
+var (
+	standIn     = []byte(`"qrk_0.0"`)
+	codeStandIn = []byte(`"qecr_00000000000000000000000000.AAAAAAAAAAAAAAAAAAAAAA"`)
+)
 
 // Handed is a handover's answer, handover-answer.schema.json, checked: signed under the
 // pin, of the schema and its bounds, of the revision sent, and for the claimed run.
@@ -72,30 +79,113 @@ type Handed struct {
 // straight into its [Hidden]: the schema checks a copy in which a stand-in takes the
 // run key's place, so no string ever contains the run key.
 func (c *Client) Handover(ctx context.Context, dispatchID, runID string) (Handed, error) {
-	what, err := ofDispatch("the handover of ", dispatchID)
+	var h Handed
+	err := c.handover(ctx, "the handover of ", dispatchID, runID, false, func(body []byte) (err error) {
+		h, err = readHandover(body, runID)
+		return err
+	})
+	return h, err
+}
+
+// HandedCode is the run-code form of a handover's answer, handover-answer.schema.json,
+// checked: signed under the pin, of the schema, of the revision sent, and for the
+// claimed run. It has exactly the run id, the step and the run code. RunCode is
+// [Hidden]; the caller clears it once it is used, or once the dispatch is dropped. The
+// job redeems the run code at Qory Apiary's enrolment for the run key and the run's
+// documents, which the provisioner never receives.
+type HandedCode struct {
+	RunID string
+	Step  string
+	// RunCode is the run's run code, qecr_….
+	RunCode Hidden
+}
+
+// HandoverCode sends POST /v1/dispatches/<dispatchID>/handover with run_code true,
+// handover.schema.json, for the job the provisioner started for the dispatch of the
+// claimed run runID. A signed 200 is the run code, once checked, see [HandedCode]: its
+// run_id must be runID. Its refusals, tries and context errors are those of
+// [Client.Handover], with the run code in the run key's place: after a 409
+// handed_over whose [Refusal.Resent] is set, the run code is never sent again.
+//
+// The answer's bytes are cleared once read, and the run code is unquoted from them
+// straight into its [Hidden]: the schema checks a copy in which a stand-in takes the
+// run code's place, so no string ever contains the run code.
+func (c *Client) HandoverCode(ctx context.Context, dispatchID, runID string) (HandedCode, error) {
+	var h HandedCode
+	err := c.handover(ctx, "the run-code handover of ", dispatchID, runID, true, func(body []byte) (err error) {
+		h, err = readHandoverCode(body, runID)
+		return err
+	})
+	return h, err
+}
+
+// handover sends a handover, with run_code set to runCode, and passes its signed 200's
+// body to read. The body is cleared after read returns.
+func (c *Client) handover(ctx context.Context, prefix, dispatchID, runID string, runCode bool, read func([]byte) error) error {
+	what, err := ofDispatch(prefix, dispatchID)
 	if err != nil {
-		return Handed{}, err
+		return err
 	}
 	if !runIDShape.MatchString(runID) {
-		return Handed{}, fmt.Errorf("report this defect in the provisioner: %s: the run id is not a UUID in the canonical lower-case form", what)
+		return fmt.Errorf("report this defect in the provisioner: %s: the run id is not a UUID in the canonical lower-case form", what)
 	}
 	ans, err := c.do(ctx, request{
 		what: what, kind: kindHandover, path: routeDispatches + dispatchID + "/handover",
 		schema: "handover.schema.json", limit: contracts.MaxHandoverAnswer, timeout: RequestTimeout,
-		body: func(t string) any { return contracts.Handover{Version: 1, Time: t} },
+		body: func(t string) any { return contracts.Handover{Version: 1, Time: t, RunCode: runCode} },
 	})
 	if err != nil {
-		return Handed{}, err
+		return err
 	}
 	defer clear(ans.body)
 	if ans.status != http.StatusOK {
-		return Handed{}, c.refused(what, kindHandover, ans)
+		return c.refused(what, kindHandover, ans)
 	}
-	h, err := readHandover(ans.body, runID)
+	if err := read(ans.body); err != nil {
+		return unusable(what, err.Error())
+	}
+	return nil
+}
+
+// readHandoverCode reads body, a run-code handover's signed 200, into a [HandedCode]
+// for the claimed run runID, as [readHandover] reads the run key: the run code goes
+// straight from body into the Hidden, and the schema checks a copy with
+// [codeStandIn] in its place. The caller clears body. Its error contains the schema, an
+// id or a revision, and no other value of body.
+func readHandoverCode(body []byte, runID string) (HandedCode, error) {
+	const name = "handover-answer.schema.json"
+	broken := fmt.Errorf("it fails %s", name)
+	if !jsontext.Value(body).IsValid() {
+		return HandedCode{}, errNotOneDocument
+	}
+	start, end, ok := memberSpan(body, "run_code")
+	if !ok {
+		return HandedCode{}, broken
+	}
+	code, err := jsontext.AppendUnquote(make([]byte, 0, end-start), body[start:end])
+	if err != nil || !runCodeShape.Match(code) {
+		clear(code)
+		return HandedCode{}, broken
+	}
+	stood := slices.Concat(body[:start], codeStandIn, body[end:])
+	var doc contracts.HandoverAnswer
+	err = readAnswer(name, stood, &doc)
+	clear(stood)
+	switch {
+	case err != nil:
+	case doc.Revision != Revision:
+		err = errors.New(revisionText(doc.Revision))
+	case doc.RunID != runID:
+		err = fmt.Errorf("it is for the run %s, not the claimed run %s", doc.RunID, runID)
+	case doc.RunKey != "" || doc.Domain != "" || doc.Access != "" || doc.Inputs != nil || doc.Target != nil || doc.WorkItem != nil ||
+		doc.RunSettings != nil || doc.Stack != nil || doc.Workflow != "":
+		err = broken
+	}
 	if err != nil {
-		return Handed{}, unusable(what, err.Error())
+		clear(code)
+		return HandedCode{}, err
 	}
-	return h, nil
+	return HandedCode{RunID: doc.RunID, Step: doc.Step, RunCode: Hide(code)}, nil
 }
 
 // readHandover reads body, a handover's signed 200, into a [Handed] for the claimed run
@@ -110,7 +200,7 @@ func readHandover(body []byte, runID string) (Handed, error) {
 	if !jsontext.Value(body).IsValid() {
 		return Handed{}, errNotOneDocument
 	}
-	start, end, ok := runKeySpan(body)
+	start, end, ok := memberSpan(body, "run_key")
 	if !ok {
 		return Handed{}, broken
 	}
@@ -191,11 +281,11 @@ func checkRunSettings(name, step string, rs *contracts.RunSettings) error {
 	return nil
 }
 
-// runKeySpan is where the value of body's top-level run_key member is, quotes
-// included: body[start:end]. body is one JSON object; ok is false when it has no such
-// member. The decoder reads body in place, from a bytes.Buffer, so the value is never
-// copied.
-func runKeySpan(body []byte) (start, end int, ok bool) {
+// memberSpan is where the string value of body's top-level member is, quotes included:
+// body[start:end]. body is one JSON object; ok is false when it has no such member, or
+// its value is not a string. The decoder reads body in place, from a bytes.Buffer, so
+// the value is never copied.
+func memberSpan(body []byte, member string) (start, end int, ok bool) {
 	dec := jsontext.NewDecoder(bytes.NewBuffer(body))
 	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
 		return 0, 0, false
@@ -205,7 +295,7 @@ func runKeySpan(body []byte) (start, end int, ok bool) {
 		if err != nil {
 			return 0, 0, false
 		}
-		if name.String() != "run_key" {
+		if name.String() != member {
 			if err := dec.SkipValue(); err != nil {
 				return 0, 0, false
 			}

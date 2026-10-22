@@ -19,7 +19,9 @@
 // dispatch's refusals follow the contract's order: 403 for an unknown dispatch, 410 for
 // one that ended, 409 handed_over for a second handover, 409 lease_expired once its
 // lease lapsed before its handover or [Server.Expire] made it stale, and 409
-// not_dispatched for a handover before dispatched. A release ends the dispatch. The
+// not_dispatched for a handover before dispatched. A handover with run_code true gets
+// the run-code form of the answer, with the run's [Run.RunCode], and any other
+// handover the run-key form. A release ends the dispatch. The
 // fake records every request in order, [Server.Calls].
 package provisionertest
 
@@ -102,7 +104,11 @@ type Run struct {
 	// RunKey is the run key of the handover's answer, of the contract's form:
 	// qrk_, base64url, a dot and base64url.
 	RunKey string
-	Lease  time.Duration
+	// RunCode is the run code of the run-code form of the handover's answer, of the
+	// contract's form: qecr_, 26 upper-case Crockford base32 characters, a dot and 22
+	// base64url characters.
+	RunCode string
+	Lease   time.Duration
 }
 
 // Reply is one scripted answer, which [Server.Script] queues for a route. With Status
@@ -415,10 +421,25 @@ func filled(r Run) Run {
 	if r.RunKey == "" {
 		r.RunKey = "qrk_" + random(48) + "." + random(64)
 	}
+	if r.RunCode == "" {
+		r.RunCode = newRunCode()
+	}
 	if r.Lease == 0 {
 		r.Lease = Lease
 	}
 	return r
+}
+
+// newRunCode is a new run code, of the form of the contract's run_code: qecr_, 26
+// random Crockford base32 characters, a dot and 16 random bytes in base64url.
+func newRunCode() string {
+	const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	b := make([]byte, 26)
+	_, _ = rand.Read(b)
+	for i := range b {
+		b[i] = crockford[b[i]%32]
+	}
+	return "qecr_" + string(b) + "." + random(16)
 }
 
 // random is n random bytes in base64url.
@@ -707,6 +728,14 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 		}
 		d.State, d.HandedOver = StateHandedOver, true
 		ans := answer{status: http.StatusOK, header: http.Header{"Cache-Control": {"no-store"}}}
+		var h contracts.Handover
+		_ = json.Unmarshal(body, &h)
+		if h.RunCode {
+			ans.body, _ = json.Marshal(contracts.HandoverAnswer{
+				Version: 1, Revision: provisioner.Revision, RunID: d.Run.RunID, RunCode: d.Run.RunCode, Step: d.Run.Step,
+			})
+			return ans
+		}
 		ans.body, _ = json.Marshal(contracts.HandoverAnswer{
 			Version: 1, Revision: provisioner.Revision, RunID: d.Run.RunID, RunKey: d.Run.RunKey, Step: d.Run.Step,
 			Domain: d.Run.Domain, Access: d.Run.Access, Target: d.Run.Target, WorkItem: d.Run.WorkItem,

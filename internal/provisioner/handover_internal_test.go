@@ -53,8 +53,58 @@ func TestARunKeyOutsideItsShapeIsRefused(t *testing.T) {
 	if err == nil {
 		t.Error("no run key")
 	}
-	if _, _, ok := runKeySpan([]byte(`{"inputs":{"run_key":"qrk_a.b"}}`)); ok {
+	if _, _, ok := memberSpan([]byte(`{"inputs":{"run_key":"qrk_a.b"}}`), "run_key"); ok {
 		t.Error("a nested run_key is taken for the answer's")
+	}
+}
+
+// codeAnswerWith is a run-code handover's 200 at revision 3 whose run_code member is
+// code, as written in JSON.
+func codeAnswerWith(code string) []byte {
+	return []byte(`{"version":1,"revision":3,"run_id":"` + testRun + `","run_code":` + code + `,"step":"explore"}`)
+}
+
+// TestTheRunCodeIsReadFromTheBytes reads a run-code handover whose run code is written
+// with an escape: the run code is the member's, unescaped. Clearing the answer after
+// leaves the run code whole, so it shares no bytes with the answer.
+func TestTheRunCodeIsReadFromTheBytes(t *testing.T) {
+	body := codeAnswerWith(`"\u0071ecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg"`)
+	h, err := readHandoverCode(body, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(body)
+	var w bytes.Buffer
+	_, _ = h.RunCode.WriteTo(&w)
+	if w.String() != "qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg" || h.RunID != testRun || h.Step != "explore" {
+		t.Errorf("the run code %q, handed %+v", w.String(), h)
+	}
+}
+
+// TestARunCodeOutsideItsShapeIsRefused reads run-code handovers whose run code is
+// outside its form once unescaped, is not a string, is missing or is nested: each is
+// an error that quotes none of it.
+func TestARunCodeOutsideItsShapeIsRefused(t *testing.T) {
+	for _, code := range []string{
+		`"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C"`, `"qecr_01jb8z3k5q7r9t2v4w6x8y0a1c.uoES-kuj1vk0sq0qoGlmAg"`,
+		`"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1I.uoES-kuj1vk0sq0qoGlmAg"`, `"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg\n"`,
+		`"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg.uoES-kuj1vk0sq0qoGlmAg.uoES-kuj1vk0sq0qoGlmAg"`,
+		`7`, `true`, `{"qecr_a":"b"}`,
+	} {
+		_, err := readHandoverCode(codeAnswerWith(code), testRun)
+		if err == nil || strings.Contains(strings.ToLower(err.Error()), "qecr_") {
+			t.Errorf("%s: %v", code, err)
+		}
+	}
+	two := `"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg.uoES-kuj1vk0sq0qoGlmAg"`
+	if _, err := readHandoverCode(codeAnswerWith(two), testRun); err != nil {
+		t.Errorf("a run code with two fingerprints: %v", err)
+	}
+	if _, err := readHandoverCode([]byte(`{"version":1,"revision":3,"run_id":"`+testRun+`","step":"explore"}`), testRun); err == nil {
+		t.Error("no run code")
+	}
+	if _, _, ok := memberSpan([]byte(`{"x":{"run_code":"qecr_a"}}`), "run_code"); ok {
+		t.Error("a nested run_code is taken for the answer's")
 	}
 }
 

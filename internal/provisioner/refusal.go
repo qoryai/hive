@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"time"
-
-	"github.com/qoryai/forager/accesskey"
 )
 
 // The results of a request the provisioner branches on, each matched with errors.Is
@@ -27,7 +25,7 @@ var (
 	ErrGone = errors.New("410 gone")
 	// ErrHandedOver is a handover's signed 409 handed_over: the run was handed over
 	// before, through this dispatch or another one. Qory Apiary never sends its run key
-	// again.
+	// or its run code again.
 	ErrHandedOver = errors.New("409 handed_over")
 	// ErrLeaseExpired is the signed 409 lease_expired: the dispatch's lease lapsed
 	// before its handover.
@@ -199,7 +197,7 @@ func (c *Client) refused(what string, k kind, ans *answer) error {
 	var doc struct {
 		Error string `json:"error"`
 	}
-	if readAnswer("refusal.schema.json", ans.body, &doc) == nil && !accesskey.ContainsSecret(doc.Error) {
+	if readAnswer("refusal.schema.json", ans.body, &doc) == nil && !secret(doc.Error) {
 		r.Code = doc.Error
 	}
 	if ans.status == http.StatusTooManyRequests {

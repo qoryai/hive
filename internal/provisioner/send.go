@@ -72,8 +72,8 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not build the request", req.what)
 	}
 	id := http.MethodPost + " " + c.cfg.URL + req.path + "\n" + string(b)
-	if accesskey.ContainsSecret(id) {
-		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
+	if secret(id) {
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret, a run key or a run code, so the client did not send it", req.what)
 	}
 	wait := firstWait
 	for try := 1; ; try++ {
@@ -136,8 +136,8 @@ func (c *Client) build(req request, t time.Time) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("report this defect in the provisioner: %s: the client could not build the request", req.what)
 	}
-	if accesskey.ContainsSecret(string(b)) {
-		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret or a run key, so the client did not send it", req.what)
+	if secret(string(b)) {
+		return nil, fmt.Errorf("report this defect in the provisioner: %s: the request contains what looks like an access key secret, a run key or a run code, so the client did not send it", req.what)
 	}
 	s, err := schema(req.schema)
 	if err != nil {
@@ -220,7 +220,7 @@ func unreachable(what string, err error) error {
 	if errors.As(err, &u) {
 		err = u.Err
 	}
-	if accesskey.ContainsSecret(err.Error()) {
+	if secret(err.Error()) {
 		return fmt.Errorf(reachFix+"%s: %w", what, ErrUnreachable)
 	}
 	return fmt.Errorf(reachFix+"%s: %w: %w", what, ErrUnreachable, err)
@@ -288,9 +288,15 @@ func schema(name string) (*jsonschema.Schema, error) {
 	return s, nil
 }
 
+// secret is whether s contains what looks like an access key secret or a run key, as
+// [accesskey.ContainsSecret] finds them, or a run code: qecr_ in any case.
+func secret(s string) bool {
+	return accesskey.ContainsSecret(s) || strings.Contains(strings.ToLower(s), "qecr_")
+}
+
 // shown is s, or [hidden] when s contains what looks like a secret, for a value logged.
 func shown(s string) string {
-	if accesskey.ContainsSecret(s) {
+	if secret(s) {
 		return hiddenText
 	}
 	return s
