@@ -12,7 +12,7 @@ import (
 // The results of a request the provisioner branches on, each matched with errors.Is
 // against the error a method returns. A signed refusal matches only for a request whose
 // schema lists it, with its status and its code: claim.schema.json,
-// dispatched.schema.json, handover.schema.json and release.schema.json of
+// dispatched.schema.json, release.schema.json and machine-log.schema.json of
 // provisioner/v1.
 var (
 	// ErrForbidden is the signed 403 forbidden: a request outside the access key's
@@ -20,29 +20,24 @@ var (
 	ErrForbidden = errors.New("403 forbidden")
 	// ErrNotFound is the signed 404 not_found: Qory Apiary does not serve the route.
 	ErrNotFound = errors.New("404 not_found")
-	// ErrGone is the signed 410 gone: the dispatch ended. To a handover, it is also a
-	// run Qory Apiary could not form, which Qory Apiary then ended.
+	// ErrGone is the signed 410 gone of a dispatched or a release: the dispatch ended.
+	// After a dispatched's, the contract requires the provisioner to send the machine
+	// log and delete the machine.
 	ErrGone = errors.New("410 gone")
-	// ErrHandedOver is a handover's signed 409 handed_over: the run was handed over
-	// before, through this dispatch or another one. Qory Apiary never sends its run key
-	// or its run code again.
-	ErrHandedOver = errors.New("409 handed_over")
-	// ErrLeaseExpired is the signed 409 lease_expired: the dispatch's lease lapsed
-	// before its handover.
+	// ErrLeaseExpired is the signed 409 lease_expired of a dispatched or a release: the
+	// dispatch's lease lapsed before its first dispatched and before a redemption of its
+	// run code. After it, the contract requires the provisioner to stop the machine it
+	// created for the dispatch.
 	ErrLeaseExpired = errors.New("409 lease_expired")
-	// ErrNotDispatched is a handover's signed 409 not_dispatched: the handover came
-	// before dispatched.
-	ErrNotDispatched = errors.New("409 not_dispatched")
-	// ErrNoGateway is the signed 409 no_gateway of a claim or a handover: the node pool
-	// has no gateway to register a run through. After a handover's, the dispatch stays
-	// claimed until its lease lapses, and the handover may be sent again within the
-	// lease.
+	// ErrMachineExists is a release's signed 409 machine_exists: Qory Apiary accepted
+	// dispatched for the dispatch, or the machine redeemed the run code.
+	ErrMachineExists = errors.New("409 machine_exists")
+	// ErrMachineLogExists is a machine log's signed 409 machine_log_exists: the dispatch
+	// has a machine log.
+	ErrMachineLogExists = errors.New("409 machine_log_exists")
+	// ErrNoGateway is a claim's signed 409 no_gateway: the node pool's choice of gateway
+	// resolves to no gateway.
 	ErrNoGateway = errors.New("409 no_gateway")
-	// ErrUnavailable is a handover's signed 503 unavailable: Qory Apiary failed to make
-	// the run's inputs or its run key, and the handover took no effect. Handover returns
-	// it after one try; the contract allows the handover again, with backoff, within the
-	// lease.
-	ErrUnavailable = errors.New("503 unavailable")
 	// ErrRateLimited is the signed 429 rate_limited; [Refusal.RetryAfter] is the wait
 	// its Retry-After sets. An unsigned 429 is [ErrUnsigned].
 	ErrRateLimited = errors.New("429 rate_limited")
@@ -58,9 +53,8 @@ var (
 	ErrUnreachable = errors.New("no answer from Qory Apiary")
 	// ErrAnswerUnusable is a signed answer within its bound that breaks the contract: a
 	// success status the request does not have, a body that is not one JSON document or
-	// fails its schema, another revision than the one sent, another run than the one
-	// claimed, or inputs over their bound. Nothing in it is used. The request is not
-	// sent again, since Qory Apiary acted on it.
+	// fails its schema, or another revision than the one sent. Nothing in it is used.
+	// The request is not sent again, since Qory Apiary acted on it.
 	ErrAnswerUnusable = errors.New("Qory Apiary's answer breaks the contract, so the client used nothing in it")
 )
 
@@ -69,15 +63,14 @@ var codeOf = map[error]struct {
 	status int
 	code   string
 }{
-	ErrForbidden:     {http.StatusForbidden, "forbidden"},
-	ErrNotFound:      {http.StatusNotFound, "not_found"},
-	ErrGone:          {http.StatusGone, "gone"},
-	ErrHandedOver:    {http.StatusConflict, "handed_over"},
-	ErrLeaseExpired:  {http.StatusConflict, "lease_expired"},
-	ErrNotDispatched: {http.StatusConflict, "not_dispatched"},
-	ErrNoGateway:     {http.StatusConflict, "no_gateway"},
-	ErrUnavailable:   {http.StatusServiceUnavailable, "unavailable"},
-	ErrRateLimited:   {http.StatusTooManyRequests, "rate_limited"},
+	ErrForbidden:        {http.StatusForbidden, "forbidden"},
+	ErrNotFound:         {http.StatusNotFound, "not_found"},
+	ErrGone:             {http.StatusGone, "gone"},
+	ErrLeaseExpired:     {http.StatusConflict, "lease_expired"},
+	ErrMachineExists:    {http.StatusConflict, "machine_exists"},
+	ErrMachineLogExists: {http.StatusConflict, "machine_log_exists"},
+	ErrNoGateway:        {http.StatusConflict, "no_gateway"},
+	ErrRateLimited:      {http.StatusTooManyRequests, "rate_limited"},
 }
 
 // kind is the request a refusal is to.
@@ -86,20 +79,19 @@ type kind int
 const (
 	kindClaim kind = iota
 	kindDispatched
-	kindHandover
 	kindRelease
+	kindMachineLog
 )
 
-// refusalsOf are the signed refusals each request's schema lists, in the order Qory
-// Apiary checks them, with the 404 of a route it does not serve and the 429 any request
-// may get, refusal.schema.json.
+// refusalsOf are the signed refusals of each request: first those its schema lists, in
+// the order the schema states, then the 404 of a route Qory Apiary does not serve and
+// the 429 any request may get, refusal.schema.json. [Refusal.Is] matches by membership
+// alone, not by place. A machine log is never refused 410 gone or 409 lease_expired.
 var refusalsOf = map[kind][]error{
 	kindClaim:      {ErrForbidden, ErrNoGateway, ErrNotFound, ErrRateLimited},
-	kindDispatched: {ErrForbidden, ErrNotFound, ErrGone, ErrLeaseExpired, ErrRateLimited},
-	// A handover's 410 gone has two places in its order: a dispatch that ended, third,
-	// and a run Qory Apiary cannot form, after 409 no_gateway.
-	kindHandover: {ErrForbidden, ErrNotFound, ErrGone, ErrHandedOver, ErrLeaseExpired, ErrNotDispatched, ErrNoGateway, ErrGone, ErrUnavailable, ErrRateLimited},
-	kindRelease:  {ErrForbidden, ErrNotFound, ErrGone, ErrLeaseExpired, ErrRateLimited},
+	kindDispatched: {ErrForbidden, ErrGone, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
+	kindRelease:    {ErrForbidden, ErrGone, ErrMachineExists, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
+	kindMachineLog: {ErrForbidden, ErrMachineLogExists, ErrNotFound, ErrRateLimited},
 }
 
 // Refusal is an answer other than the one a request is for: its status, whether its
@@ -110,7 +102,7 @@ var refusalsOf = map[kind][]error{
 // it is over its bound. Its text contains the request, the status and the code, never
 // a body, a header or a secret.
 type Refusal struct {
-	// What is the request, as an error states it: "the claim", "the handover of dp_…".
+	// What is the request, as an error states it: "the claim", "the release of dp_…".
 	What string
 	// Status is the answer's HTTP status.
 	Status int
@@ -129,8 +121,8 @@ type Refusal struct {
 	Limit    int64
 	// Resent is whether the client sent the request more than once in the same call,
 	// after a try whose answer was lost: no answer, one over its bound, one with no
-	// valid signature, or a server error. Such a try may have taken effect: a handover's
-	// 409 handed_over may follow a handover whose 200 was lost.
+	// valid signature, or a server error. Such a try may have taken effect: a release's
+	// 410 gone may follow a release whose 204 was lost.
 	Resent bool
 
 	kind kind
@@ -155,7 +147,7 @@ func (r *Refusal) Error() string {
 
 // fix is the start of a signed refusal's text: what the operator can do, or that the
 // refusal is a defect in the provisioner, or "" for a refusal the provisioner acts on
-// with no operator, such as 410 gone or 409 lease_expired.
+// with no operator, such as 410 gone or 409 machine_exists.
 func (r *Refusal) fix() string {
 	switch {
 	case r.Status == http.StatusBadRequest:

@@ -2,13 +2,17 @@ package provisionertest_test
 
 import (
 	"bytes"
+	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/qoryai/forager/accesskey"
+	"github.com/qoryai/integrations/contracts"
 
+	"github.com/qoryai/hive/internal/provisioner"
 	"github.com/qoryai/hive/internal/provisioner/provisionertest"
 )
 
@@ -24,7 +28,7 @@ func post(t *testing.T, s *provisionertest.Server, key *accesskey.Key, path stri
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(accesskey.HeaderAccessKeyID, provisionertest.KeyID)
 	req.Header.Set(accesskey.HeaderInstanceID, provisionertest.InstanceID)
-	req.Header.Set("X-Qory-Contract-Version", "3")
+	req.Header.Set("X-Qory-Contract-Version", strconv.Itoa(provisioner.Revision))
 	if edit != nil {
 		edit(req.Header)
 	}
@@ -58,6 +62,7 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	s.Now = func() time.Time { return now }
 	other, _ := accesskey.Generate()
+	next := strconv.Itoa(provisioner.Revision + 1)
 	cases := []struct {
 		name   string
 		key    *accesskey.Key
@@ -72,8 +77,8 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 		{"a signature twice", s.Pool, claimAt(now), func(h http.Header) { h.Add(accesskey.HeaderSignature, "x") }, 400, false, "bad_request"},
 		{"another key", other, claimAt(now), nil, 401, false, "unauthorized"},
 		{"an instance id outside its shape", s.Pool, claimAt(now), func(h http.Header) { h.Set(accesskey.HeaderInstanceID, "-x") }, 400, true, "bad_request"},
-		{"revision 1", s.Pool, claimAt(now), func(h http.Header) { h.Set("X-Qory-Contract-Version", "1") }, 400, true, "unsupported_contract_version"},
-		{"revision 2", s.Pool, claimAt(now), func(h http.Header) { h.Set("X-Qory-Contract-Version", "2") }, 400, true, "unsupported_contract_version"},
+		{"revision 0", s.Pool, claimAt(now), func(h http.Header) { h.Set("X-Qory-Contract-Version", "0") }, 400, true, "unsupported_contract_version"},
+		{"the next revision", s.Pool, claimAt(now), func(h http.Header) { h.Set("X-Qory-Contract-Version", next) }, 400, true, "unsupported_contract_version"},
 		{"no revision", s.Pool, claimAt(now), func(h http.Header) { h.Del("X-Qory-Contract-Version") }, 400, true, "unsupported_contract_version"},
 		{"a member the schema does not define", s.Pool, []byte(`{"version":1,"time":"` + now.UTC().Format(time.RFC3339) + `","wait_seconds":0,"x":1}`), nil, 400, true, "invalid_request"},
 		{"a member twice", s.Pool, []byte(`{"version":1,"version":1,"time":"` + now.UTC().Format(time.RFC3339) + `","wait_seconds":0}`), nil, 400, true, "invalid_request"},
@@ -104,13 +109,40 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 	// the same bytes, with the revision header, which the signature does not cover,
 	// set right, get the 204.
 	again := claimAt(now.Add(time.Second))
-	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, func(h http.Header) { h.Set("X-Qory-Contract-Version", "2") }); status != 400 || !signed {
-		t.Errorf("revision 2: %d signed %v", status, signed)
+	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, func(h http.Header) { h.Set("X-Qory-Contract-Version", next) }); status != 400 || !signed {
+		t.Errorf("the next revision: %d signed %v", status, signed)
 	}
 	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, nil); status != 204 || !signed {
-		t.Errorf("the same bytes at revision 3: %d signed %v", status, signed)
+		t.Errorf("the same bytes at the revision served: %d signed %v", status, signed)
 	}
 	if status, signed, _ := post(t, s, s.Pool, "/v1/pools/claim", again, nil); status != 401 || signed {
 		t.Errorf("the same bytes again: %d signed %v", status, signed)
+	}
+}
+
+// TestTheFakeRefusesEachInvalidRequestFixture posts each of the contract's invalid
+// request fixtures of dispatched, release and machine-log to its route: each gets the
+// signed 400 invalid_request, before the fake looks up the dispatch.
+func TestTheFakeRefusesEachInvalidRequestFixture(t *testing.T) {
+	s := provisionertest.New(t)
+	for route, glob := range map[string]string{
+		"dispatched":  "fixtures/invalid/dispatched-*.json",
+		"release":     "fixtures/invalid/release-*.json",
+		"machine-log": "fixtures/invalid/machine-log-*.json",
+	} {
+		names, err := fs.Glob(contracts.ProvisionerFS, glob)
+		if err != nil || len(names) < 2 {
+			t.Fatalf("%s: the fixtures %v: %v", route, names, err)
+		}
+		for _, name := range names {
+			body, err := fs.ReadFile(contracts.ProvisionerFS, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, signed, got := post(t, s, s.Pool, "/v1/dispatches/dp_0000000000000000/"+route, body, nil)
+			if status != 400 || !signed || !strings.Contains(got, `"invalid_request"`) {
+				t.Errorf("%s: %d signed %v %s", name, status, signed, got)
+			}
+		}
 	}
 }

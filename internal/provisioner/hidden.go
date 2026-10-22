@@ -10,9 +10,9 @@ import (
 // hiddenText is how a [Hidden] prints, logs and marshals.
 const hiddenText = "[hidden]"
 
-// Hidden keeps the bytes of a value out of every log, error and printout: a handover's
-// run key and inputs, and a work item's title. It prints as [hidden] for every verb, and
-// logs and marshals as [hidden] too. The bytes sit behind two pointers, so a Hidden
+// Hidden keeps the bytes of a value out of every log, error and printout: a claim
+// answer's run code. It prints as [hidden] for every verb, and logs and marshals as
+// [hidden] too. The bytes sit behind two pointers, so a Hidden
 // inside another value, even in a field whose methods fmt cannot call, prints as an
 // address: fmt follows one pointer to a slice when a field does not take the verb, and
 // no pointer to a pointer. A printer that follows pointers by reflection shows the
