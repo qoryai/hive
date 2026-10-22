@@ -1,0 +1,319 @@
+#!/bin/bash
+# qory-machine-start: the start unit's script, run as root by qory-machine.service at
+# boot, once on each machine that the provisioner makes. It reads the start data, drops
+# every packet to the instance metadata service, sets up the engine proxy, starts
+# docker.service, runs qory run as the user qory, and powers the machine off when qory
+# run exits, when any step fails, or when the machine's lifetime ends.
+#
+# The machine image must contain bash 5, curl, jq, iptables, ip6tables, runuser (from
+# util-linux), systemd (shutdown, systemctl and systemd-notify), sed, and the coreutils
+# base64, chmod, chown, head, mkdir, rm and tr. It must have the user qory, and
+# /home/qory/.config/qory/forager.yaml with the line machine: aws-ec2.
+#
+# The start data, version 1, is one JSON object, with max_lifetime_minutes an integer
+# from 15 to 1470:
+#   {"version": 1, "run_code": "qecr_...", "gateway": {"url": "https://host[:port]", "address": "<IPv4 or IPv6>"}, "max_lifetime_minutes": 60}
+#
+# The run code, the engine proxy password and the start data stay in shell variables and
+# pipes. The run code and the password reach no output, no command argument, and no file
+# except /run/qory-machine/run-code, /etc/docker/daemon.json and
+# /etc/qory/engine-proxy.json. Of the start data, only the gateway URL, the address and
+# the lifetime leave the script: the URL in the arguments of qory run, the URL's host and
+# the address in /etc/hosts, and the lifetime in the arguments of shutdown. Each failure
+# prints one line to stderr; the line starts with its fix and contains no secret.
+#
+# qory-machine.service needs systemd 246 or later. From that version, systemd-notify
+# waits until systemd has processed READY (a synchronous barrier) before it exits, so
+# systemd links READY to this unit under NotifyAccess=all.
+#
+# QORY_MACHINE_ROOT, when set, is a folder that every path below is placed under. The
+# tests set it; qory-machine.service leaves it unset.
+
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+root=${QORY_MACHINE_ROOT:-}
+forager_yaml=$root/home/qory/.config/qory/forager.yaml
+home=$root/home/qory
+urandom=$root/dev/urandom
+hosts=$root/etc/hosts
+docker_dir=$root/etc/docker
+daemon_json=$docker_dir/daemon.json
+certs_dir=$docker_dir/certs.d
+qory_dir=$root/etc/qory
+engine_proxy_json=$qory_dir/engine-proxy.json
+run_code_dir=$root/run/qory-machine
+run_code_file=$run_code_dir/run-code
+
+# Every exit, after a failure, a signal or the end of qory run, removes the run code and
+# powers the machine off.
+on_exit() {
+	local status=$?
+	set +e
+	rm -f -- "$run_code_file" 2>/dev/null
+	if ! systemctl poweroff 2>/dev/null; then
+		printf '%s\n' "Power this machine off with systemctl poweroff. The power-off request failed." >&2
+	fi
+	exit "$status"
+}
+trap on_exit EXIT
+stop() {
+	printf '%s\n' "No action needed. The script stopped on $1, and the machine powers off." >&2
+	exit "$2"
+}
+trap 'stop SIGHUP 129' HUP
+trap 'stop SIGINT 130' INT
+trap 'stop SIGTERM 143' TERM
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+for tool in base64 chmod chown curl head ip6tables iptables jq mkdir rm runuser sed shutdown systemctl systemd-notify tr; do
+	command -v "$tool" >/dev/null || fail "Install $tool in the machine image. This script runs $tool, and it is not on PATH."
+done
+
+is_ipv4() {
+	local octet='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+	[[ $1 =~ ^$octet\.$octet\.$octet\.$octet$ ]]
+}
+
+# count_groups sets REPLY to the number of IPv6 groups in $1, a list of 1 to 4 hex
+# digits joined by colons, or returns 1 if $1 is not such a list. An empty $1 has 0.
+count_groups() {
+	local rest=$1 group n=0
+	if [[ -n $rest ]]; then
+		while true; do
+			group=${rest%%:*}
+			[[ $group =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+			n=$((n + 1))
+			[[ $rest == *:* ]] || break
+			rest=${rest#*:}
+		done
+	fi
+	REPLY=$n
+}
+
+is_ipv6() {
+	local address=$1 v4 before after
+	[[ $address =~ ^[0-9A-Fa-f:.]+$ && $address == *:* ]] || return 1
+	if [[ $address == *.* ]]; then
+		v4=${address##*:}
+		is_ipv4 "$v4" || return 1
+		address=${address%"$v4"}0:0
+	fi
+	[[ $address != *::*::* ]] || return 1
+	if [[ $address == *::* ]]; then
+		count_groups "${address%%::*}" || return 1
+		before=$REPLY
+		count_groups "${address#*::}" || return 1
+		after=$REPLY
+		((before + after <= 7))
+	else
+		count_groups "$address" || return 1
+		((REPLY == 8))
+	fi
+}
+
+is_hostname() {
+	local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+	[[ ${#1} -le 253 && $1 =~ ^($label\.)*$label$ ]]
+}
+
+# 1. Read the start data, once.
+[[ -r $forager_yaml ]] || fail "Write machine: aws-ec2 into $forager_yaml. The file does not exist or is not readable."
+# Each machine line comes out of sed as = and its value. A line without a space after
+# the colon, such as machine:aws-ec2, is no machine key in YAML.
+machine_lines=$(sed -n -E 's/^machine:([[:space:]]+|$)/=/p' "$forager_yaml" 2>/dev/null) ||
+	fail "Write machine: aws-ec2 into $forager_yaml. Reading the file failed."
+[[ -n $machine_lines ]] || fail "Add the line machine: aws-ec2 to $forager_yaml. The file has no machine key."
+[[ $machine_lines != *$'\n'* ]] || fail "Keep one machine line in $forager_yaml. The file has more than one."
+machine=${machine_lines#=}
+machine=${machine%%#*}
+machine=${machine%"${machine##*[![:space:]]}"}
+if [[ $machine =~ ^\"(.*)\"$ || $machine =~ ^\'(.*)\'$ ]]; then
+	machine=${BASH_REMATCH[1]}
+fi
+case $machine in
+aws-ec2)
+	# IMDSv2: a token from a PUT, then the user data with that token. The retries cover
+	# the seconds after boot before the metadata service accepts connections.
+	curl_options=(--silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5)
+	token=$(curl "${curl_options[@]}" -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+		http://169.254.169.254/latest/api/token 2>/dev/null) ||
+		fail "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."
+	# The token reaches curl on stdin, so it is no argument.
+	data=$(printf 'X-aws-ec2-metadata-token: %s\n' "$token" |
+		curl "${curl_options[@]}" -H @- http://169.254.169.254/latest/user-data 2>/dev/null) ||
+		fail "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."
+	unset token
+	;;
+*)
+	fail "Set machine: aws-ec2 in $forager_yaml. This script reads start data only for aws-ec2, and the file sets machine to $(printf '%q' "$machine")."
+	;;
+esac
+
+# Valid start data has no backslash. An escape such as \u0073 in a member name would
+# give jq a member that the text checks below do not count.
+if [[ $data == *'\'* ]]; then
+	problem=escape
+else
+	# The values are printable ASCII without spaces once this check passes, so each one
+	# below comes out of jq whole.
+	problem=$(printf '%s' "$data" | jq -rs '
+		def text: type == "string" and test("\\A[!-~]+\\z");
+		if length != 1 or (.[0] | type) != "object" then "json"
+		else .[0] |
+			if (keys - ["version", "run_code", "gateway", "max_lifetime_minutes"]) != [] then "member"
+			elif .version != 1 then "version"
+			elif (.run_code | text | not) then "run_code"
+			elif (.gateway | type) != "object" then "gateway"
+			elif (.gateway | keys - ["url", "address"]) != [] then "member"
+			elif (.gateway.url | text | not) then "url"
+			elif (.gateway.address | text | not) then "address"
+			elif (.max_lifetime_minutes | type) != "number" then "lifetime"
+			else "ok" end
+		end' 2>/dev/null) || problem=json
+fi
+url=
+address=
+run_code=
+if [[ $problem == ok ]]; then
+	run_code=$(printf '%s' "$data" | jq -rs '.[0].run_code' 2>/dev/null) || problem=json
+	url=$(printf '%s' "$data" | jq -rs '.[0].gateway.url' 2>/dev/null) || problem=json
+	address=$(printf '%s' "$data" | jq -rs '.[0].gateway.address' 2>/dev/null) || problem=json
+fi
+# jq reads 1.0, 1e0 and 01 as the number 1, so the text of the start data must contain
+# "version" once, followed by the integer 1.
+version_text='"version"[[:space:]]*:[[:space:]]*1[[:space:]]*[,}]'
+without_version=${data//\"version\"/}
+if [[ $problem == ok ]] && { ((${#data} - ${#without_version} != 9)) || ! [[ $data =~ $version_text ]]; }; then
+	problem=version
+fi
+# The same holds for max_lifetime_minutes: once, a plain integer, from 15 to 1470.
+lifetime=
+lifetime_text='"max_lifetime_minutes"[[:space:]]*:[[:space:]]*([1-9][0-9]{0,3})[[:space:]]*[,}]'
+without_lifetime=${data//\"max_lifetime_minutes\"/}
+if [[ $problem == ok ]]; then
+	if ((${#data} - ${#without_lifetime} == 22)) && [[ $data =~ $lifetime_text ]] &&
+		((10#${BASH_REMATCH[1]} >= 15 && 10#${BASH_REMATCH[1]} <= 1470)); then
+		lifetime=${BASH_REMATCH[1]}
+	else
+		problem=lifetime
+	fi
+fi
+unset data without_version without_lifetime
+if [[ $problem == ok ]] && ! [[ $run_code =~ ^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$ ]]; then
+	problem=run_code
+fi
+url_host=
+url_port=
+if [[ $problem == ok ]]; then
+	if [[ $url =~ ^https://([^:/]+)(:([1-9][0-9]{0,4}))?$ ]]; then
+		url_host=${BASH_REMATCH[1]}
+		url_port=${BASH_REMATCH[3]:-443}
+		if ! is_hostname "$url_host" || ((url_port > 65535)); then
+			problem=url
+		fi
+	else
+		problem=url
+	fi
+fi
+if [[ $problem == ok ]] && ! is_ipv4 "$address" && ! is_ipv6 "$address"; then
+	problem=address
+fi
+case $problem in
+ok) ;;
+json) fail "Launch this machine with start data that is one JSON object. The user data is not one JSON object." ;;
+escape) fail "Write the start data without a backslash. Valid start data has no escape sequence, and the user data contains a backslash." ;;
+member) fail "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address." ;;
+version) fail "Set version to 1 in the start data. This script reads only start data version 1." ;;
+lifetime) fail "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer." ;;
+run_code) fail "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>." ;;
+gateway) fail "Set gateway in the start data to an object with url and address. The gateway value is not an object." ;;
+url) fail "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid." ;;
+address) fail "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address." ;;
+esac
+
+# 2. Drop every packet to the instance metadata service, from this machine and from its
+# containers. The raw table runs before the nat and filter tables that Docker writes, and
+# these rules go in before docker.service starts.
+for chain in PREROUTING OUTPUT; do
+	iptables -w -t raw -I "$chain" -d 169.254.169.254 -j DROP 2>/dev/null ||
+		fail "Check that iptables can add rules to the raw table on this machine image. Adding the $chain rule that drops packets to 169.254.169.254 failed."
+	ip6tables -w -t raw -I "$chain" -d fd00:ec2::254 -j DROP 2>/dev/null ||
+		fail "Check that ip6tables can add rules to the raw table on this machine image. Adding the $chain rule that drops packets to fd00:ec2::254 failed."
+done
+
+# 3. The gateway's host name resolves to the address in the start data.
+printf '%s %s\n' "$address" "$url_host" 2>/dev/null >>"$hosts" ||
+	fail "Check that root can write $hosts. Appending the gateway's line failed."
+
+# The machine powers off max_lifetime_minutes after this step, whatever runs on it.
+shutdown -P "+$lifetime" >/dev/null 2>&1 ||
+	fail "Check that shutdown -P can schedule a power-off on this machine image. Scheduling the power-off in $lifetime minutes failed."
+
+# 4. The engine proxy: the Docker daemon pulls through 127.0.0.1:3129 with a password of
+# 32 random bytes, and qory reads the same address and password from engine-proxy.json.
+password=$(head -c 32 "$urandom" 2>/dev/null | base64 2>/dev/null | tr -d '\n=' | tr '+/' '-_') ||
+	fail "Check that root can read $urandom. Making the engine proxy password failed."
+[[ ${#password} -eq 43 ]] || fail "Check that root can read $urandom. Making the engine proxy password failed."
+
+mkdir -p -m 0755 "$docker_dir" 2>/dev/null || fail "Check that root can write $docker_dir. Making the folder failed."
+# The new daemon.json keeps every member of the image's daemon.json and replaces
+# proxies. The password and the old content reach jq on stdin, in that order.
+daemon_base=
+if [[ -e $daemon_json ]]; then
+	{ daemon_base=$(<"$daemon_json"); } 2>/dev/null || fail "Check that root can read $daemon_json. Reading it failed."
+fi
+rm -f -- "$daemon_json" 2>/dev/null || fail "Check that root can write $docker_dir. Removing the old $daemon_json failed."
+: 2>/dev/null >"$daemon_json" || fail "Check that root can write $docker_dir. Writing $daemon_json failed."
+{ printf '%s\n' "$password"; printf '%s' "$daemon_base"; } | jq -nR '
+	input as $password |
+	([inputs] | join("\n")) as $base |
+	(if ($base | test("\\A\\s*\\z")) then {} else ($base | fromjson) end) |
+	if type != "object" then error("not an object") else . end |
+	.proxies = {
+		"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),
+		"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),
+		"no-proxy": "localhost,127.0.0.1"
+	}' 2>/dev/null >"$daemon_json" ||
+	fail "Make $daemon_json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."
+chmod 0600 "$daemon_json" 2>/dev/null || fail "Check that root can write $docker_dir. Setting $daemon_json to mode 0600 failed."
+
+mkdir -p -m 0755 "$qory_dir" 2>/dev/null || fail "Check that root can write $qory_dir. Making the folder failed."
+rm -f -- "$engine_proxy_json" 2>/dev/null || fail "Check that root can write $qory_dir. Removing the old $engine_proxy_json failed."
+printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||
+	fail "Check that root can write $qory_dir. Writing $engine_proxy_json failed."
+unset password
+chown qory "$engine_proxy_json" 2>/dev/null || fail "Add the user qory to the machine image. Giving $engine_proxy_json to qory failed."
+chmod 0400 "$engine_proxy_json" 2>/dev/null || fail "Check that root can write $qory_dir. Setting $engine_proxy_json to mode 0400 failed."
+
+mkdir -p -m 0755 "$certs_dir" 2>/dev/null || fail "Check that root can write $docker_dir. Making $certs_dir failed."
+chown -R qory "$certs_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $certs_dir to qory failed."
+
+# docker.service waits for this unit (Before=docker.service in qory-machine.service), so
+# the Docker daemon reads the engine proxy from daemon.json when it first starts and
+# needs no restart. READY ends that wait (Type=notify, NotifyAccess=all), and
+# systemctl start then waits until docker.service is up, before qory runs.
+systemd-notify --ready 2>/dev/null || fail "Run this script from qory-machine.service, which has Type=notify. Sending READY to systemd failed."
+systemctl start docker.service 2>/dev/null || fail "Read the journal of docker.service for the cause. Starting docker.service failed."
+# qory and its children inherit no NOTIFY_SOCKET.
+unset NOTIFY_SOCKET
+
+# 5. The run code, for qory only. The folder is given to qory after the file is written.
+mkdir -p -m 0700 "$run_code_dir" 2>/dev/null || fail "Check that root can write $root/run. Making $run_code_dir failed."
+printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."
+unset run_code
+chmod 0600 "$run_code_file" 2>/dev/null || fail "Check that root can write $run_code_dir. Setting $run_code_file to mode 0600 failed."
+chown qory "$run_code_file" "$run_code_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $run_code_dir and $run_code_file to qory failed."
+
+# 6. The run. Its exit powers the machine off, through on_exit.
+status=0
+HOME=$home runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" || status=$?
+if ((status != 0)); then
+	printf '%s\n' "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status $status." >&2
+	exit "$status"
+fi

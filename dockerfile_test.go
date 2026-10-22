@@ -39,8 +39,9 @@ func stages(t *testing.T) []stage {
 // TestDockerfileBuildsTheProvisioner pins the Dockerfile's two stages. The build stage
 // runs on the platform of the machine that builds and cross-compiles the program for
 // the image's platform, so one build makes the images of linux/amd64 and linux/arm64.
-// The image, the last stage, is on the pinned distroless base, runs as 65532:65532,
-// keeps its state directory in a volume, turns off IMDSv1 for an AWS SDK, and runs
+// The image, the last stage, is on the pinned distroless base, contains the machine's
+// start unit at /usr/share/qory-provisioner/machine/, runs as 65532:65532, keeps its
+// state directory in a volume, turns off IMDSv1 for an AWS SDK, and runs
 // qory-provisioner serve.
 func TestDockerfileBuildsTheProvisioner(t *testing.T) {
 	all := stages(t)
@@ -70,6 +71,8 @@ func TestDockerfileBuildsTheProvisioner(t *testing.T) {
 		}},
 		{"image", image, []string{
 			"COPY --from=build /out/qory-provisioner /qory-provisioner",
+			"COPY --chmod=0644 machine/qory-machine.service /usr/share/qory-provisioner/machine/qory-machine.service",
+			"COPY --chmod=0755 machine/qory-machine-start /usr/share/qory-provisioner/machine/qory-machine-start",
 			"COPY --from=build --chown=65532:65532 /out/var/lib/ /var/lib/",
 			`VOLUME ["/var/lib/qory-provisioner"]`,
 			"ENV AWS_EC2_METADATA_V1_DISABLED=true",
