@@ -88,8 +88,8 @@ type Machine struct {
 	ID string
 	// State is one of the State constants.
 	State string
-	// Key and PoolID are the values of the qory:key and qory:pool tags.
-	Key, PoolID string
+	// Key is the value of the qory:key tag.
+	Key string
 	// LaunchTime is the time EC2 started the instance; zero when EC2 returned none.
 	LaunchTime time.Time
 }
@@ -104,10 +104,7 @@ func fromInstance(in types.Instance) Machine {
 		m.State = string(in.State.Name)
 	}
 	for _, t := range in.Tags {
-		switch aws.ToString(t.Key) {
-		case TagPool:
-			m.PoolID = aws.ToString(t.Value)
-		case TagKey:
+		if aws.ToString(t.Key) == TagKey {
 			m.Key = aws.ToString(t.Value)
 		}
 	}

@@ -85,10 +85,28 @@ func (c *Client) Terminate(ctx context.Context, id string) (string, bool, error)
 	return "", true, nil
 }
 
+// CheckListRights sends DescribeInstances with DryRun set, so EC2 checks the instance
+// role's right to list machines. It returns nil when EC2 returns DryRunOperation.
+func (c *Client) CheckListRights(ctx context.Context) error {
+	_, err := c.api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{DryRun: aws.Bool(true)})
+	switch {
+	case err == nil:
+		return other("Check the EC2 endpoint: a DescribeInstances dry run returned success, and EC2 returns DryRunOperation for a dry run")
+	case errorCode(err) == codeDryRun:
+		return nil
+	}
+	return wrap("DescribeInstances dry run", err)
+}
+
 // Console returns the machine's latest console output as text, or "" when EC2 has
-// none.
+// none. EC2 returns the latest output only for an instance on the Nitro system; for
+// any other instance it returns UnsupportedOperation, and Console reads the output
+// again without Latest.
 func (c *Client) Console(ctx context.Context, id string) (string, error) {
 	out, err := c.api.GetConsoleOutput(ctx, &ec2.GetConsoleOutputInput{InstanceId: aws.String(id), Latest: aws.Bool(true)})
+	if errorCode(err) == codeUnsupported {
+		out, err = c.api.GetConsoleOutput(ctx, &ec2.GetConsoleOutputInput{InstanceId: aws.String(id)})
+	}
 	if err != nil {
 		return "", wrap("GetConsoleOutput", err)
 	}

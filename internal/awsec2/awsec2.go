@@ -61,8 +61,10 @@ func loadClient(ctx context.Context) (*machine.Client, error) {
 }
 
 // Check reads the settings, checks the credentials, reads the image's root device,
-// and sends one RunInstances dry run for each instance type of sizes, in sorted order
-// and each type once. It makes no machine.
+// sends one RunInstances dry run for each instance type of sizes, in sorted order and
+// each type once, and sends one DescribeInstances dry run, the call of list. It makes
+// no machine. It checks no right of TerminateInstances or GetConsoleOutput, because
+// their calls need the id of an instance that exists.
 func (h *Handler) Check(ctx context.Context, path string, _ machines.CheckRequest) (machines.CheckAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
@@ -81,6 +83,9 @@ func (h *Handler) Check(ctx context.Context, path string, _ machines.CheckReques
 		if err := c.CheckRights(ctx, spec(s, t, root, checkPool, checkKey, nil)); err != nil {
 			return machines.CheckAnswer{}, failure(err)
 		}
+	}
+	if err := c.CheckListRights(ctx); err != nil {
+		return machines.CheckAnswer{}, failure(err)
 	}
 	return machines.CheckAnswer{}, nil
 }

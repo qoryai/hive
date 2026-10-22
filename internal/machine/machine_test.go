@@ -61,7 +61,7 @@ func TestCreateInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, Key: spec.Key, PoolID: spec.PoolID, LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
+	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, Key: spec.Key, LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
 	if m != want {
 		t.Errorf("machine %+v, want %+v", m, want)
 	}
@@ -208,6 +208,7 @@ func TestCreateErrorKinds(t *testing.T) {
 		{apiError("InstanceLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
 		{apiError("VcpuLimitExceeded"), machines.KindLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, machines.KindLimit, "Wait, or map the size to another instance type in the EC2 adapter's settings file aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity, because EC2 has no capacity for the instance type in the subnet's availability zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
+		{apiError("InsufficientFreeAddressesInSubnet"), machines.KindLimit, "Wait until machines end, or set subnet_id in the EC2 adapter's settings file aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
 		{apiError("IdempotentParameterMismatch"), machines.KindDefect, "Report this defect in the provisioner, unless the EC2 adapter's settings file aws-ec2.json changed after the first make for this key: RunInstances was sent twice for one key with different parameters, and EC2 returned IdempotentParameterMismatch: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
 		{apiError("IdempotentInstanceTerminated"), machines.KindOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
 		{apiError("RequestLimitExceeded"), machines.KindRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: RunInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
@@ -244,6 +245,7 @@ func TestClassify(t *testing.T) {
 	cases := map[error]machines.Kind{
 		apiError("VcpuLimitExceeded"):                                machines.KindLimit,
 		apiError("InsufficientInstanceCapacity"):                     machines.KindLimit,
+		apiError("InsufficientFreeAddressesInSubnet"):                machines.KindLimit,
 		fmt.Errorf("x: %w", apiError("IdempotentParameterMismatch")): machines.KindDefect,
 		apiError("EC2ThrottledException"):                            machines.KindRetry,
 		apiError("RequestTimeout"):                                   machines.KindRetry,
@@ -314,6 +316,35 @@ func TestCheckRights(t *testing.T) {
 	n := len(f.runs)
 	if err := New(f).CheckRights(context.Background(), spec); err == nil || len(f.runs) != n {
 		t.Errorf("an empty pool id: error %v, %d calls", err, len(f.runs)-n)
+	}
+}
+
+// TestCheckListRights pins the DescribeInstances dry run's input and its outcomes.
+func TestCheckListRights(t *testing.T) {
+	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return nil, apiError("DryRunOperation")
+	}}
+	if err := New(f).CheckListRights(context.Background()); err != nil {
+		t.Fatalf("DryRunOperation: %v", err)
+	}
+	if want := (&ec2.DescribeInstancesInput{DryRun: aws.Bool(true)}); !reflect.DeepEqual(f.describes[0], want) {
+		t.Errorf("input %+v, want %+v", f.describes[0], want)
+	}
+
+	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return nil, apiError("UnauthorizedOperation")
+	}
+	err := New(f).CheckListRights(context.Background())
+	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
+	if err == nil || err.Error() != wantDenied || kindOf(err) != machines.KindDefect {
+		t.Errorf("UnauthorizedOperation: error %v, want %q of kind defect", err, wantDenied)
+	}
+
+	f.describe = nil
+	err = New(f).CheckListRights(context.Background())
+	const wantSuccess = "Check the EC2 endpoint: a DescribeInstances dry run returned success, and EC2 returns DryRunOperation for a dry run"
+	if err == nil || err.Error() != wantSuccess || kindOf(err) != machines.KindOther {
+		t.Errorf("success: error %v, want %q of kind other", err, wantSuccess)
 	}
 }
 
@@ -495,8 +526,44 @@ func TestConsole(t *testing.T) {
 	f.console = func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
 		return nil, apiError("InvalidInstanceID.NotFound")
 	}
+	if _, err := c.Console(context.Background(), id); len(f.consoles) != 4 {
+		t.Errorf("NotFound: %d calls in all, want 4 with no second call, error %v", len(f.consoles), err)
+	}
 	if _, err := c.Console(context.Background(), id); errorCode(err) != "InvalidInstanceID.NotFound" || kindOf(err) != machines.KindOther {
 		t.Errorf("error %v, want kind other", err)
+	}
+}
+
+// TestConsoleNotNitro pins that Console reads the output again without Latest when
+// EC2 returns UnsupportedOperation for Latest, and the error when that call fails too.
+func TestConsoleNotNitro(t *testing.T) {
+	const text = "boot on a Xen instance\n"
+	f := &fakeAPI{console: func(in *ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+		if aws.ToBool(in.Latest) {
+			return nil, apiError("UnsupportedOperation")
+		}
+		return &ec2.GetConsoleOutputOutput{Output: aws.String(base64.StdEncoding.EncodeToString([]byte(text)))}, nil
+	}}
+	c := New(f)
+	const id = "i-0123456789abcdef0"
+	got, err := c.Console(context.Background(), id)
+	if err != nil || got != text {
+		t.Errorf("text %q, error %v", got, err)
+	}
+	want := []*ec2.GetConsoleOutputInput{
+		{InstanceId: aws.String(id), Latest: aws.Bool(true)},
+		{InstanceId: aws.String(id)},
+	}
+	if !reflect.DeepEqual(f.consoles, want) {
+		t.Errorf("inputs %+v, want %+v", f.consoles, want)
+	}
+
+	f.console = func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+		return nil, apiError("UnsupportedOperation")
+	}
+	_, err = c.Console(context.Background(), id)
+	if errorCode(err) != "UnsupportedOperation" || kindOf(err) != machines.KindDefect || len(f.consoles) != 4 {
+		t.Errorf("error %v, %d calls in all, want UnsupportedOperation of kind defect after 4 calls", err, len(f.consoles))
 	}
 }
 

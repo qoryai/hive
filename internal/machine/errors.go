@@ -18,6 +18,8 @@ const (
 	codeInstanceLimit      = "InstanceLimitExceeded"
 	codeVcpuLimit          = "VcpuLimitExceeded"
 	codeCapacity           = "InsufficientInstanceCapacity"
+	codeSubnetFull         = "InsufficientFreeAddressesInSubnet"
+	codeUnsupported        = "UnsupportedOperation"
 	codeTokenMismatch      = "IdempotentParameterMismatch"
 	codeTokenTerminated    = "IdempotentInstanceTerminated"
 	codeDryRun             = "DryRunOperation"
@@ -48,6 +50,8 @@ func (e *Error) Error() string {
 	switch {
 	case e.Code == codeCapacity:
 		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s, because EC2 has no capacity for the instance type in the subnet's availability zone: %v", settingsFile, e.Op, e.Code, e.Err)
+	case e.Code == codeSubnetFull:
+		return fmt.Sprintf("Wait until machines end, or set subnet_id in %s to a subnet with free addresses: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Kind == machines.KindLimit:
 		return fmt.Sprintf("Wait until machines end, or raise the account's EC2 instance or vCPU quota: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code == codeUnauthorized:
@@ -82,7 +86,7 @@ func (e *Error) Unwrap() error { return e.Err }
 func classify(err error) machines.Kind {
 	code := errorCode(err)
 	switch {
-	case code == codeInstanceLimit || code == codeVcpuLimit || code == codeCapacity:
+	case code == codeInstanceLimit || code == codeVcpuLimit || code == codeCapacity || code == codeSubnetFull:
 		return machines.KindLimit
 	case defectCode(code):
 		return machines.KindDefect

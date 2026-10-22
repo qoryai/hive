@@ -81,7 +81,13 @@ func launched(id, state, key string) types.Instance {
 // run for each instance type of sizes, in order, with placeholder tags in the shapes
 // of a pool id and a key, and no machine made.
 func TestCheck(t *testing.T) {
-	f := &fakeAPI{image: image, run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, apiError("DryRunOperation") }}
+	f := &fakeAPI{
+		image: image,
+		run:   func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) { return nil, apiError("DryRunOperation") },
+		describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+			return nil, apiError("DryRunOperation")
+		},
+	}
 	h, _, _ := testHandler(f)
 	path := writeSettings(t, `{"subnet_id": "subnet-0123456789abcdef0", "security_group_id": "sg-0123456789abcdef0", "image_id": "ami-0123456789abcdef0",
 		"sizes": {"standard": "t3.medium", "large": "m7g.large", "medium": "t3.medium"}}`)
@@ -112,6 +118,18 @@ func TestCheck(t *testing.T) {
 	if want := []string{"m7g.large", "t3.medium"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("dry runs for %v, want %v", got, want)
 	}
+	if want := []*ec2.DescribeInstancesInput{{DryRun: aws.Bool(true)}}; !reflect.DeepEqual(f.describes, want) {
+		t.Errorf("DescribeInstances calls %+v, want one dry run", f.describes)
+	}
+	if len(f.kills) != 0 || len(f.consoles) != 0 {
+		t.Errorf("%d TerminateInstances and %d GetConsoleOutput calls, want none", len(f.kills), len(f.consoles))
+	}
+
+	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+		return nil, apiError("UnauthorizedOperation")
+	}
+	status, out = serve(t, h, "check", path, `{"version": 1}`)
+	wantFailure(t, status, out, machines.KindDefect, "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstances dry run failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation")
 
 	f.run = func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return nil, apiError("UnauthorizedOperation")
@@ -257,6 +275,7 @@ func TestMakeErrorKinds(t *testing.T) {
 	}{
 		{apiError("InstanceLimitExceeded"), machines.KindLimit},
 		{apiError("VcpuLimitExceeded"), machines.KindLimit},
+		{apiError("InsufficientFreeAddressesInSubnet"), machines.KindLimit},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, machines.KindLimit},
 		{apiError("RequestLimitExceeded"), machines.KindRetry},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, machines.KindRetry},
@@ -364,6 +383,28 @@ func TestLog(t *testing.T) {
 	}
 	status, out = serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
 	wantFailure(t, status, out, machines.KindOther, "Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return InvalidInstanceID.NotFound for an instance that exists: GetConsoleOutput failed: api error InvalidInstanceID.NotFound: test message for InvalidInstanceID.NotFound")
+}
+
+// TestLogNotNitro pins that log returns the console text of an instance that is not
+// on the Nitro system: GetConsoleOutput with Latest returns UnsupportedOperation, and
+// log reads the output again without Latest.
+func TestLogNotNitro(t *testing.T) {
+	const text = "boot on a Xen instance\n"
+	f := &fakeAPI{console: func(in *ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error) {
+		if aws.ToBool(in.Latest) {
+			return nil, apiError("UnsupportedOperation")
+		}
+		return &ec2.GetConsoleOutputOutput{Output: aws.String(base64.StdEncoding.EncodeToString([]byte(text)))}, nil
+	}}
+	h, _, _ := testHandler(f)
+	status, out := serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
+	a, err := machines.DecodeLogAnswer([]byte(strings.TrimSuffix(out, "\n")))
+	if status != machines.ExitOK || err != nil || a.Log != text {
+		t.Fatalf("exit status %d, output %q, error %v", status, out, err)
+	}
+	if len(f.consoles) != 2 || f.consoles[1].Latest != nil {
+		t.Errorf("inputs %+v, want a second call without Latest", f.consoles)
+	}
 }
 
 // TestLogLastPart pins that log keeps the last 768 KiB of a longer console text,

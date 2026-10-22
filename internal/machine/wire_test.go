@@ -151,7 +151,7 @@ func TestWireCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.Key != testSpec().Key || m.PoolID != testSpec().PoolID {
+	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.Key != testSpec().Key {
 		t.Errorf("machine %+v", m)
 	}
 	want := wantRunForm()
@@ -240,6 +240,18 @@ func TestWireCheckRights(t *testing.T) {
 	const prefix = "Give the instance role the EC2 rights that the EC2 machine adapter needs: RunInstances dry run failed with UnauthorizedOperation: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) {
 		t.Errorf("error %v, want the prefix %q", err, prefix)
+	}
+}
+
+// TestWireCheckListRights pins the DescribeInstances dry run on the wire.
+func TestWireCheckListRights(t *testing.T) {
+	c, s := newWireClient(t, reply{412, errorXML("DryRunOperation")})
+	if err := c.CheckListRights(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := url.Values{"Action": {"DescribeInstances"}, "Version": {"2016-11-15"}, "DryRun": {"true"}}
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
 	}
 }
 
