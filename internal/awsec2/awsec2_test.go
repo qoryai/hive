@@ -147,7 +147,7 @@ func TestCheckStopsEarly(t *testing.T) {
 	f := &fakeAPI{}
 	h, _, built := testHandler(f)
 	status, out := serve(t, h, "check", writeSettings(t, `{}`), `{"version": 1}`)
-	wantFailure(t, status, out, contracts.FailureDefect, "Add the missing members to the EC2 adapter's settings file aws-ec2.json: subnet_id, security_group_id, image_id, sizes.")
+	wantFailure(t, status, out, contracts.FailureDefect, "Add the missing members to aws-ec2.json: subnet_id, security_group_id, image_id, sizes.")
 	if *built != 0 || f.calls() != 0 {
 		t.Errorf("%d clients built and %d EC2 calls, want none", *built, f.calls())
 	}
@@ -166,7 +166,7 @@ func TestCheckStopsEarly(t *testing.T) {
 	}
 	h, _, _ = testHandler(f)
 	status, out = serve(t, h, "check", writeSettings(t, validSettings), `{"version": 1}`)
-	wantFailure(t, status, out, contracts.FailureDefect, "Set image_id in the EC2 adapter's settings file aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound")
+	wantFailure(t, status, out, contracts.FailureDefect, "Set image_id in aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound")
 	if len(f.runs) != 0 {
 		t.Errorf("%d RunInstances calls, want none", len(f.runs))
 	}
@@ -229,7 +229,7 @@ func TestMakeUnknownSize(t *testing.T) {
 	f := &fakeAPI{}
 	h, _, built := testHandler(f)
 	status, out := serve(t, h, "make", writeSettings(t, validSettings), makeRequest("huge", []byte("x")))
-	wantFailure(t, status, out, contracts.FailureDefect, "Add the size huge to sizes in the EC2 adapter's settings file aws-ec2.json: the make request has a size that sizes does not contain")
+	wantFailure(t, status, out, contracts.FailureDefect, "Add the size huge to sizes in aws-ec2.json: the make request has a size that sizes does not contain")
 	if *built != 0 || f.calls() != 0 {
 		t.Errorf("%d clients built and %d EC2 calls, want none", *built, f.calls())
 	}
@@ -409,7 +409,7 @@ func TestLog(t *testing.T) {
 		return nil, apiError("InvalidInstanceID.NotFound")
 	}
 	status, out = serve(t, h, "log", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	wantFailure(t, status, out, contracts.FailureOther, "Check that EC2 has an instance with this id in this region; right after RunInstances, EC2 can return InvalidInstanceID.NotFound for an instance that exists: GetConsoleOutput failed: api error InvalidInstanceID.NotFound: test message for InvalidInstanceID.NotFound")
+	wantFailure(t, status, out, contracts.FailureOther, "Check that the instance exists in this region: GetConsoleOutput failed with InvalidInstanceID.NotFound, which EC2 can return right after RunInstances: api error InvalidInstanceID.NotFound: test message for InvalidInstanceID.NotFound")
 }
 
 // TestLogNotNitro pins that log returns the console text of an instance that is not
@@ -502,7 +502,7 @@ func TestDelete(t *testing.T) {
 
 	reply, replyErr = nil, apiError("RequestLimitExceeded")
 	status, out := serve(t, h, "delete", "/nonexistent/aws-ec2.json", `{"version": 1, "id": "`+testID+`"}`)
-	wantFailure(t, status, out, contracts.FailureRetry, "If this repeats, check EC2's service health in this region and the account's EC2 request rate: TerminateInstances failed with an error that the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded")
+	wantFailure(t, status, out, contracts.FailureRetry, "If this repeats, check EC2's service health and the account's request rate in this region: TerminateInstances failed with an error the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded")
 }
 
 // TestFailure pins the conversion of each kind of error to the error document.

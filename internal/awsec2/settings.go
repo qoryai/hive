@@ -44,7 +44,7 @@ const maxFile = 64 << 10
 const maxSizes = 20
 
 // settingsFile is how an error refers to the adapter's settings file.
-const settingsFile = "the EC2 adapter's settings file aws-ec2.json"
+const settingsFile = "aws-ec2.json"
 
 // The rule of each member, which the error of a wrong value states. An error never
 // quotes a value.
@@ -52,7 +52,7 @@ var rules = map[string]string{
 	"subnet_id":         "subnet- and 8 or 17 lower-case hexadecimal digits",
 	"security_group_id": "sg- and 8 or 17 lower-case hexadecimal digits",
 	"image_id":          "ami- and 8 or 17 lower-case hexadecimal digits",
-	"sizes":             "an object of 1 to 20 members, each a size name of 1 to 40 lower-case letters, digits and dashes that starts with a letter, set to an EC2 instance type such as t3.medium",
+	"sizes":             "an object of 1 to 20 members, each a size name of 1 to 40 characters of a-z, 0-9 and - that starts with a letter, set to an EC2 instance type such as t3.medium",
 }
 
 var (
@@ -84,16 +84,22 @@ func ReadSettings(path string) (Settings, error) {
 
 // fileError is the error of opening or reading the settings file, op, that failed
 // with err: a missing file is to be created, a permission error is to be fixed for the
-// uid the adapter runs as, and any other error is given with its operation. The error
-// of the operating system contains the file's path.
+// uid the adapter runs as, and any other error is given with its operation. The file's
+// path from a *fs.PathError comes last, so the cut of a long message to
+// adapterio.MaxMessage characters removes the end of the path, not the cause.
 func fileError(err error, op string) error {
+	cause, path := err, ""
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		cause, path = pathErr.Err, ": "+pathErr.Path
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return settingsError(fmt.Sprintf("Create %s at the path in the provisioner's adapter.settings: %v", settingsFile, err))
+		return settingsError(fmt.Sprintf("Create %s at the path in the provisioner's adapter.settings: %s it failed: %v%s", settingsFile, op, cause, path))
 	case errors.Is(err, fs.ErrPermission):
-		return settingsError(fmt.Sprintf("Make %s readable by uid %d: %v", settingsFile, os.Geteuid(), err))
+		return settingsError(fmt.Sprintf("Make %s readable by uid %d: %s it failed: %v%s", settingsFile, os.Geteuid(), op, cause, path))
 	}
-	return settingsError(fmt.Sprintf("Fix %s: %s it failed: %v", settingsFile, op, err))
+	return settingsError(fmt.Sprintf("Fix %s: %s it failed: %v%s", settingsFile, op, cause, path))
 }
 
 // ParseSettings reads the settings document b: one JSON object, each member once,

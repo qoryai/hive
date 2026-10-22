@@ -69,7 +69,7 @@ func TestParseSettings(t *testing.T) {
 // marker in a place that the error would quote.
 func TestParseSettingsErrors(t *testing.T) {
 	const marker = "qecr_marker7f3a"
-	const file = "the EC2 adapter's settings file aws-ec2.json"
+	const file = "aws-ec2.json"
 	member := func(name, value string) string {
 		doc := map[string]string{
 			"subnet_id":         `"subnet-0123456789abcdef0"`,
@@ -87,7 +87,7 @@ func TestParseSettingsErrors(t *testing.T) {
 	subnetRule := "Set subnet_id in " + file + " to subnet- and 8 or 17 lower-case hexadecimal digits."
 	sgRule := "Set security_group_id in " + file + " to sg- and 8 or 17 lower-case hexadecimal digits."
 	imageRule := "Set image_id in " + file + " to ami- and 8 or 17 lower-case hexadecimal digits."
-	sizesRule := "Set sizes in " + file + " to an object of 1 to 20 members, each a size name of 1 to 40 lower-case letters, digits and dashes that starts with a letter, set to an EC2 instance type such as t3.medium."
+	sizesRule := "Set sizes in " + file + " to an object of 1 to 20 members, each a size name of 1 to 40 characters of a-z, 0-9 and - that starts with a letter, set to an EC2 instance type such as t3.medium."
 	cases := []struct {
 		doc  string
 		want string
@@ -148,7 +148,7 @@ func TestParseSettingsErrors(t *testing.T) {
 func TestReadSettingsFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "aws-ec2.json")
 	_, err := ReadSettings(missing)
-	want := "Create the EC2 adapter's settings file aws-ec2.json at the path in the provisioner's adapter.settings: open " + missing + ": no such file or directory"
+	want := "Create aws-ec2.json at the path in the provisioner's adapter.settings: opening it failed: no such file or directory: " + missing
 	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("missing file: error %v, want %q of kind defect", err, want)
 	}
@@ -158,7 +158,7 @@ func TestReadSettingsFile(t *testing.T) {
 		t.Errorf("64 KiB: %v", err)
 	}
 	_, err = ReadSettings(writeSettings(t, big+" "))
-	const wantBig = "Shorten the EC2 adapter's settings file aws-ec2.json to at most 64 KiB."
+	const wantBig = "Shorten aws-ec2.json to at most 64 KiB."
 	if err == nil || err.Error() != wantBig || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("64 KiB and 1 byte: error %v, want %q of kind defect", err, wantBig)
 	}
@@ -169,7 +169,7 @@ func TestReadSettingsFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = ReadSettings(locked)
-		wantLocked := fmt.Sprintf("Make the EC2 adapter's settings file aws-ec2.json readable by uid %d: open %s: permission denied", os.Geteuid(), locked)
+		wantLocked := fmt.Sprintf("Make aws-ec2.json readable by uid %d: opening it failed: permission denied: %s", os.Geteuid(), locked)
 		if err == nil || err.Error() != wantLocked || kindOf(err) != contracts.FailureDefect {
 			t.Errorf("unreadable file: error %v, want %q of kind defect", err, wantLocked)
 		}
@@ -177,7 +177,7 @@ func TestReadSettingsFile(t *testing.T) {
 
 	dir := t.TempDir()
 	_, err = ReadSettings(dir)
-	const prefix = "Fix the EC2 adapter's settings file aws-ec2.json: reading it failed: "
+	const prefix = "Fix aws-ec2.json: reading it failed: "
 	if err == nil || !strings.HasPrefix(err.Error(), prefix) || kindOf(err) != contracts.FailureDefect {
 		t.Errorf("a folder: error %v, want the prefix %q of kind defect", err, prefix)
 	}

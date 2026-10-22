@@ -74,6 +74,18 @@ const (
 	reasonCABundle    = "the EC2 machine adapter checks the EC2 endpoint's certificate only against the host's certificate authorities"
 )
 
+// The messages of LoadConfig's errors after the refused variables. A message that
+// ends with ": " is followed by the SDK's error.
+const (
+	msgReadEnv     = "Fix the AWS variables in the EC2 machine adapter's environment: reading them failed: "
+	msgRegion      = "Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: "
+	msgLoad        = "Fix the AWS variables in the EC2 machine adapter's environment: loading the AWS configuration failed: "
+	msgNoRegion    = "Set AWS_REGION: the environment has no region, and the instance metadata returned none"
+	msgEndpoint    = "Report this defect in the EC2 machine adapter: its AWS configuration has an EC2 endpoint, and the adapter calls EC2 only at its standard endpoint"
+	msgCredentials = "Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: "
+	msgSource      = "Report this defect in the EC2 machine adapter: its AWS credentials came from %s, not %s"
+)
+
 // refusedVariables are the AWS SDK's environment variables that select another
 // credential source, an AWS config or credentials file, another address of the
 // instance metadata service, another EC2 endpoint or another certificate authority.
@@ -130,14 +142,14 @@ func LoadConfig(ctx context.Context) (aws.Config, error) {
 	}
 	env, err := config.NewEnvConfig()
 	if err != nil {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Fix the AWS variables in the EC2 machine adapter's environment: reading them failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: msgReadEnv + err.Error()}
 	}
 	meta := metadataClient(env)
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
 		out, err := meta.GetRegion(ctx, nil)
 		if err != nil {
-			return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Set AWS_REGION, or run the EC2 machine adapter on an EC2 instance with IMDSv2 reachable: loading the AWS configuration failed: %v", err)}
+			return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: msgRegion + err.Error()}
 		}
 		region = out.Region
 	}
@@ -149,20 +161,20 @@ func LoadConfig(ctx context.Context) (aws.Config, error) {
 		config.WithCredentialsProvider(ec2rolecreds.New(func(o *ec2rolecreds.Options) { o.Client = meta })),
 	)
 	if err != nil {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Fix the AWS variables in the EC2 machine adapter's environment: loading the AWS configuration failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: msgLoad + err.Error()}
 	}
 	if cfg.Region == "" {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Set AWS_REGION: the environment has no region, and the instance metadata returned none"}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: msgNoRegion}
 	}
 	if cfg.BaseEndpoint != nil {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Report this defect in the EC2 machine adapter: its AWS configuration has an EC2 endpoint, and the adapter calls EC2 only at its standard endpoint"}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: msgEndpoint}
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: fmt.Sprintf("Attach an instance role to the host, and run the EC2 machine adapter with IMDSv2 reachable: retrieving the AWS credentials failed: %v", err)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureOther, Message: msgCredentials + err.Error()}
 	}
 	if creds.Source != ec2rolecreds.ProviderName {
-		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Report this defect in the EC2 machine adapter: its AWS credentials came from %s, not %s", creds.Source, ec2rolecreds.ProviderName)}
+		return aws.Config{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf(msgSource, creds.Source, ec2rolecreds.ProviderName)}
 	}
 	return cfg, nil
 }
