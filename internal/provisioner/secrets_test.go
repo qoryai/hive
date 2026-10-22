@@ -67,7 +67,7 @@ func TestNoSecretLeaks(t *testing.T) {
 	}
 
 	for _, edit := range []func(map[string]any){
-		func(d map[string]any) { d["revision"] = 3 },
+		func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
 		func(d map[string]any) { d["extra"] = markerCode },
 		func(d map[string]any) { d["machine"] = markerCode },
 		func(d map[string]any) { d["run_code"] = strings.ToLower(markerCode) },

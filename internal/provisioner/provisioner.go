@@ -1,14 +1,14 @@
 // Package provisioner is the provisioner's client of Qory Apiary's provisioner
-// contract, provisioner/v1, at revision 4: it claims a request for one machine, posts
+// contract, provisioner/v1, at [Revision]: it claims a request for one machine, posts
 // that the machine for a dispatch exists, again every minute while it lives, releases a
 // dispatch before that, and uploads the machine's log.
 //
 // The client signs every request with the node pool's access key as Forager's accesskey
 // signs one, with X-Qory-Access-Key-Id, X-Qory-Instance-Id, X-Qory-Signature-Ed25519 and
-// X-Qory-Contract-Version 4, and checks every body against its schema before it sends
-// it. It reads every answer up to its bound, checks its signature under the pin, then
-// checks it against its schema and its revision, before it uses anything in it. A
-// request's time is the clock's, in whole seconds. A try sent again is built anew with
+// X-Qory-Contract-Version set to [Revision], and checks every body against its schema
+// before it sends it. It reads every answer up to its bound, checks its signature under
+// the pin, then checks it against its schema and its revision, before it uses anything
+// in it. A request's time is the clock's, in whole seconds. A try sent again is built anew with
 // a later time, since Qory Apiary returns 401 to a signature it has seen. The client
 // follows no redirect and keeps no cookie.
 //

@@ -19,7 +19,8 @@ import (
 // signed 204 while the dispatch lives. A refusal is a [*Refusal]: [ErrForbidden], a
 // dispatch that is unknown or of another node pool; [ErrGone], a dispatch that ended,
 // after which the contract requires the provisioner to send the machine log and delete
-// the machine; [ErrLeaseExpired], a first dispatched at or after the lease's end, after
+// the machine; [ErrLeaseExpired], only for the first dispatched of a stale dispatch,
+// sent at or after the lease's end with no redemption of the run code before it, after
 // which the contract requires the provisioner to stop the machine; [ErrNotFound]; or
 // [ErrRateLimited].
 func (c *Client) Dispatched(ctx context.Context, dispatchID string, external *contracts.External) error {
@@ -39,9 +40,9 @@ func (c *Client) Dispatched(ctx context.Context, dispatchID string, external *co
 // signed 204. A refusal is a [*Refusal]: [ErrForbidden], a dispatch that is unknown or
 // of another node pool; [ErrGone], a dispatch that ended, which is also the answer to
 // a try sent again after a release whose 204 was lost, with [Refusal.Resent] set;
-// [ErrLeaseExpired], a dispatch whose lease lapsed before dispatched; [ErrMachineExists],
-// a dispatch after dispatched or after the machine redeemed the run code;
-// [ErrNotFound]; or [ErrRateLimited].
+// [ErrMachineExists], a dispatch after dispatched or after the machine redeemed the run
+// code; [ErrLeaseExpired], a dispatch whose lease lapsed before dispatched or a
+// redemption; [ErrNotFound]; or [ErrRateLimited].
 func (c *Client) Release(ctx context.Context, dispatchID, reason string) error {
 	what, err := ofDispatch("the release of ", dispatchID)
 	if err != nil {
@@ -64,14 +65,15 @@ const hiddenLine = "[hidden: the line contained what looks like an access key se
 // dispatch, from the machine's creation to its end. truncated is whether the caller cut
 // the start of log. Before it sends the log, the client replaces each line that
 // contains what looks like an access key secret, a run key or a run code with a fixed
-// text, and each U+0000 and each byte that is not UTF-8 with U+FFFD. It then keeps the
-// last part of the log, from the start of a line when the part has one, such that the
-// log is at most [MaxLog] bytes and the body at most contracts.MaxRequest bytes as
-// sent, and sets truncated when it cut anything. Qory Apiary takes one machine log per
-// dispatch, before or after the dispatch ends. The answer is a signed 204. A refusal is
-// a [*Refusal]: [ErrForbidden], a dispatch that is unknown or of another node pool;
-// [ErrMachineLogExists], a dispatch that has a machine log; [ErrNotFound]; or
-// [ErrRateLimited].
+// text, each U+0000 with U+FFFD, and each run of bytes that is not UTF-8 with one
+// U+FFFD. It then keeps the last part of the log, from the start of a line when the
+// part has one and otherwise from the start of a character, such that the log is at
+// most [MaxLog] bytes and the body at most contracts.MaxRequest bytes as sent, and sets
+// truncated when it cut anything. So the log sent is valid UTF-8. Qory Apiary takes one
+// machine log per dispatch, before or after the dispatch ends. The answer is a signed
+// 204. A refusal is a [*Refusal]: [ErrForbidden], a dispatch that is unknown or of
+// another node pool; [ErrMachineLogExists], a dispatch that has a machine log;
+// [ErrNotFound]; or [ErrRateLimited].
 func (c *Client) MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error {
 	what, err := ofDispatch("the machine log of ", dispatchID)
 	if err != nil {
@@ -84,11 +86,12 @@ func (c *Client) MachineLog(ctx context.Context, dispatchID, log string, truncat
 	})
 }
 
-// cleanLog is log with each U+0000 and each byte that is not UTF-8 replaced by U+FFFD,
-// and each line that contains what looks like a secret replaced by [hiddenLine]. A line
-// ends after a line feed; the line feeds are kept.
+// cleanLog is log with each U+0000 replaced by U+FFFD, each run of bytes that is not
+// UTF-8 replaced by one U+FFFD, and each line that contains what looks like a secret
+// replaced by [hiddenLine]. A line ends after a line feed; the line feeds are kept.
 func cleanLog(log string) string {
-	log = strings.ReplaceAll(strings.ToValidUTF8(log, "�"), "\x00", "�")
+	replacement := string(utf8.RuneError)
+	log = strings.ReplaceAll(strings.ToValidUTF8(log, replacement), "\x00", replacement)
 	if !secret(log) {
 		return log
 	}
@@ -118,16 +121,17 @@ func init() {
 		b, _ := json.Marshal(string(rune(r)))
 		escapedLen[r] = len(b) - 2
 	}
-	b, _ := json.Marshal(" ")
+	b, _ := json.Marshal(string(rune(0x2028)))
 	lineSepLen = len(b) - 2
 	b, _ = json.Marshal(contracts.MachineLog{Version: 1, Time: "2006-01-02T15:04:05Z", Truncated: true})
 	logOverhead = len(b)
 }
 
-// fitLog is the last part of log, valid UTF-8, that is at most [MaxLog] bytes and whose
-// body is at most contracts.MaxRequest bytes, as json.Marshal writes it. When it cuts,
-// the part starts after the first line feed in it, if one is there before its end, and
-// cut is true.
+// fitLog is the last part of log, which is valid UTF-8, that is at most [MaxLog] bytes
+// and whose body is at most contracts.MaxRequest bytes, as json.Marshal writes it. It
+// steps back one whole character at a time, so the part starts at a character. When it
+// cuts, the part starts after the first line feed in it, if one is there before its
+// end, and cut is true.
 func fitLog(log string) (part string, cut bool) {
 	budget := contracts.MaxRequest - logOverhead
 	start, size, written := len(log), 0, 0
@@ -137,7 +141,7 @@ func fitLog(log string) (part string, cut bool) {
 		switch {
 		case r < utf8.RuneSelf:
 			e = escapedLen[r]
-		case r == ' ' || r == ' ':
+		case r == 0x2028 || r == 0x2029:
 			e = lineSepLen
 		}
 		if size+n > MaxLog || written+e > budget {

@@ -13,11 +13,11 @@ const claimRefused = "it fails claim-answer.schema.json"
 // testCode is a run code of the contract's form.
 const testCode = "qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg"
 
-// aClaim is a claim's 200 at revision 4 with a machine. Each case changes it in one
+// aClaim is a claim's 200 at [Revision] with a machine. Each case changes it in one
 // place.
 func aClaim() map[string]any {
 	return map[string]any{
-		"version": 1, "revision": 4, "dispatch_id": "dp_8w3k0q9t2v7m4r6x", "pool_id": "np_f1xt0re000000000",
+		"version": 1, "revision": Revision, "dispatch_id": "dp_8w3k0q9t2v7m4r6x", "pool_id": "np_f1xt0re000000000",
 		"lease_until": "2026-10-15T12:05:00Z", "machine": "small", "run_code": testCode,
 		"gateway_url": "https://gateway.example.com:8443", "max_lifetime_minutes": 120,
 	}
@@ -52,18 +52,19 @@ func TestAClaimIsRead(t *testing.T) {
 	}
 }
 
-// TestAClaimOutsideRevision4IsRefused changes a claim in one place each: members of
-// revision 3, revision 3 itself, a machine, a gateway URL or a lifetime outside its
-// form, null for a member, or a member missing. Each fails, with no run code, and the
-// error quotes no value.
-func TestAClaimOutsideRevision4IsRefused(t *testing.T) {
+// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: a member the
+// schema does not define, another revision, a machine, a gateway URL or a lifetime
+// outside its form, null for a member, or a member missing. Each fails, with no run
+// code, and the error quotes no value.
+func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 	for name, edit := range map[string]func(d map[string]any){
 		"a run id": func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d" },
 		"a step":   func(d map[string]any) { d["step"] = "explore" },
 		"a target": func(d map[string]any) {
 			d["target"] = map[string]any{"system": "code.example.com", "path": "acme/shop"}
 		},
-		"revision 3":               func(d map[string]any) { d["revision"] = 3 },
+		"the next revision":        func(d map[string]any) { d["revision"] = Revision + 1 },
+		"revision 0":               func(d map[string]any) { d["revision"] = 0 },
 		"machine empty":            func(d map[string]any) { d["machine"] = "" },
 		"machine null":             func(d map[string]any) { d["machine"] = nil },
 		"machine in upper case":    func(d map[string]any) { d["machine"] = "Small" },
@@ -84,11 +85,6 @@ func TestAClaimOutsideRevision4IsRefused(t *testing.T) {
 			t.Errorf("%s: got %v, want %s", name, err, claimRefused)
 		}
 	}
-	d := aClaim()
-	d["revision"] = 5
-	if _, err := readClaim(marshal(t, d)); err == nil || strings.Contains(err.Error(), "qecr_") {
-		t.Errorf("revision 5: %v", err)
-	}
 }
 
 // TestTheRunCodeIsReadFromTheBytes reads a claim whose run code is written with an
@@ -97,7 +93,14 @@ func TestAClaimOutsideRevision4IsRefused(t *testing.T) {
 func TestTheRunCodeIsReadFromTheBytes(t *testing.T) {
 	d := aClaim()
 	d["run_code"] = "RUNCODE"
-	body := bytes.Replace(marshal(t, d), []byte(`"RUNCODE"`), []byte(`"qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg"`), 1)
+	// The body writes the q of qecr_ as a JSON escape: a backslash, then u0071. The
+	// backslash is built from its code, 92, so that the source holds no escape that a
+	// tool which edits the source could decode.
+	escaped := `"` + string(rune(92)) + "u0071" + testCode[1:] + `"`
+	body := bytes.Replace(marshal(t, d), []byte(`"RUNCODE"`), []byte(escaped), 1)
+	if bytes.Contains(body, []byte(testCode)) {
+		t.Fatal("the body has the run code unescaped")
+	}
 	cl, err := readClaim(body)
 	if err != nil {
 		t.Fatal(err)

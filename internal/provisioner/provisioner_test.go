@@ -12,11 +12,13 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/qoryai/forager/accesskey"
 	"github.com/qoryai/integrations/contracts"
@@ -238,7 +240,7 @@ func TestAMachineGoesThroughEveryRequest(t *testing.T) {
 			t.Errorf("%s: verified %v, replayed %v, answer signed %v", call.Route, call.Verified, call.Replayed, call.Signed)
 		case h.Get(accesskey.HeaderAccessKeyID) != provisionertest.KeyID || h.Get(accesskey.HeaderInstanceID) != provisionertest.InstanceID:
 			t.Errorf("%s: the key's headers %v", call.Route, h)
-		case h.Get("X-Qory-Contract-Version") != "4" || h.Get("Content-Type") != "application/json" || h.Get("User-Agent") != "qory-provisioner":
+		case h.Get("X-Qory-Contract-Version") != strconv.Itoa(provisioner.Revision) || h.Get("Content-Type") != "application/json" || h.Get("User-Agent") != "qory-provisioner":
 			t.Errorf("%s: the headers %v", call.Route, h)
 		case call.Time.Before(testTime) || call.Time.After(clk.read()) || call.Time.Nanosecond() != 0:
 			t.Errorf("%s: the time %s", call.Route, call.Time)
@@ -251,8 +253,9 @@ func TestAMachineGoesThroughEveryRequest(t *testing.T) {
 }
 
 // TestDispatchedIsBuiltAnewEachTime posts dispatched three times within one second of
-// the clock, with the same external: each has a later time and a new signature, and
-// the fake answers each with the 204.
+// the clock, with the same external: each has a later time, other bytes and a new
+// signature, the fake's replay check passes each, and the fake answers each with the
+// 204.
 func TestDispatchedIsBuiltAnewEachTime(t *testing.T) {
 	srv, c, _, _ := setup(t)
 	cl := dispatched(t, srv, c, provisionertest.Work{})
@@ -264,7 +267,8 @@ func TestDispatchedIsBuiltAnewEachTime(t *testing.T) {
 	}
 	calls := srv.Calls()[1:]
 	for i := 1; i < len(calls); i++ {
-		if !calls[i].Time.After(calls[i-1].Time) || calls[i].Header.Get(accesskey.HeaderSignature) == calls[i-1].Header.Get(accesskey.HeaderSignature) || calls[i].Status != 204 {
+		if !calls[i].Time.After(calls[i-1].Time) || calls[i].Header.Get(accesskey.HeaderSignature) == calls[i-1].Header.Get(accesskey.HeaderSignature) ||
+			bytes.Equal(calls[i].Body, calls[i-1].Body) || calls[i].Replayed || calls[i].Status != 204 {
 			t.Errorf("dispatched %d: %s after %s, status %d", i+1, calls[i].Time, calls[i-1].Time, calls[i].Status)
 		}
 	}
@@ -433,7 +437,7 @@ var failing = []struct {
 	{"an unsigned 401", provisionertest.Reply{Status: 401, Code: "unauthorized", Unsigned: true}, provisioner.ErrUnsigned},
 	{"an unsigned 413", provisionertest.Reply{Status: 413, Code: "payload_too_large", Unsigned: true}, provisioner.ErrUnsigned},
 	{"an unsigned 400", provisionertest.Reply{Status: 400, Code: "bad_request", Unsigned: true}, provisioner.ErrUnsigned},
-	{"an unsigned 503", provisionertest.Reply{Status: 503, Code: "unavailable", Unsigned: true}, provisioner.ErrUnsigned},
+	{"an unsigned 503", provisionertest.Reply{Status: 503, Unsigned: true}, provisioner.ErrUnsigned},
 	{"an unsigned 410", provisionertest.Reply{Status: 410, Code: "gone", Unsigned: true}, provisioner.ErrUnsigned},
 	{"an unsigned 204", provisionertest.Reply{Status: 204, Unsigned: true}, provisioner.ErrUnsigned},
 	{"an unsigned 429", provisionertest.Reply{Status: 429, Code: "rate_limited", Unsigned: true, RetryAfter: "3000"}, provisioner.ErrUnsigned},
@@ -444,7 +448,7 @@ var failing = []struct {
 	{"a configuration header twice", provisionertest.Reply{Status: 204, Header: http.Header{accesskey.HeaderConfiguration: {"", ""}}}, provisioner.ErrUnsigned},
 	{"over its bound", provisionertest.Reply{Status: 409, Code: "gone", Pad: provisioner.MaxAnswer}, provisioner.ErrTooLarge},
 	{"a signed 500", provisionertest.Reply{Status: 500}, nil},
-	{"a signed 503", provisionertest.Reply{Status: 503, Code: "unavailable"}, nil},
+	{"a signed 503", provisionertest.Reply{Status: 503}, nil},
 }
 
 // TestAFailedTryIsBuiltAnewAndSentAgain sends each failure to every try of a release:
@@ -670,7 +674,9 @@ func TestTheModelsRefusals(t *testing.T) {
 	}
 	redeemed := claimed(t, srv, c, provisionertest.Work{})
 	redeemed.RunCode.Clear()
-	srv.Redeem(redeemed.DispatchID)
+	if !srv.Redeem(redeemed.DispatchID) {
+		t.Fatal("the fake refused the redemption")
+	}
 	if err := c.Release(ctx, redeemed.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrMachineExists) {
 		t.Errorf("a release after the run code was redeemed: %v", err)
 	}
@@ -679,6 +685,56 @@ func TestTheModelsRefusals(t *testing.T) {
 	}
 	if err := c.MachineLog(ctx, "dp_0000000000000000", "a line\n", false); !errors.Is(err, provisioner.ErrForbidden) {
 		t.Errorf("a machine log of an unknown dispatch: %v", err)
+	}
+}
+
+// TestARedeemedDispatchNeverGoesStale redeems a dispatch's run code before its lease
+// ends, then moves the clock past the lease: a release is 409 machine_exists, and the
+// first dispatched and each one after it get the 204. Expire leaves the dispatch as it
+// is, and a release then is 409 machine_exists again.
+func TestARedeemedDispatchNeverGoesStale(t *testing.T) {
+	srv, c, clk, _ := setup(t)
+	ctx := context.Background()
+	cl := claimed(t, srv, c, provisionertest.Work{Lease: 30 * time.Second})
+	cl.RunCode.Clear()
+	if !srv.Redeem(cl.DispatchID) {
+		t.Fatal("the fake refused the redemption")
+	}
+	clk.set(clk.read().Add(31 * time.Second))
+	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrMachineExists) || errors.Is(err, provisioner.ErrLeaseExpired) {
+		t.Errorf("a release after the lease's end: %v", err)
+	}
+	for range 2 {
+		if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+			t.Errorf("dispatched after the lease's end: %v", err)
+		}
+	}
+	srv.Expire(cl.DispatchID)
+	if err := c.Release(ctx, cl.DispatchID, "a reason again"); !errors.Is(err, provisioner.ErrMachineExists) {
+		t.Errorf("a release after Expire: %v", err)
+	}
+	if d, _ := srv.Dispatch(cl.DispatchID); d.Stale || d.State != provisionertest.StateDispatched || d.Dispatched != 2 {
+		t.Errorf("the dispatch %+v", d)
+	}
+}
+
+// TestARedemptionAfterTheLeaseIsRefused moves the clock to a dispatch's lease_until with
+// no dispatched and no redemption: the fake refuses the redemption, and a release and
+// a first dispatched are 409 lease_expired.
+func TestARedemptionAfterTheLeaseIsRefused(t *testing.T) {
+	srv, c, clk, _ := setup(t)
+	ctx := context.Background()
+	cl := claimed(t, srv, c, provisionertest.Work{Lease: 30 * time.Second})
+	cl.RunCode.Clear()
+	clk.set(clk.read().Add(30 * time.Second))
+	if srv.Redeem(cl.DispatchID) {
+		t.Error("the fake took a redemption at lease_until")
+	}
+	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrLeaseExpired) {
+		t.Errorf("a release: %v", err)
+	}
+	if err := c.Dispatched(ctx, cl.DispatchID, external); !errors.Is(err, provisioner.ErrLeaseExpired) {
+		t.Errorf("a first dispatched: %v", err)
 	}
 }
 
@@ -713,9 +769,9 @@ func TestARetryAfterIsBounded(t *testing.T) {
 // after one try, and its text quotes no value.
 func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 	edits := map[string]func(map[string]any){
-		"revision 1":                 func(d map[string]any) { d["revision"] = 1 },
-		"revision 3":                 func(d map[string]any) { d["revision"] = 3 },
-		"revision 5":                 func(d map[string]any) { d["revision"] = 5 },
+		"revision 0":                 func(d map[string]any) { d["revision"] = 0 },
+		"the next revision":          func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
+		"a revision after the next":  func(d map[string]any) { d["revision"] = provisioner.Revision + 2 },
 		"a new member":               func(d map[string]any) { d["extra"] = "the title of the ticket" },
 		"a run id":                   func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d" },
 		"a run code's shape":         func(d map[string]any) { d["run_code"] = d["run_code"].(string) + "!" },
@@ -839,15 +895,18 @@ func machineLogOf(t *testing.T, srv *provisionertest.Server, dispatchID string) 
 
 // TestAMachineLogIsCutToItsBounds uploads logs over each bound: 800 KiB of plain lines,
 // over MaxLog; 700 KiB of characters that JSON writes as 6 bytes each, over the
-// request's mebibyte once escaped; and one line with no line feed. Each sent log is the
-// end of the log, starts at a line when it has one, is within both bounds, and is
-// marked truncated. A log within its bounds is sent whole, truncated as the caller set
+// request's mebibyte once escaped; and one line with no line feed, whose cut at MaxLog
+// bytes falls inside a 2-byte character. Each sent log is the end of the log, starts at
+// a line when it has one and at a whole character otherwise, is valid UTF-8, is within
+// both bounds, and is marked truncated. A log within its bounds is sent whole, truncated as the caller set
 // it.
 func TestAMachineLogIsCutToItsBounds(t *testing.T) {
 	line := "2026-10-15T12:01:05Z machine step done\n"
 	plain := strings.Repeat(line, 800<<10/len(line)+1)
 	escaped := strings.Repeat("<<<<<<<<<\n", 70<<10)
-	oneLine := strings.Repeat("é", 500<<10)
+	// The last character is 1 byte and every other 2, so a cut at MaxLog bytes from the
+	// end, an even number, falls inside a character.
+	oneLine := strings.Repeat(string(rune(0xe9)), 500<<10) + "x"
 	for name, log := range map[string]string{"plain": plain, "escaped": escaped, "one line": oneLine} {
 		srv, c, _, _ := setup(t)
 		cl := claimed(t, srv, c, provisionertest.Work{})
@@ -857,7 +916,8 @@ func TestAMachineLogIsCutToItsBounds(t *testing.T) {
 		}
 		got, body := machineLogOf(t, srv, cl.DispatchID)
 		switch {
-		case !got.Truncated || !strings.HasSuffix(log, got.Log) || len(got.Log) > provisioner.MaxLog || len(body) > contracts.MaxRequest:
+		case !got.Truncated || !strings.HasSuffix(log, got.Log) || len(got.Log) > provisioner.MaxLog || len(body) > contracts.MaxRequest ||
+			!utf8.ValidString(got.Log) || !utf8.Valid(body) || strings.ContainsRune(got.Log, utf8.RuneError):
 			t.Errorf("%s: truncated %v, %d bytes of log, a body of %d bytes", name, got.Truncated, len(got.Log), len(body))
 		case name != "one line" && !strings.HasSuffix(log[:len(log)-len(got.Log)], "\n"):
 			t.Errorf("%s: the log does not start at a line", name)
@@ -880,19 +940,21 @@ func TestAMachineLogIsCutToItsBounds(t *testing.T) {
 }
 
 // TestAMachineLogIsCleaned uploads a log with lines that contain an access key secret,
-// a run key and a run code in any case, a U+0000 and a byte that is not UTF-8: each
-// such line is replaced with a fixed text, and the U+0000 and the byte with U+FFFD.
+// a run key and a run code in any case, a U+0000 and a run of 3 bytes that are not
+// UTF-8: each such line is replaced with a fixed text, the U+0000 with U+FFFD, and the
+// run of bytes with one U+FFFD.
 func TestAMachineLogIsCleaned(t *testing.T) {
 	srv, c, _, _ := setup(t)
 	cl := claimed(t, srv, c, provisionertest.Work{})
 	cl.RunCode.Clear()
-	log := "start\nkey qak_abc\nrun key QRK_abc.def\ncode qecr_ABC\na\x00b\nc\xffd\nend"
+	log := "start\nkey qak_abc\nrun key QRK_abc.def\ncode qecr_ABC\na\x00b\nc\xff\xfe\xfdd\nend"
 	if err := c.MachineLog(context.Background(), cl.DispatchID, log, false); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := machineLogOf(t, srv, cl.DispatchID)
 	hidden := "[hidden: the line contained what looks like an access key secret, a run key or a run code]\n"
-	if want := "start\n" + hidden + hidden + hidden + "a�b\nc�d\nend"; got.Log != want || got.Truncated {
+	r := string(utf8.RuneError)
+	if want := "start\n" + hidden + hidden + hidden + "a" + r + "b\nc" + r + "d\nend"; got.Log != want || got.Truncated {
 		t.Errorf("sent %q, want %q", got.Log, want)
 	}
 }

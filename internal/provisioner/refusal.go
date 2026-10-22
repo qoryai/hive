@@ -25,8 +25,9 @@ var (
 	// log and delete the machine.
 	ErrGone = errors.New("410 gone")
 	// ErrLeaseExpired is the signed 409 lease_expired of a dispatched or a release: the
-	// dispatch's lease lapsed before its first dispatched. After it, the contract
-	// requires the provisioner to stop the machine it created for the dispatch.
+	// dispatch's lease lapsed before its first dispatched and before a redemption of its
+	// run code. After it, the contract requires the provisioner to stop the machine it
+	// created for the dispatch.
 	ErrLeaseExpired = errors.New("409 lease_expired")
 	// ErrMachineExists is a release's signed 409 machine_exists: Qory Apiary accepted
 	// dispatched for the dispatch, or the machine redeemed the run code.
@@ -89,7 +90,7 @@ const (
 var refusalsOf = map[kind][]error{
 	kindClaim:      {ErrForbidden, ErrNoGateway, ErrNotFound, ErrRateLimited},
 	kindDispatched: {ErrForbidden, ErrGone, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
-	kindRelease:    {ErrForbidden, ErrGone, ErrLeaseExpired, ErrMachineExists, ErrNotFound, ErrRateLimited},
+	kindRelease:    {ErrForbidden, ErrGone, ErrMachineExists, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
 	kindMachineLog: {ErrForbidden, ErrMachineLogExists, ErrNotFound, ErrRateLimited},
 }
 

@@ -1,6 +1,5 @@
 // Package provisionertest is a fake Qory Apiary for the provisioner's tests: an
-// httptest server of provisioner/v1 at revision 4: claim, dispatched, release and
-// machine-log.
+// httptest server of provisioner/v1: claim, dispatched, release and machine-log.
 //
 // It checks every request as Qory Apiary does, in the contract's order: a body over a
 // mebibyte gets an unsigned 413, a POST of another content type an unsigned 415, a
@@ -8,9 +7,10 @@
 // under the pool's key, and a signature that fails, or that the fake has seen before,
 // gets the unsigned 401. The answers of the next checks are signed under
 // [Server.Signer]: an instance id outside its pattern gets a signed 400 bad_request;
-// another revision than 4 a signed 400 unsupported_contract_version; a body that fails
-// its schema a signed 400 invalid_request. The fake marks a signature as seen once the
-// body passes its schema, as Qory Apiary does. A time more than 300 seconds from
+// another revision than [provisioner.Revision] a signed 400
+// unsupported_contract_version; a body that fails its schema a signed 400
+// invalid_request. The fake marks a signature as seen once the body passes its schema,
+// as Qory Apiary does. A time more than 300 seconds from
 // [Server.Now] then gets the unsigned 401. After those checks the fake signs every
 // answer: a reply that [Server.Script] queued for the route, else the model's.
 //
@@ -18,10 +18,11 @@
 // made of it. A claim takes the first work waiting into a new dispatch, or is held up
 // to its wait_seconds and [Server.Hold] for one, then gets a signed 204. Each
 // dispatch's refusals follow the contract's order: 403 for an unknown dispatch; for a
-// dispatched or a release, 410 for one that ended, 409 lease_expired for one whose
-// lease lapsed before its first dispatched or that [Server.Expire] made stale; for a
-// release, 409 machine_exists after dispatched or after [Server.Redeem]; and for a
-// machine log, 409 machine_log_exists for a second one. Every dispatched of a live
+// dispatched or a release, 410 for one that ended; for a release, 409 machine_exists
+// after dispatched or after [Server.Redeem]; for a dispatched or a release, 409
+// lease_expired for one whose lease lapsed before its first dispatched and before
+// [Server.Redeem], or that [Server.Expire] made stale; and for a machine log, 409
+// machine_log_exists for a second one. A redeemed dispatch never goes stale. Every dispatched of a live
 // dispatch gets a signed 204, and the fake records the external of the first one. A
 // release ends the dispatch, and so does [Server.End]. The fake records every request
 // in order, [Server.Calls].
@@ -164,8 +165,8 @@ type Dispatch struct {
 	Work       Work
 	LeaseUntil time.Time
 	State      string
-	// Stale is a dispatch whose lease lapsed before its first dispatched, and Redeemed
-	// one whose run code [Server.Redeem] marked as redeemed.
+	// Stale is a dispatch whose lease lapsed before its first dispatched and before a
+	// redemption, and Redeemed one whose run code [Server.Redeem] marked as redeemed.
 	Stale    bool
 	Redeemed bool
 	// Dispatched is how many dispatched got the 204, and External the external of the
@@ -276,22 +277,33 @@ func (s *Server) Script(route Route, replies ...Reply) {
 	s.scripts[route] = append(s.scripts[route], replies...)
 }
 
-// Expire makes the dispatch stale, as a lease that lapsed before its first dispatched.
+// Expire makes the dispatch stale, as a lease that lapsed before its first dispatched
+// and before a redemption. It leaves a dispatched or redeemed dispatch as it is.
 func (s *Server) Expire(dispatchID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d := s.dispatches[dispatchID]; d != nil && d.State == StateClaimed {
+	if d := s.dispatches[dispatchID]; d != nil && d.State == StateClaimed && !d.Redeemed {
 		d.Stale = true
 	}
 }
 
-// Redeem marks the dispatch's run code as redeemed by a machine.
-func (s *Server) Redeem(dispatchID string) {
+// Redeem marks the dispatch's run code as redeemed by a machine, which ends its lease:
+// the dispatch never goes stale after it. As in the contract, a redemption of a
+// dispatch that ended, or that is stale or reached LeaseUntil with no dispatched, is
+// refused: Redeem then marks nothing and returns false.
+func (s *Server) Redeem(dispatchID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d := s.dispatches[dispatchID]; d != nil {
-		d.Redeemed = true
+	d := s.dispatches[dispatchID]
+	switch {
+	case d == nil, d.State == StateEnded:
+		return false
+	case d.State == StateClaimed && !d.Redeemed && (d.Stale || !s.now().Before(d.LeaseUntil)):
+		d.Stale = true
+		return false
 	}
+	d.Redeemed = true
+	return true
 }
 
 // End ends the dispatch, as Qory Apiary does when the machine has not redeemed the run
@@ -648,12 +660,14 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 		d.MachineLog = &ml
 		return answer{status: http.StatusNoContent}
 	}
-	if d.State == StateClaimed && !s.now().Before(d.LeaseUntil) {
+	if d.State == StateClaimed && !d.Redeemed && !s.now().Before(d.LeaseUntil) {
 		d.Stale = true
 	}
 	switch {
 	case d.State == StateEnded:
 		return refusal(http.StatusGone, "gone")
+	case route == RouteRelease && (d.State == StateDispatched || d.Redeemed):
+		return refusal(http.StatusConflict, "machine_exists")
 	case d.State == StateClaimed && d.Stale:
 		return refusal(http.StatusConflict, "lease_expired")
 	}
@@ -665,9 +679,6 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 		}
 		d.Dispatched++
 		return answer{status: http.StatusNoContent}
-	}
-	if d.State == StateDispatched || d.Redeemed {
-		return refusal(http.StatusConflict, "machine_exists")
 	}
 	var rel contracts.Release
 	_ = json.Unmarshal(body, &rel)
