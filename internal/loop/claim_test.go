@@ -289,7 +289,7 @@ func TestShutdownLetsAMakeInFlightFinish(t *testing.T) {
 	case <-time.After(patience):
 		t.Fatal("the make did not start")
 	}
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed}})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
 	h.cancel()
 	close(h.machines.makeGate)
 	if err := h.result(); err != nil {
@@ -338,7 +338,7 @@ func TestTheReasonsFitTheContract(t *testing.T) {
 
 // TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop returns the journal's error
 // when the made entry cannot be written, and sends no release. After a restart, the
-// claimed entry finds the machine by its key.
+// claimed entry finds the machine by its key and keeps the claim's lifetime.
 func TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop(t *testing.T) {
 	h := newHarness(t)
 	h.machines.makeStarted = make(chan struct{})
@@ -360,14 +360,14 @@ func TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop(t *testing.T) {
 		t.Errorf("the error is %v", err)
 	}
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed}})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
 
 	if err := os.RemoveAll(blocker); err != nil {
 		t.Fatal(err)
 	}
 	h.restart()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: journal.MaxLifetime}})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}})
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}

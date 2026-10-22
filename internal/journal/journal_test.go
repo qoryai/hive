@@ -70,7 +70,7 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 		lifetime       int
 		line           string
 	}{
-		{journal.PhaseClaimed, "", 0, dispatchA + " claimed - -"},
+		{journal.PhaseClaimed, "", lifetime, dispatchA + " claimed - 60"},
 		{journal.PhaseMade, machine, lifetime, dispatchA + " made " + machine + " 60"},
 		{journal.PhaseDispatched, machine, lifetime, dispatchA + " dispatched " + machine + " 60"},
 		{journal.PhaseDispatched, oddID, 15, dispatchA + " dispatched " + oddID + " 15"},
@@ -106,8 +106,8 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 func TestSetKeepsTheOrderOfClaims(t *testing.T) {
 	dir := t.TempDir()
 	j := open(t, dir)
-	a := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed}
-	b := journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseClaimed}
+	a := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
+	b := journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
 	for _, e := range []journal.Entry{a, b} {
 		if err := j.Set(e); err != nil {
 			t.Fatal(err)
@@ -119,7 +119,7 @@ func TestSetKeepsTheOrderOfClaims(t *testing.T) {
 	}
 	want := []string{
 		dispatchA + " made " + machine + " 60",
-		dispatchB + " claimed - -",
+		dispatchB + " claimed - 60",
 	}
 	if got := lines(t, dir); !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
@@ -161,10 +161,10 @@ func TestALeftNewFileIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := open(t, dir)
-	if err := j.Set(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed}); err != nil {
+	if err := j.Set(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := lines(t, dir), []string{dispatchA + " claimed - -"}; !slices.Equal(got, want) {
+	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
 	}
 }
@@ -174,7 +174,7 @@ func TestALeftNewFileIsReplaced(t *testing.T) {
 func TestAFailedWriteLeavesTheJournalAsItWas(t *testing.T) {
 	dir := t.TempDir()
 	j := open(t, dir)
-	a := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed}
+	a := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
 	if err := j.Set(a); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestAFailedWriteLeavesTheJournalAsItWas(t *testing.T) {
 	if got := j.List(); !slices.Equal(got, []journal.Entry{a}) {
 		t.Errorf("the journal lists %v, want %v", got, a)
 	}
-	if got, want := lines(t, dir), []string{dispatchA + " claimed - -"}; !slices.Equal(got, want) {
+	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
 	}
 }
@@ -206,7 +206,7 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		secret        = "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 		lifetimeRange = "the lifetime is not 15 to 1470 minutes"
 	)
-	ok := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed}
+	ok := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
 	for _, c := range []struct {
 		name  string
 		edit  func(*journal.Entry)
@@ -231,9 +231,12 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		{"a machine id with qrk_", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, "qrk_abc" }, secret},
 		{"a machine id with qecr_", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseDispatched, "qecr_abc" }, secret},
 		{"a machine id with qecp_", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, "x/qecp_abc" }, secret},
-		{"claimed with a lifetime", func(e *journal.Entry) { e.MaxLifetimeMinutes = lifetime }, "the lifetime is set in the phase claimed"},
-		{"made with no lifetime", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, machine }, "the phase made or dispatched has no lifetime"},
-		{"dispatched with no lifetime", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseDispatched, machine }, "the phase made or dispatched has no lifetime"},
+		{"claimed with no lifetime", func(e *journal.Entry) { e.MaxLifetimeMinutes = 0 }, lifetimeRange},
+		{"made with no lifetime", func(e *journal.Entry) { e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, 0 }, lifetimeRange},
+		{"dispatched with no lifetime", func(e *journal.Entry) {
+			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseDispatched, machine, 0
+		}, lifetimeRange},
+		{"claimed with a lifetime of 1471", func(e *journal.Entry) { e.MaxLifetimeMinutes = 1471 }, lifetimeRange},
 		{"a lifetime of 14", func(e *journal.Entry) { e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, 14 }, lifetimeRange},
 		{"a lifetime of 1471", func(e *journal.Entry) {
 			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseDispatched, machine, 1471
@@ -257,7 +260,7 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 			if got := j.List(); !slices.Equal(got, []journal.Entry{ok}) {
 				t.Errorf("the journal lists %v", got)
 			}
-			if got, want := lines(t, dir), []string{dispatchA + " claimed - -"}; !slices.Equal(got, want) {
+			if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
 				t.Errorf("the journal is %q, want %q", got, want)
 			}
 		})
@@ -268,10 +271,10 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 // at most 1 MiB, or whose lines are out of shape or repeat a dispatch. Open returns an
 // error that gives the line's number and quotes no value.
 func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
-	const entry = dispatchA + " claimed - -"
+	const entry = dispatchA + " claimed - 60"
 	const other = dispatchB + " made " + machine + " 60"
 	const fields = "the line is not four fields separated by single spaces and ended by a line feed"
-	const lifetimeText = "the lifetime is not - or a whole number of minutes"
+	const lifetimeText = "the lifetime is not a whole number of minutes"
 	const run = "0192f0c1-7d4e-7a2b-8c3d-00000000000a"
 	for _, c := range []struct {
 		name, content string
@@ -287,21 +290,22 @@ func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
 		{name: "the old five fields", content: dispatchA + " " + run + " explore claimed -\n", line: 1, cause: fields},
 		{name: "the old five fields with a machine", content: dispatchA + " " + run + " explore created i-0123456789abcdef0\n", line: 1, cause: fields},
 		{name: "no line feed", content: entry, line: 1, cause: fields},
-		{name: "two spaces", content: dispatchA + "  claimed - -\n", line: 1, cause: fields},
+		{name: "two spaces", content: dispatchA + "  claimed - 60\n", line: 1, cause: fields},
 		{name: "a space at the end", content: entry + " \n", line: 1, cause: fields},
 		{name: "a carriage return", content: entry + "\r\n", line: 1, cause: lifetimeText},
 		{name: "a carriage return after a lifetime", content: other + "\r\n", line: 1, cause: lifetimeText},
 		{name: "a carriage return after a machine id", content: dispatchB + " made " + machine + "\r 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
 		{name: "an empty line", content: entry + "\n\n", line: 2, cause: fields},
-		{name: "an unknown phase", content: dispatchA + " running - -\n", line: 1, cause: "the phase is not claimed, made or dispatched"},
-		{name: "a dispatch id out of shape", content: "dp_0 claimed - -\n", line: 1, cause: "the dispatch id is not dp_ and 16 Crockford base32 characters"},
+		{name: "an unknown phase", content: dispatchA + " running - 60\n", line: 1, cause: "the phase is not claimed, made or dispatched"},
+		{name: "a dispatch id out of shape", content: "dp_0 claimed - 60\n", line: 1, cause: "the dispatch id is not dp_ and 16 Crockford base32 characters"},
 		{name: "made with -", content: dispatchA + " made - 60\n", line: 1, cause: "the phase made or dispatched has no machine id"},
 		{name: "dispatched with -", content: dispatchA + " dispatched - 60\n", line: 1, cause: "the phase made or dispatched has no machine id"},
-		{name: "claimed with a machine id", content: dispatchA + " claimed " + machine + " -\n", line: 1, cause: "the machine id is set in the phase claimed"},
+		{name: "claimed with a machine id", content: dispatchA + " claimed " + machine + " 60\n", line: 1, cause: "the machine id is set in the phase claimed"},
 		{name: "a machine id of 129", content: dispatchA + " made " + longID + "z 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
 		{name: "a machine id with qrk_", content: dispatchA + " made qrk_abc 60\n", line: 1, cause: "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
-		{name: "claimed with a lifetime", content: dispatchA + " claimed - 60\n", line: 1, cause: "the lifetime is set in the phase claimed"},
-		{name: "made with no lifetime", content: dispatchA + " made " + machine + " -\n", line: 1, cause: "the phase made or dispatched has no lifetime"},
+		{name: "claimed with the lifetime -", content: dispatchA + " claimed - -\n", line: 1, cause: lifetimeText},
+		{name: "made with the lifetime -", content: dispatchA + " made " + machine + " -\n", line: 1, cause: lifetimeText},
+		{name: "claimed with a lifetime of 14", content: dispatchA + " claimed - 14\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
 		{name: "a lifetime of 14", content: dispatchA + " made " + machine + " 14\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
 		{name: "a lifetime of 1471", content: dispatchA + " dispatched " + machine + " 1471\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
 		{name: "a lifetime of 5 digits", content: dispatchA + " made " + machine + " 10000\n", line: 1, cause: lifetimeText},
@@ -434,9 +438,9 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 	j := open(t, dir)
 	var errs []string
 	for _, phase := range []string{journal.PhaseClaimed, journal.PhaseMade, journal.PhaseDispatched} {
-		e := journal.Entry{DispatchID: dispatchA, Phase: phase}
+		e := journal.Entry{DispatchID: dispatchA, Phase: phase, MaxLifetimeMinutes: lifetime}
 		if phase != journal.PhaseClaimed {
-			e.MachineID, e.MaxLifetimeMinutes = machine, lifetime
+			e.MachineID = machine
 		}
 		if err := j.Set(e); err != nil {
 			t.Fatal(err)
@@ -476,10 +480,10 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 	// error quotes no line.
 	for _, m := range markers[1:] {
 		for _, line := range []string{
-			dispatchA + " claimed " + m + " -\n",
-			dispatchA + " " + m + " - -\n",
+			dispatchA + " claimed " + m + " 60\n",
+			dispatchA + " " + m + " - 60\n",
 			dispatchA + " made " + machine + " " + m + "\n",
-			m + " claimed - -\n",
+			m + " claimed - 60\n",
 			m + "\n",
 		} {
 			other := t.TempDir()

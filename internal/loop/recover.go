@@ -11,10 +11,11 @@ import (
 // recoverJournal runs once before the claim path and the watch. It lists the pool's
 // machines once and acts on each journal entry as [journal.Recover] returns:
 //   - Release: the dispatch is released and its entry removed.
-//   - Drop: the entry is removed.
-//   - Resume: a claimed entry becomes made with the machine id found, and the
-//     lifetime [journal.MaxLifetime], since a claimed entry has no lifetime. Each made
-//     entry then gets dispatched. A dispatched entry stays for the watch.
+//   - Drop: the entry is removed. Its machine is deleting.
+//   - Resume: a claimed entry becomes made with the machine id found. Each made
+//     entry then gets dispatched. A dispatched entry stays for the watch. An entry
+//     whose machine is not listed stays too, and the watch removes it once
+//     [ListGrace] has passed since the start.
 //
 // It returns an error when the list fails or a resumed entry cannot be written.
 func (l *loop) recoverJournal(ctx context.Context) error {
@@ -32,20 +33,24 @@ func (l *loop) recoverJournal(ctx context.Context) error {
 			l.release(ctx, e.DispatchID, action.Reason)
 			l.remove(e.DispatchID)
 		case journal.Drop:
-			l.Log.Info("dropped a dispatch whose machine is deleting or not listed", attrs...)
+			l.Log.Info("dropped a dispatch whose machine is deleting", attrs...)
 			l.remove(e.DispatchID)
 		case journal.Resume:
 			next := e
 			next.MachineID = action.MachineID
 			if e.Phase == journal.PhaseClaimed {
-				next.Phase, next.MaxLifetimeMinutes = journal.PhaseMade, journal.MaxLifetime
+				next.Phase = journal.PhaseMade
 			}
 			if next != e {
 				if err := l.Journal.Set(next); err != nil {
 					return err
 				}
 			}
-			l.Log.Info("resumed a dispatch", append(attrs, slog.String("machine_id", next.MachineID), slog.String("state", string(m.State)))...)
+			attrs = append(attrs, slog.String("machine_id", next.MachineID))
+			if found {
+				attrs = append(attrs, slog.String("state", string(m.State)))
+			}
+			l.Log.Info("resumed a dispatch", attrs...)
 			if next.Phase == journal.PhaseMade {
 				l.dispatched(ctx, next)
 			}

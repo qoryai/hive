@@ -22,7 +22,8 @@ func (l *loop) watch(ctx context.Context) {
 }
 
 // watchOnce lists the pool's machines once and acts on each made or dispatched entry
-// that was in the journal before the list. It skips the claimed entries and the
+// that was in the journal before the list. An entry whose machine is not listed is
+// removed only after [ListGrace]; inside it, the entry gets dispatched as usual. It skips the claimed entries and the
 // dispatches of the claim path. Then it cleans up each listed machine whose key had no
 // journal entry, neither before the list nor after it: a make that starts during the
 // list has a claimed entry after it.
@@ -47,9 +48,15 @@ func (l *loop) watchOnce(ctx context.Context) {
 			attrs = append(attrs, slog.String("state", string(m.State)))
 		}
 		switch {
-		case !found || m.State == machines.StateDeleting:
-			l.Log.Info("the machine is deleting or not listed", attrs...)
+		case found && m.State == machines.StateDeleting:
+			l.Log.Info("the machine is deleting", attrs...)
 			l.remove(e.DispatchID)
+		case !found && l.Clock.Now().Sub(l.madeAt(e.DispatchID)) > ListGrace:
+			l.Log.Info("the machine is still not listed 5 minutes after its make", attrs...)
+			l.remove(e.DispatchID)
+		case !found:
+			// Inside the list grace, the machine may exist.
+			l.dispatched(ctx, e)
 		case m.State == machines.StateStopped:
 			l.Log.Info("the machine stopped", attrs...)
 			l.cleanUp(ctx, e.DispatchID, e.MachineID, true)

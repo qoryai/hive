@@ -14,15 +14,15 @@ import (
 // TestRestartRecovery starts the loop with a journal from before a restart. It lists
 // the machines once and acts on each entry: a claimed entry with no machine is
 // released and removed; a claimed entry with a machine becomes made with the
-// machine's id and the longest lifetime, and gets dispatched; a made entry with a
-// machine gets dispatched; an entry whose machine is deleting or not listed is
-// removed; a dispatched entry with a machine stays for the watch.
+// machine's id and keeps the claim's lifetime, and gets dispatched; a made entry gets
+// dispatched, also when its machine is not listed; an entry whose machine is deleting
+// is removed; a dispatched entry with a machine stays for the watch.
 func TestRestartRecovery(t *testing.T) {
 	h := newHarness(t)
 	h.config.MaxMachines = 6
 	h.setEntries(
-		journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed},
-		journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseClaimed},
+		journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime},
+		journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime},
 		journal.Entry{DispatchID: dispatchC, Phase: journal.PhaseMade, MachineID: "i-c", MaxLifetimeMinutes: lifetime},
 		dispatched(dispatchD, "i-d"),
 		journal.Entry{DispatchID: dispatchE, Phase: journal.PhaseMade, MachineID: "i-e", MaxLifetimeMinutes: lifetime},
@@ -36,23 +36,25 @@ func TestRestartRecovery(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"release " + dispatchA + " " + journal.ReasonRestarted,
 		"dispatched " + dispatchB + " i-b",
+		"dispatched " + dispatchC + " i-c",
 		"dispatched " + dispatchE + " i-e",
 	})
 	h.machines.mu.Lock()
 	equal(t, "the adapter's calls", h.machines.calls, []string{"check", "list " + pool})
 	h.machines.mu.Unlock()
 	want := []journal.Entry{
-		{DispatchID: dispatchB, Phase: journal.PhaseDispatched, MachineID: "i-b", MaxLifetimeMinutes: journal.MaxLifetime},
+		dispatched(dispatchB, "i-b"),
+		dispatched(dispatchC, "i-c"),
 		dispatched(dispatchE, "i-e"),
 		dispatched(dispatchF, "i-f"),
 	}
 	equal(t, "the journal", h.entries(), want)
 	h.openJournal()
 	equal(t, "the journal read again", h.entries(), want)
-	if n := len(h.find("dropped a dispatch whose machine is deleting or not listed")); n != 2 {
+	if n := len(h.find("dropped a dispatch whose machine is deleting")); n != 1 {
 		t.Errorf("the log has %d lines for dropped entries", n)
 	}
-	if n := len(h.find("resumed a dispatch")); n != 3 {
+	if n := len(h.find("resumed a dispatch")); n != 4 {
 		t.Errorf("the log has %d lines for resumed entries", n)
 	}
 	if err := h.stop(); err != nil {
@@ -64,7 +66,7 @@ func TestRestartRecovery(t *testing.T) {
 // entry whose dispatched returns 410 gone.
 func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
-	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed})
+	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime})
 	h.machines.add("i-a", dispatchA, machines.StateRunning, epoch)
 	h.apiary.setDispatched(dispatchA, loop.ErrGone)
 	h.start()
@@ -100,7 +102,7 @@ func TestAFailedCheckStopsTheLoop(t *testing.T) {
 // leaves the journal as it is.
 func TestAFailedListAtTheStartStopsTheLoop(t *testing.T) {
 	h := newHarness(t)
-	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed})
+	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime})
 	h.machines.listErr = errors.New("the provisioner cancelled the machine adapter's list")
 	h.startNoWait()
 	err := h.result()
@@ -108,5 +110,5 @@ func TestAFailedListAtTheStartStopsTheLoop(t *testing.T) {
 		t.Errorf("the error is %v", err)
 	}
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed}})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
 }

@@ -3,6 +3,7 @@ package loop_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,23 +90,105 @@ func TestAStoppedMachineIsCleanedUp(t *testing.T) {
 	}
 }
 
-// TestAnEntryWhoseMachineIsDeletingOrNotListedIsRemoved removes the entry, and sends
+// TestAnEntryWhoseMachineIsDeletingIsRemoved removes the entry at once, and sends
 // nothing and deletes nothing.
-func TestAnEntryWhoseMachineIsDeletingOrNotListedIsRemoved(t *testing.T) {
+func TestAnEntryWhoseMachineIsDeletingIsRemoved(t *testing.T) {
 	h := newHarness(t)
-	h.setEntries(dispatched(dispatchA, "i-a"), dispatched(dispatchB, "i-b"))
+	h.setEntries(dispatched(dispatchA, "i-a"))
 	h.machines.add("i-a", dispatchA, machines.StateRunning, epoch)
-	h.machines.add("i-b", dispatchB, machines.StateRunning, epoch)
 	h.start()
 	h.machines.setState("i-a", machines.StateDeleting)
-	h.machines.drop("i-b")
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), nil)
-	if n := len(h.find("the machine is deleting or not listed")); n != 2 {
-		t.Errorf("the log has %d lines for the removed entries", n)
+	lines := h.find("the machine is deleting")
+	if len(lines) != 1 || lines[0]["state"] != "deleting" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// ticksInGrace is the number of watches inside the list grace of a make at the start
+// of a test: the watches at 60 s to 300 s.
+const ticksInGrace = int(loop.ListGrace / loop.WatchInterval)
+
+// TestANotListedMachineIsKeptInsideTheGrace keeps the entry of a made machine that the
+// adapter's list does not contain, for 5 minutes after the make, and sends dispatched
+// for it at each watch.
+func TestANotListedMachineIsKeptInsideTheGrace(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	h.claim(newClaim(dispatchA))
+	h.machines.drop(machineID(1))
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+	for range ticksInGrace {
+		h.tick()
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+		equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+		equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestANotListedMachineIsRemovedAfterTheGrace removes the entry at the first watch
+// more than 5 minutes after the make, and after the start for an entry that the
+// journal had at the start. It sends nothing for the removed entries and deletes
+// nothing.
+func TestANotListedMachineIsRemovedAfterTheGrace(t *testing.T) {
+	h := newHarness(t)
+	h.setEntries(dispatched(dispatchB, "i-b"))
+	h.start()
+	h.claim(newClaim(dispatchA))
+	h.machines.drop(machineID(1))
+	for range ticksInGrace {
+		h.tick()
+	}
+	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchB, "i-b"), dispatched(dispatchA, machineID(1))})
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), nil)
+	lines := h.find("the machine is still not listed 5 minutes after its make")
+	if len(lines) != 2 || lines[0]["dispatch_id"] != dispatchB || lines[1]["dispatch_id"] != dispatchA {
+		t.Errorf("the log lines are %v", lines)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAMachineListedLateIsNotAStray lists a made machine only from the second watch
+// on. The loop keeps its entry, never deletes the machine and keeps sending
+// dispatched.
+func TestAMachineListedLateIsNotAStray(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	h.claim(newClaim(dispatchA))
+	h.machines.drop(machineID(1))
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+	h.tick()
+	h.machines.add(machineID(1), dispatchA, machines.StateRunning, epoch)
+	for range ticksInGrace + 2 {
+		h.tick()
+	}
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	calls := h.apiary.takeCalls()
+	if len(calls) != ticksInGrace+3 || slices.ContainsFunc(calls, func(c string) bool { return c != "dispatched "+dispatchA+" "+machineID(1) }) {
+		t.Errorf("Qory Apiary's calls are %q", calls)
+	}
+	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+	if n := len(h.find("found a machine with no journal entry")); n != 0 {
+		t.Errorf("the log has %d lines for a stray", n)
 	}
 	if err := h.stop(); err != nil {
 		t.Error(err)

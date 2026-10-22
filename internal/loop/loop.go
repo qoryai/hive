@@ -11,8 +11,10 @@
 //     max_machines, records it, makes its machine and sends dispatched.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
-//     stopped, or that ran longer than its lifetime and 15 minutes. It also cleans up
-//     each listed machine that has no journal entry.
+//     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
+//     entry of a machine that is deleting, or that is still not listed 5 minutes
+//     after its make. It also cleans up each listed machine that has no journal
+//     entry.
 //
 // To clean up a machine, the loop reads the machine's log through the adapter,
 // uploads it to Qory Apiary, deletes the machine and removes the journal entry. Each
@@ -53,6 +55,12 @@ const (
 	// LifetimeGrace is the time after a machine's lifetime, counted from the start
 	// time in the adapter's list, after which the watch cleans up the machine.
 	LifetimeGrace = 15 * time.Minute
+	// ListGrace is the time during which the watch keeps an entry whose machine is
+	// not in the adapter's list. A vendor's list can lag behind its make, so a
+	// machine that was just made can be missing from the list for a while. The time
+	// counts from the make that returned the machine, or from the start of [Run] for
+	// an entry that the journal had at the start.
+	ListGrace = 5 * time.Minute
 	// LongWait is the wait before the next claim after a make that failed with the
 	// kind limit or defect, and after the start data of a claim could not be built.
 	LongWait = 60 * time.Second
@@ -177,10 +185,12 @@ func Run(ctx context.Context, cfg Config) error {
 		busy:   map[string]bool{},
 		logged: map[string]bool{},
 		freed:  make(chan struct{}, 1),
+		made:   map[string]time.Time{},
 	}
 	if l.Clock == nil {
 		l.Clock = systemClock{}
 	}
+	l.start = l.Clock.Now()
 	if err := l.Machines.Check(ctx); err != nil {
 		return fmt.Errorf("Fix the machine adapter's settings or the rights it uses, then start the provisioner again: the machine adapter's check failed: %s", shown(err, nil))
 	}
@@ -209,6 +219,20 @@ type loop struct {
 	logged map[string]bool
 	// freed receives a value when an entry leaves the journal.
 	freed chan struct{}
+	// made is the time of the make that returned each entry's machine. An entry that
+	// the journal had at the start has no time here and counts from start.
+	made  map[string]time.Time
+	start time.Time
+}
+
+// madeAt is the time from which the list grace of the dispatch id counts.
+func (l *loop) madeAt(id string) time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.made[id]; ok {
+		return t
+	}
+	return l.start
 }
 
 // wait waits d on the clock, or until ctx ends.
@@ -245,6 +269,9 @@ func (l *loop) remove(id string) {
 		l.Log.Error("removing a dispatch from the journal failed", slog.String("dispatch_id", id), errorAttr(err, nil))
 		return
 	}
+	l.mu.Lock()
+	delete(l.made, id)
+	l.mu.Unlock()
 	select {
 	case l.freed <- struct{}{}:
 	default:

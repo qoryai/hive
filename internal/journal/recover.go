@@ -41,7 +41,9 @@ type Action struct {
 // its machine by its key:
 //   - claimed, with no machine found: release with [ReasonRestarted]. A release
 //     exists only before a machine exists.
-//   - made or dispatched, with no machine found: drop. The machine is gone.
+//   - made or dispatched, with no machine found: resume with the entry's machine id.
+//     A vendor's list can lag behind its make, so a machine missing from the list may
+//     exist.
 //   - any phase, with a machine found that is deleting: drop.
 //   - any phase, with a machine found in another state: resume with the machine id
 //     found. For claimed, the make succeeded before the restart.
@@ -49,7 +51,9 @@ func Recover(e Entry, l Lookup) Action {
 	switch {
 	case !l.Found && e.Phase == PhaseClaimed:
 		return Action{Kind: Release, Reason: ReasonRestarted}
-	case !l.Found, l.State == stateDeleting:
+	case !l.Found:
+		return Action{Kind: Resume, MachineID: e.MachineID}
+	case l.State == stateDeleting:
 		return Action{Kind: Drop}
 	default:
 		return Action{Kind: Resume, MachineID: l.MachineID}

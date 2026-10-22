@@ -112,7 +112,7 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 	defer clear(data)
 	l.setBusy(id, true)
 	defer l.setBusy(id, false)
-	if err := l.Journal.Set(journal.Entry{DispatchID: id, Phase: journal.PhaseClaimed}); err != nil {
+	if err := l.Journal.Set(journal.Entry{DispatchID: id, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: c.MaxLifetimeMinutes}); err != nil {
 		l.Log.Error("writing the journal failed", slog.String("dispatch_id", id), errorAttr(err, nil))
 		l.release(ctx, id, ReasonJournal)
 		return err
@@ -128,6 +128,7 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 	}
 	// A make in flight finishes after ctx ends, so that its machine is recorded.
 	made, err := l.Machines.Make(context.WithoutCancel(ctx), id, c.PoolID, size, data)
+	madeAt := l.Clock.Now()
 	if err != nil {
 		kind := kindOf(err)
 		reason, wait, level := makeFailure(kind)
@@ -143,6 +144,9 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		l.Log.Error("writing the journal failed", slog.String("dispatch_id", id), slog.String("machine_id", made.ID), errorAttr(err, nil))
 		return err
 	}
+	l.mu.Lock()
+	l.made[id] = madeAt
+	l.mu.Unlock()
 	l.Log.Info("made a machine", slog.String("dispatch_id", id), slog.String("machine_id", made.ID))
 	if ctx.Err() != nil {
 		return nil

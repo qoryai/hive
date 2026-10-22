@@ -3,8 +3,8 @@
 // returns what to do with each line after a restart.
 //
 // An entry has four fields, a dispatch id, a phase, a machine id and the machine's
-// lifetime in minutes, and no field for a secret or for inputs. Each field is checked against a fixed shape before it is
-// written and after it is read. A machine id that contains qak_, qrk_, qecr_ or qecp_,
+// lifetime in minutes, and no field for a secret or for inputs. Each field is checked
+// against a fixed shape before it is written and after it is read. A machine id that contains qak_, qrk_, qecr_ or qecp_,
 // the start of a secret, is out of shape.
 package journal
 
@@ -31,9 +31,6 @@ const maxSize = 1 << 20
 
 // noMachine is the machine id field of a line whose dispatch has no machine id.
 const noMachine = "-"
-
-// noLifetime is the lifetime field of a line whose dispatch has no machine id.
-const noLifetime = "-"
 
 // The bounds of a machine's lifetime in minutes, as the provisioner contract states
 // max_lifetime_minutes of a claim answer.
@@ -75,27 +72,23 @@ var (
 	lifetimeShape = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
 )
 
-// Entry is one live dispatch. MachineID and MaxLifetimeMinutes are empty and 0 in
-// [PhaseClaimed]. From [PhaseMade] on, MachineID is the machine id that the adapter's
-// make returned, and MaxLifetimeMinutes is the machine's lifetime from the claim
-// answer, [MinLifetime] to [MaxLifetime]. The journal treats a machine id as opaque.
-// An entry has no field for a secret or for inputs.
+// Entry is one live dispatch. MachineID is empty in [PhaseClaimed] and is the machine
+// id that the adapter's make returned from [PhaseMade] on. The journal treats a
+// machine id as opaque. MaxLifetimeMinutes is the machine's lifetime from the claim
+// answer, [MinLifetime] to [MaxLifetime], in every phase. An entry has no field for a
+// secret or for inputs.
 type Entry struct {
 	DispatchID, Phase, MachineID string
 	MaxLifetimeMinutes           int
 }
 
-// line is e as the journal writes it: the four fields, with - for no machine id and
-// for no lifetime.
+// line is e as the journal writes it: the four fields, with - for no machine id.
 func (e Entry) line() string {
-	machine, lifetime := e.MachineID, noLifetime
+	machine := e.MachineID
 	if machine == "" {
 		machine = noMachine
 	}
-	if e.MaxLifetimeMinutes != 0 {
-		lifetime = strconv.Itoa(e.MaxLifetimeMinutes)
-	}
-	return e.DispatchID + " " + e.Phase + " " + machine + " " + lifetime + "\n"
+	return e.DispatchID + " " + e.Phase + " " + machine + " " + strconv.Itoa(e.MaxLifetimeMinutes) + "\n"
 }
 
 // check returns the first field of e that is out of shape, as a phrase that quotes no
@@ -108,10 +101,10 @@ func (e Entry) check() string {
 		return "the phase is not claimed, made or dispatched"
 	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.MachineID, p) }):
 		return "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
+	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
+		return "the lifetime is not 15 to 1470 minutes"
 	case e.Phase == PhaseClaimed && e.MachineID != "":
 		return "the machine id is set in the phase claimed"
-	case e.Phase == PhaseClaimed && e.MaxLifetimeMinutes != 0:
-		return "the lifetime is set in the phase claimed"
 	case e.Phase == PhaseClaimed:
 		return ""
 	case e.MachineID == "":
@@ -120,10 +113,6 @@ func (e Entry) check() string {
 		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
 	case e.MachineID == noMachine:
 		return "the machine id is -, which the journal writes for no machine id"
-	case e.MaxLifetimeMinutes == 0:
-		return "the phase made or dispatched has no lifetime"
-	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
-		return "the lifetime is not 15 to 1470 minutes"
 	}
 	return ""
 }
@@ -186,7 +175,7 @@ func Open(dir string) (*Journal, error) {
 
 // parse takes the first line off b and splits it into an entry. The cause is not ""
 // when the line has no line feed, is not four fields that are not empty, separated by
-// single spaces, or has a lifetime that is neither - nor a whole number.
+// single spaces, or has a lifetime that is not a whole number.
 func parse(b *[]byte) (Entry, string) {
 	const cause = "the line is not four fields separated by single spaces and ended by a line feed"
 	i := bytes.IndexByte(*b, '\n')
@@ -203,13 +192,10 @@ func parse(b *[]byte) (Entry, string) {
 	if e.MachineID == noMachine {
 		e.MachineID = ""
 	}
-	switch lifetime := fields[3]; {
-	case lifetime == noLifetime:
-	case lifetimeShape.MatchString(lifetime):
-		e.MaxLifetimeMinutes, _ = strconv.Atoi(lifetime)
-	default:
-		return Entry{}, "the lifetime is not - or a whole number of minutes"
+	if !lifetimeShape.MatchString(fields[3]) {
+		return Entry{}, "the lifetime is not a whole number of minutes"
 	}
+	e.MaxLifetimeMinutes, _ = strconv.Atoi(fields[3])
 	return e, ""
 }
 
