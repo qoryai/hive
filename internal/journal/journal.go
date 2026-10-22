@@ -2,8 +2,8 @@
 // <state folder>/dispatches, with one line per live dispatch, and [Recover], which
 // returns what to do with each line after a restart.
 //
-// An entry has three fields, a dispatch id, a phase and a machine id, and no field for
-// a secret or for inputs. Each field is checked against a fixed shape before it is
+// An entry has four fields, a dispatch id, a phase, a machine id and the machine's
+// lifetime in minutes, and no field for a secret or for inputs. Each field is checked against a fixed shape before it is
 // written and after it is read. A machine id that contains qak_, qrk_, qecr_ or qecp_,
 // the start of a secret, is out of shape.
 package journal
@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -30,6 +31,18 @@ const maxSize = 1 << 20
 
 // noMachine is the machine id field of a line whose dispatch has no machine id.
 const noMachine = "-"
+
+// noLifetime is the lifetime field of a line whose dispatch has no machine id.
+const noLifetime = "-"
+
+// The bounds of a machine's lifetime in minutes, as the provisioner contract states
+// max_lifetime_minutes of a claim answer.
+const (
+	// MinLifetime is the shortest lifetime of a machine, in minutes.
+	MinLifetime = 15
+	// MaxLifetime is the longest lifetime of a machine, in minutes.
+	MaxLifetime = 1470
+)
 
 // The phases of a dispatch, in order. In claimed, no make has returned, so a machine
 // may exist without a machine id in the journal: a restart looks the machine up in
@@ -58,22 +71,31 @@ var (
 	// machineIDShape is the machine id of the adapter protocol: 1 to 128 printable
 	// ASCII characters other than a space.
 	machineIDShape = regexp.MustCompile(`^[!-~]{1,128}$`)
+	// lifetimeShape is a whole number of 1 to 4 digits with no leading zero.
+	lifetimeShape = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
 )
 
-// Entry is one live dispatch. MachineID is empty in [PhaseClaimed] and is the machine
-// id that the adapter's make returned from [PhaseMade] on. The journal treats a
-// machine id as opaque. An entry has no field for a secret or for inputs.
+// Entry is one live dispatch. MachineID and MaxLifetimeMinutes are empty and 0 in
+// [PhaseClaimed]. From [PhaseMade] on, MachineID is the machine id that the adapter's
+// make returned, and MaxLifetimeMinutes is the machine's lifetime from the claim
+// answer, [MinLifetime] to [MaxLifetime]. The journal treats a machine id as opaque.
+// An entry has no field for a secret or for inputs.
 type Entry struct {
 	DispatchID, Phase, MachineID string
+	MaxLifetimeMinutes           int
 }
 
-// line is e as the journal writes it: the three fields, with - for no machine id.
+// line is e as the journal writes it: the four fields, with - for no machine id and
+// for no lifetime.
 func (e Entry) line() string {
-	machine := e.MachineID
+	machine, lifetime := e.MachineID, noLifetime
 	if machine == "" {
 		machine = noMachine
 	}
-	return e.DispatchID + " " + e.Phase + " " + machine + "\n"
+	if e.MaxLifetimeMinutes != 0 {
+		lifetime = strconv.Itoa(e.MaxLifetimeMinutes)
+	}
+	return e.DispatchID + " " + e.Phase + " " + machine + " " + lifetime + "\n"
 }
 
 // check returns the first field of e that is out of shape, as a phrase that quotes no
@@ -88,6 +110,8 @@ func (e Entry) check() string {
 		return "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	case e.Phase == PhaseClaimed && e.MachineID != "":
 		return "the machine id is set in the phase claimed"
+	case e.Phase == PhaseClaimed && e.MaxLifetimeMinutes != 0:
+		return "the lifetime is set in the phase claimed"
 	case e.Phase == PhaseClaimed:
 		return ""
 	case e.MachineID == "":
@@ -96,13 +120,17 @@ func (e Entry) check() string {
 		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
 	case e.MachineID == noMachine:
 		return "the machine id is -, which the journal writes for no machine id"
+	case e.MaxLifetimeMinutes == 0:
+		return "the phase made or dispatched has no lifetime"
+	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
+		return "the lifetime is not 15 to 1470 minutes"
 	}
 	return ""
 }
 
 // Journal is the file <state folder>/dispatches, mode 0600, of at most 1 MiB: one line
-// per live dispatch, "dispatch_id phase machine_id", in the order of
-// their claims. Each change writes the whole file to a new file, synced, renames it
+// per live dispatch, "dispatch_id phase machine_id max_lifetime_minutes", in the order
+// of their claims. Each change writes the whole file to a new file, synced, renames it
 // over the journal and syncs the folder, so a crash leaves the journal before the
 // change or after it. A Journal is safe for use from several goroutines.
 type Journal struct {
@@ -157,10 +185,10 @@ func Open(dir string) (*Journal, error) {
 }
 
 // parse takes the first line off b and splits it into an entry. The cause is not ""
-// when the line has no line feed, or is not three fields that are not empty, separated
-// by single spaces.
+// when the line has no line feed, is not four fields that are not empty, separated by
+// single spaces, or has a lifetime that is neither - nor a whole number.
 func parse(b *[]byte) (Entry, string) {
-	const cause = "the line is not three fields separated by single spaces and ended by a line feed"
+	const cause = "the line is not four fields separated by single spaces and ended by a line feed"
 	i := bytes.IndexByte(*b, '\n')
 	if i < 0 {
 		*b = nil
@@ -168,12 +196,19 @@ func parse(b *[]byte) (Entry, string) {
 	}
 	fields := strings.Split(string((*b)[:i]), " ")
 	*b = (*b)[i+1:]
-	if len(fields) != 3 || slices.Contains(fields, "") {
+	if len(fields) != 4 || slices.Contains(fields, "") {
 		return Entry{}, cause
 	}
-	e := Entry{fields[0], fields[1], fields[2]}
+	e := Entry{DispatchID: fields[0], Phase: fields[1], MachineID: fields[2]}
 	if e.MachineID == noMachine {
 		e.MachineID = ""
+	}
+	switch lifetime := fields[3]; {
+	case lifetime == noLifetime:
+	case lifetimeShape.MatchString(lifetime):
+		e.MaxLifetimeMinutes, _ = strconv.Atoi(lifetime)
+	default:
+		return Entry{}, "the lifetime is not - or a whole number of minutes"
 	}
 	return e, ""
 }
