@@ -1,0 +1,23 @@
+# The start unit of a machine that the provisioner makes. It runs
+# /usr/local/libexec/qory/qory-machine-start as root at boot, once. The script sets up the
+# Docker daemon's engine proxy before docker.service starts, runs qory run as the user
+# qory, and powers the machine off when qory run exits or any step fails.
+#
+# Install it as /etc/systemd/system/qory-machine.service, mode 0644, and enable it.
+
+[Unit]
+Description=Run qory on this machine, then power it off
+Wants=network-online.target
+After=network-online.target
+# docker.service starts after this unit sends READY, so the Docker daemon reads the
+# engine proxy from /etc/docker/daemon.json when it first starts.
+Before=docker.service
+
+[Service]
+Type=notify
+# systemd-notify, a child of the script, sends READY.
+NotifyAccess=all
+ExecStart=/usr/local/libexec/qory/qory-machine-start
+
+[Install]
+WantedBy=multi-user.target
