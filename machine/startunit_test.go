@@ -455,6 +455,7 @@ func TestStartUnitFails(t *testing.T) {
 	path := commands(t, sh)
 	const (
 		json1       = "Launch this machine with start data that is one JSON object. The user data is not one JSON object."
+		escape      = "Write the start data without a backslash. Valid start data has no escape sequence, and the user data contains a backslash."
 		member      = "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address."
 		version     = "Set version to 1 in the start data. This script reads only start data version 1."
 		lifetime    = "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer."
@@ -485,6 +486,8 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "empty", userData: ``, want: json1},
 		{name: "two objects", userData: good(runCode, gatewayURL, gatewayAddress) + good(runCode, gatewayURL, gatewayAddress), want: json1},
 		{name: "an array", userData: `[1]`, want: json1},
+		{name: "an escaped duplicate key", userData: doc("1", `60, "max_lifetime_minute\u0073": 9999`), want: escape},
+		{name: "an escaped slash", userData: good(runCode, `https:\/\/gateway.example.com`, gatewayAddress), want: escape},
 		{name: "an unknown member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60, "port": 1}`, want: member},
 		{name: "a gateway member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5", "port": 1}, "max_lifetime_minutes": 60}`, want: member},
 		{name: "version 2", userData: doc("2", "60"), want: version},
@@ -513,7 +516,8 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "run code with I", userData: good("qecr_IARKER00000000000000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
 		{name: "run code with three parts", userData: good(runCode+".MARKERruncode000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
 		{name: "run code too short", userData: good(runCode[:len(runCode)-1], gatewayURL, gatewayAddress), want: code},
-		{name: "run code with a newline", userData: good(runCode+"\n", gatewayURL, gatewayAddress), want: code},
+		// JSON writes the newline as \n, so the backslash check stops the script.
+		{name: "run code with a newline", userData: good(runCode+"\n", gatewayURL, gatewayAddress), want: escape},
 		{name: "gateway as text", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": "https://gateway.example.com", "max_lifetime_minutes": 60}`, want: gateway},
 		{name: "URL with a path", userData: good(runCode, gatewayURL+"/v1", gatewayAddress), want: url},
 		{name: "URL with a slash", userData: good(runCode, gatewayURL+"/", gatewayAddress), want: url},
@@ -657,6 +661,7 @@ func TestStartUnitFiles(t *testing.T) {
 func TestStartUnitSecretLines(t *testing.T) {
 	allowed := []string{
 		`data=$(printf 'X-aws-ec2-metadata-token: %s\n' "$token" |`,
+		`if [[ $data == *'\'* ]]; then`,
 		`problem=$(printf '%s' "$data" | jq -rs '`,
 		`run_code=$(printf '%s' "$data" | jq -rs '.[0].run_code' 2>/dev/null) || problem=json`,
 		`url=$(printf '%s' "$data" | jq -rs '.[0].gateway.url' 2>/dev/null) || problem=json`,

@@ -155,22 +155,28 @@ aws-ec2)
 	;;
 esac
 
-# The values are printable ASCII without spaces once this check passes, so each one
-# below comes out of jq whole.
-problem=$(printf '%s' "$data" | jq -rs '
-	def text: type == "string" and test("\\A[!-~]+\\z");
-	if length != 1 or (.[0] | type) != "object" then "json"
-	else .[0] |
-		if (keys - ["version", "run_code", "gateway", "max_lifetime_minutes"]) != [] then "member"
-		elif .version != 1 then "version"
-		elif (.run_code | text | not) then "run_code"
-		elif (.gateway | type) != "object" then "gateway"
-		elif (.gateway | keys - ["url", "address"]) != [] then "member"
-		elif (.gateway.url | text | not) then "url"
-		elif (.gateway.address | text | not) then "address"
-		elif (.max_lifetime_minutes | type) != "number" then "lifetime"
-		else "ok" end
-	end' 2>/dev/null) || problem=json
+# Valid start data has no backslash. An escape such as \u0073 in a member name would
+# give jq a member that the text checks below do not count.
+if [[ $data == *'\'* ]]; then
+	problem=escape
+else
+	# The values are printable ASCII without spaces once this check passes, so each one
+	# below comes out of jq whole.
+	problem=$(printf '%s' "$data" | jq -rs '
+		def text: type == "string" and test("\\A[!-~]+\\z");
+		if length != 1 or (.[0] | type) != "object" then "json"
+		else .[0] |
+			if (keys - ["version", "run_code", "gateway", "max_lifetime_minutes"]) != [] then "member"
+			elif .version != 1 then "version"
+			elif (.run_code | text | not) then "run_code"
+			elif (.gateway | type) != "object" then "gateway"
+			elif (.gateway | keys - ["url", "address"]) != [] then "member"
+			elif (.gateway.url | text | not) then "url"
+			elif (.gateway.address | text | not) then "address"
+			elif (.max_lifetime_minutes | type) != "number" then "lifetime"
+			else "ok" end
+		end' 2>/dev/null) || problem=json
+fi
 url=
 address=
 run_code=
@@ -221,6 +227,7 @@ fi
 case $problem in
 ok) ;;
 json) fail "Launch this machine with start data that is one JSON object. The user data is not one JSON object." ;;
+escape) fail "Write the start data without a backslash. Valid start data has no escape sequence, and the user data contains a backslash." ;;
 member) fail "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address." ;;
 version) fail "Set version to 1 in the start data. This script reads only start data version 1." ;;
 lifetime) fail "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer." ;;
@@ -293,7 +300,7 @@ chown -R qory "$certs_dir" 2>/dev/null || fail "Add the user qory to the machine
 # systemctl start then waits until docker.service is up, before qory runs.
 systemd-notify --ready 2>/dev/null || fail "Run this script from qory-machine.service, which has Type=notify. Sending READY to systemd failed."
 systemctl start docker.service 2>/dev/null || fail "Read the journal of docker.service for the cause. Starting docker.service failed."
-# qory and its children send nothing to systemd for this unit.
+# qory and its children inherit no NOTIFY_SOCKET.
 unset NOTIFY_SOCKET
 
 # 5. The run code, for qory only. The folder is given to qory after the file is written.
