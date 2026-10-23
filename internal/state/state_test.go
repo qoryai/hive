@@ -353,6 +353,10 @@ func TestWriteFileReplacesByRename(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("%d files", len(entries))
 	}
+	// Root ignores file modes, so root can write into a folder of mode 0500.
+	if os.Geteuid() == 0 {
+		return
+	}
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}

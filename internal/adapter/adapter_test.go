@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -114,13 +115,50 @@ func (f *fixture) gone(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 500 {
-		if errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) {
+		if errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) || onlyZombies(pgid) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	t.Errorf("a process of the adapter's process group %d still runs", pgid)
+}
+
+// onlyZombies is whether every process of the process group pgid has exited and is not
+// yet reaped: a zombie, state Z in /proc/<pid>/stat. A killed child of the fake adapter
+// becomes a child of PID 1, and kill(-pgid, 0) succeeds until PID 1 reaps it. In a CI
+// container job, PID 1 is tail -f /dev/null, which reaps no child. The check reads /proc,
+// so it runs only on Linux, and it returns false when no process of the group is listed.
+func onlyZombies(pgid int) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	stats, err := filepath.Glob("/proc/[0-9]*/stat")
+	if err != nil {
+		return false
+	}
+	found := false
+	for _, stat := range stats {
+		b, err := os.ReadFile(stat)
+		if err != nil {
+			continue
+		}
+		// The fields after the command name, which is in parentheses and may contain
+		// spaces, start with the state, the parent's id and the group id.
+		i := bytes.LastIndexByte(b, ')')
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(string(b[i+1:]))
+		if len(fields) < 3 || fields[2] != strconv.Itoa(pgid) {
+			continue
+		}
+		if fields[0] != "Z" {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // defect checks that err is a defect of the command name whose message starts with

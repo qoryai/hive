@@ -128,7 +128,8 @@ func resolve(path, name string) string {
 }
 
 // commands makes the stub folder and the tools folder, and returns the PATH that lists
-// only them. It stops the test if a dangerous command resolves outside the stub folder.
+// only them. It skips the test if a tool is not on PATH, and stops the test if a
+// dangerous command resolves outside the stub folder.
 // The stubs read their settings from the environment, so every run shares the folders.
 func commands(t *testing.T, sh string) string {
 	t.Helper()
@@ -150,7 +151,7 @@ func commands(t *testing.T, sh string) string {
 		}
 		real, err := exec.LookPath(name)
 		if err != nil {
-			t.Fatalf("install %s: %v", name, err)
+			t.Skipf("install %s to run this test: %v", name, err)
 		}
 		if err := os.Symlink(real, filepath.Join(toolDir, name)); err != nil {
 			t.Fatal(err)

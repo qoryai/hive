@@ -321,12 +321,15 @@ func TestReadReadsTheFile(t *testing.T) {
 	if _, err := Read(filepath.Join(t.TempDir(), "none.json")); err == nil || !strings.HasPrefix(err.Error(), "Create the settings file: open ") {
 		t.Errorf("%v", err)
 	}
-	unreadable := filepath.Join(t.TempDir(), "unreadable.json")
-	if err := os.WriteFile(unreadable, b, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Read(unreadable); err == nil || !strings.HasPrefix(err.Error(), "Make the settings file readable by uid "+strconv.Itoa(os.Geteuid())+": open ") {
-		t.Errorf("%v", err)
+	// Root ignores file modes, so a file of mode 0000 is readable by root.
+	if os.Geteuid() != 0 {
+		unreadable := filepath.Join(t.TempDir(), "unreadable.json")
+		if err := os.WriteFile(unreadable, b, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Read(unreadable); err == nil || !strings.HasPrefix(err.Error(), "Make the settings file readable by uid "+strconv.Itoa(os.Geteuid())+": open ") {
+			t.Errorf("%v", err)
+		}
 	}
 	// A folder opens, and reading it fails, on Linux and on macOS.
 	folder := t.TempDir()
