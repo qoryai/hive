@@ -186,7 +186,7 @@ does not start.
 
 ## Build
 
-Use Go 1.27.1, the version in `go.mod` and `mise.toml`.
+Use Go 1.27.3, the version in `go.mod` and `mise.toml`.
 
 ```
 go build -o qory-provisioner ./cmd/qory-provisioner

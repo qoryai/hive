@@ -50,7 +50,7 @@ func TestDockerfileBuildsBothPrograms(t *testing.T) {
 		t.Fatalf("the Dockerfile has %d stages, want 2", len(all))
 	}
 	build, image := all[0], all[1]
-	if !strings.HasPrefix(build.from, "FROM --platform=$BUILDPLATFORM golang:1.27.1-trixie@sha256:") || !strings.HasSuffix(build.from, " AS build") {
+	if !strings.HasPrefix(build.from, "FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie@sha256:") || !strings.HasSuffix(build.from, " AS build") {
 		t.Errorf("the first stage is %q, want the build stage on $BUILDPLATFORM", build.from)
 	}
 	const base = "FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3 AS provisioner"

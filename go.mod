@@ -1,6 +1,6 @@
 module github.com/qoryai/hive
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.1
@@ -9,8 +9,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.1
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
 	github.com/aws/smithy-go v1.28.1
-	github.com/qoryai/forager v0.7.1-0.20261015171710-c9908c3cbe13
-	github.com/qoryai/integrations v0.3.1-0.20261017134606-e290c862ff5e
+	github.com/qoryai/forager v0.7.1-0.20261023001330-b6ac9f060456
+	github.com/qoryai/integrations v0.3.1-0.20261023003608-f5bc79a41034
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 )
 
