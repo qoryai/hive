@@ -54,8 +54,8 @@ const MaxMessage = 200
 type Failure struct {
 	// Kind is the kind of failure.
 	Kind string
-	// Message is the failure for the operator. It starts with the fix, and it never
-	// contains the start data or a secret.
+	// Message is the failure for the instance admin. It starts with the fix, and it
+	// never contains the start data or a secret.
 	Message string
 }
 

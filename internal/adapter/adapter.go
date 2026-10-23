@@ -59,7 +59,7 @@ type Error struct {
 	Command string
 	// Kind is the kind of failure.
 	Kind string
-	// Message is the failure for the operator.
+	// Message is the failure for the instance admin.
 	Message string
 }
 

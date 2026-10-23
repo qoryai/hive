@@ -145,9 +145,9 @@ func (r *Refusal) Error() string {
 	return fmt.Sprintf("%s%s: Qory Apiary returned %d %s", r.fix(), r.What, r.Status, r.Code)
 }
 
-// fix is the start of a signed refusal's text: what the operator can do, or that the
-// refusal is a defect in the provisioner, or "" for a refusal the provisioner acts on
-// with no operator, such as 410 gone or 409 machine_exists.
+// fix is the start of a signed refusal's text: what the instance admin can do, or that
+// the refusal is a defect in the provisioner, or "" for a refusal that the provisioner
+// handles with no step for the instance admin, such as 410 gone or 409 machine_exists.
 func (r *Refusal) fix() string {
 	switch {
 	case r.Status == http.StatusBadRequest:
