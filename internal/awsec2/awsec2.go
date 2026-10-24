@@ -122,8 +122,8 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	return contracts.MachinesMakeAnswer{ID: m.ID}, nil
 }
 
-// spec is the machine spec of the settings s with the instance type, the image's root
-// device, the pool, the key and the user data.
+// spec is the machine spec of the settings s, with their tags, and the instance type,
+// the image's root device, the pool, the key and the user data.
 func spec(s Settings, instanceType, root, pool, key string, userData []byte) machine.Spec {
 	return machine.Spec{
 		Key:             key,
@@ -134,6 +134,7 @@ func spec(s Settings, instanceType, root, pool, key string, userData []byte) mac
 		SubnetID:        s.SubnetID,
 		SecurityGroupID: s.SecurityGroupID,
 		UserData:        userData,
+		Tags:            s.Tags,
 	}
 }
 

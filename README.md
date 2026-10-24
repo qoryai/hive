@@ -63,6 +63,36 @@ owner's uid.
 When the state folder has an access key, `serve` reads neither the file nor the
 variable, and logs one line that the one that is set is not used.
 
+## Settings of the EC2 machine adapter
+
+`qory-machines-aws-ec2 check` and `make` read the settings file `aws-ec2.json`, one
+JSON object:
+
+```json
+{
+  "subnet_id": "subnet-0123456789abcdef0",
+  "security_group_id": "sg-0123456789abcdef0",
+  "image_id": "ami-0123456789abcdef0",
+  "sizes": {"standard": "t3.medium", "large": "m7g.large"},
+  "tags": {"qory:stack": "example-stack"}
+}
+```
+
+- `subnet_id` and `security_group_id`: the run subnet and the security group of each
+  machine's network interface. Required.
+- `image_id`: the image that each machine starts from. Required.
+- `sizes`: 1 to 20 entries, each a size name of a make request set to an EC2 instance
+  type. Required.
+- `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine,
+  its volume and its network interface get these tags after `qory:managed`,
+  `qory:pool` and `qory:key`. The dry run of `check` sends them too.
+
+A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
+digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
+`qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
+a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
+member breaks a rule, `check` and `make` fail, and the error starts with the fix.
+
 ## Instance role policy
 
 The provisioner makes no AWS call. The EC2 machine adapter calls EC2 with the
@@ -143,7 +173,8 @@ pool. Replace these example values before you attach it to the instance role:
       "Action": "ec2:CreateTags",
       "Resource": [
         "arn:aws:ec2:<region>:<account-id>:instance/*",
-        "arn:aws:ec2:<region>:<account-id>:volume/*"
+        "arn:aws:ec2:<region>:<account-id>:volume/*",
+        "arn:aws:ec2:<region>:<account-id>:network-interface/*"
       ],
       "Condition": {
         "StringEquals": {
@@ -178,15 +209,19 @@ What each statement allows, and why:
 - `LaunchInstance` allows `ec2:RunInstances` to make an instance only with the tag
   `qory:managed` set to `true`, no tag keys other than `qory:managed`, `qory:pool` and
   `qory:key`, IMDSv2 required, and a metadata hop limit of 1. The adapter sends each
-  make with these tags and metadata options.
+  make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
+  key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
+  `UnauthorizedOperation`.
 - `LaunchVolume` allows the volumes of a launch only with the same tags, and only
-  encrypted. The adapter marks the root volume encrypted.
+  encrypted. The adapter marks the root volume encrypted. Add the keys of `tags` to
+  its `aws:TagKeys` too.
 - `LaunchNetworkInterface` allows the network interface of a launch only without a
   public IP address. The adapter sends `AssociatePublicIpAddress` set to false.
 - `LaunchFromSettings` allows a launch only into the subnet and the security group of
   `aws-ec2.json`, and only from its image.
 - `TagAtLaunch` allows `ec2:CreateTags` only inside `ec2:RunInstances`, which tags the
-  instance and its volume as it makes them. The adapter tags nothing after a launch.
+  instance, its volume and its network interface as it makes them. The adapter tags
+  nothing after a launch.
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
   finds a machine by its key, and `ec2:DescribeImages`, which reads the image's root
   device name. Neither action accepts a limit to a resource, so the resource is `*`.

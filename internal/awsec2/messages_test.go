@@ -37,6 +37,10 @@ func TestMessagesFit(t *testing.T) {
 		`{"subnet_id": "subnet-0123456789abcdef0", "security_group_id": "x", "image_id": "x", "sizes": {}}`,
 		`{"subnet_id": "subnet-0123456789abcdef0", "security_group_id": "sg-0123456789abcdef0", "image_id": "x", "sizes": {}}`,
 		`{` + ok + `, "sizes": {}}`,
+		withTags(`[]`),
+		withTags(`{"!": ""}`),
+		withTags(`{"aws:a": ""}`),
+		withTags(`{"qory:key": ""}`),
 	} {
 		_, err := ParseSettings([]byte(doc))
 		if err == nil {
