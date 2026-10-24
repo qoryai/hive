@@ -112,9 +112,15 @@ type run struct {
 
 func start(t *testing.T, f *fakeApiary, dir, code string) run {
 	t.Helper()
+	return startWith(t, context.Background(), f, dir, code, nil)
+}
+
+// startWith is start with ctx, and with the Config changed by set when set is not nil.
+func startWith(t *testing.T, ctx context.Context, f *fakeApiary, dir, code string, set func(*Config)) run {
+	t.Helper()
 	var logs bytes.Buffer
 	var r run
-	r.st, r.err = Start(context.Background(), Config{
+	c := Config{
 		Dir:       dir,
 		ApiaryURL: f.url,
 		Version:   "dev",
@@ -131,7 +137,11 @@ func start(t *testing.T, f *fakeApiary, dir, code string) run {
 			return k, err
 		},
 		Hostname: func() (string, error) { return "provisioner-host.example.com", nil },
-	})
+	}
+	if set != nil {
+		set(&c)
+	}
+	r.st, r.err = Start(ctx, c)
 	r.log = logs.String()
 	return r
 }

@@ -36,7 +36,14 @@ machine adapter, and deletes each machine once its dispatch ends. It writes its 
 standard error.
 
 On the first start, while the state folder has no access key, serve enrols one with
-the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
+the node pool's enrolment code (qecp_…). serve reads the code from the file at
+enrolment_code_file in the settings file, which Qory Apiary writes for a node pool
+installed with it, or else from QORY_ENROLMENT_CODE. Set only one of the two: with both
+set, serve exits with status 1. While the file is missing, serve reads it again every
+10 seconds. Make root or the user that serve runs as the owner of the file and of each
+folder above it. Other users may not write them, and a group may write them only when
+it is gid 0, wheel, admin, or the owner's primary group with the owner's name;
+otherwise serve exits with status 1.
 
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
 machines and deletes each machine whose dispatch has no entry in the journal, with the
@@ -196,5 +203,34 @@ func TestServeNoEnrolmentCode(t *testing.T) {
 	want := `level=ERROR msg="the provisioner stopped on an error" error="Set QORY_ENROLMENT_CODE to an enrolment code from the node pool's Access key tab in Qory Apiary, then start the provisioner again: the state folder ` + state + ` has no access key."`
 	if code != 1 || !strings.Contains(errs, want) || strings.Count(errs, "\n") != 1 {
 		t.Errorf("exit %d, stderr %q, want one line with %s", code, errs, want)
+	}
+}
+
+// TestServeReadsTheEnrolmentCodeFile checks that serve passes enrolment_code_file from
+// the settings to the enrolment: a file with a gateway's code stops serve with the line
+// that names the file, and the file together with QORY_ENROLMENT_CODE stops it with the
+// line that says to remove one. Neither line contains the code.
+func TestServeReadsTheEnrolmentCodeFile(t *testing.T) {
+	dir := t.TempDir()
+	codeFile := writeFile(t, dir, "code", "qecg_MARKERC0FFEE7A1B0000000000.AAAAAAAAAAAAAAAAAAAAAA\n")
+	settings := writeFile(t, dir, "settings.json", `{"apiary_url":"https://apiary.example.com","gateway_address":"10.0.1.5","adapter":{"command":"/usr/local/bin/qory-machines-aws-ec2","settings":"/etc/qory-provisioner/aws-ec2.json"},"enrolment_code_file":"`+codeFile+`"}`)
+	state := filepath.Join(dir, "state")
+	code, errs := runArgs("serve", "--settings", settings, "--state-dir", state)
+	want := `level=ERROR msg="the provisioner stopped on an error" error="Set enrolment_code_file in the settings file to the file in which Qory Apiary writes a node pool's enrolment code: the code in `
+	if code != 1 || !strings.Contains(errs, want) || !strings.Contains(errs, ` is for a gateway."`) || strings.Count(errs, "\n") != 1 || strings.Contains(errs, "MARKER") {
+		t.Errorf("exit %d, stderr %q, want one line with %s", code, errs, want)
+	}
+
+	var both buffer
+	getenv := func(name string) string {
+		if name == "QORY_ENROLMENT_CODE" {
+			return markerCode
+		}
+		return ""
+	}
+	code = run([]string{"serve", "--settings", settings, "--state-dir", state}, env{stderr: &both, getenv: getenv})
+	want = `level=ERROR msg="the provisioner stopped on an error" error="Remove QORY_ENROLMENT_CODE from the environment or enrolment_code_file from the settings file, then start the provisioner again: the provisioner reads the enrolment code from one of them, and both are set."`
+	if code != 1 || !strings.Contains(both.String(), want) || strings.Count(both.String(), "\n") != 1 || strings.Contains(both.String(), "MARKER") {
+		t.Errorf("exit %d, stderr %q, want one line with %s", code, both.String(), want)
 	}
 }

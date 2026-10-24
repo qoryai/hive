@@ -25,6 +25,41 @@ node pool, stop the old provisioner before you start the new one. A new provisio
 with a new state folder starts with an empty journal, so it deletes the machines that
 the old one made, also those that run a dispatch.
 
+## Enrol the access key
+
+On the first start, while the state folder has no access key, `serve` enrols one with
+the node pool's enrolment code (`qecp_…`). Pass the code in one of two ways:
+
+- `enrolment_code_file` in the settings file: the absolute path of the file that Qory
+  Apiary writes for a node pool installed with it, such as
+  `/run/qory-enrolment/provisioner/code`. The member is optional.
+- `QORY_ENROLMENT_CODE` in the environment: a code from the node pool's **Access key**
+  tab in Qory Apiary.
+
+Set only one of the two. With both set, `serve` exits with status 1, and the error
+starts with "Remove QORY_ENROLMENT_CODE from the environment or enrolment_code_file
+from the settings file".
+
+While the file is missing, `serve` logs one line that starts with `the enrolment code
+file is missing` and reads the file again every 10 seconds. It reads at most 78 bytes,
+the longest code and a newline, and removes one trailing newline. A code for another
+kind of node stops `serve` before it sends a request.
+
+Before `serve` reads the file, it checks the file and each folder above it, on the path
+as written and on the path with its links resolved:
+
+1. Root or the user that `serve` runs as, uid 65532 in the image, owns each of them.
+2. Other users may not write them. A folder that root owns with the sticky bit set,
+   such as `/tmp`, passes.
+3. A group may write them only when it is gid 0, `wheel`, `admin`, or the owner's
+   primary group with the owner's name.
+
+Use a regular file, not a folder or a named pipe. If a check fails, `serve` exits with
+status 1, and the error starts with the fix and contains the path and the owner's uid.
+
+When the state folder has an access key, `serve` reads neither the file nor the
+variable, and logs one line that the one that is set is not used.
+
 ## Instance role policy
 
 The provisioner makes no AWS call. The EC2 machine adapter calls EC2 with the
