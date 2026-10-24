@@ -23,8 +23,7 @@ import (
 	"github.com/qoryai/integrations/contracts"
 )
 
-// The tags on every machine, its volume and its network interface. A machine has all
-// three.
+// The tags on every machine and its volume. A machine has all three.
 const (
 	TagManaged = "qory:managed"
 	TagPool    = "qory:pool"

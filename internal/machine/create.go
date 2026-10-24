@@ -39,9 +39,9 @@ type Spec struct {
 	// UserData is the raw user data, at most MaxUserData bytes. Create encodes it
 	// with base64.
 	UserData []byte
-	// Tags maps more tag keys to their values. The machine, its volume and its
-	// network interface get them after qory:managed, qory:pool and qory:key, sorted
-	// by key, so a repeated Create sends the same input. EC2 accepts at most 50 tags
+	// Tags maps more tag keys to their values. The machine and its volume get them
+	// after qory:managed, qory:pool and qory:key, sorted by key, so a repeated Create
+	// sends the same input. EC2 accepts at most 50 tags
 	// on a resource.
 	Tags map[string]string
 }
@@ -126,12 +126,9 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 			DeviceName: aws.String(spec.RootDevice),
 			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(true)},
 		}},
-		// RunInstances makes the network interface too, and a condition on request
-		// tags in the instance role's policy can cover it, so it gets the same tags.
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},
 			{ResourceType: types.ResourceTypeVolume, Tags: tags},
-			{ResourceType: types.ResourceTypeNetworkInterface, Tags: tags},
 		},
 	}
 	if withToken {

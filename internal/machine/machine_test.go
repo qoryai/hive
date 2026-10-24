@@ -52,8 +52,8 @@ func instance(id, state, token string) types.Instance {
 // TestCreateInput pins every field of the RunInstances input that Create sends: the
 // subnet and the security group only on the network interface, which has no public
 // address, the IMDSv2 options, the stop on shutdown, the encrypted root volume, and
-// only the tags qory:managed, qory:pool and qory:key on the instance, its volume and
-// its network interface when the spec has no more tags.
+// only the tags qory:managed, qory:pool and qory:key on the instance and its volume
+// when the spec has no more tags.
 func TestCreateInput(t *testing.T) {
 	spec := testSpec()
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
@@ -97,7 +97,6 @@ func TestCreateInput(t *testing.T) {
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},
 			{ResourceType: types.ResourceTypeVolume, Tags: tags},
-			{ResourceType: types.ResourceTypeNetworkInterface, Tags: tags},
 		},
 		UserData: aws.String(base64.StdEncoding.EncodeToString(spec.UserData)),
 	}
@@ -113,8 +112,8 @@ func TestCreateInput(t *testing.T) {
 }
 
 // TestCreateTags pins that the tags of the spec follow qory:managed, qory:pool and
-// qory:key, sorted by key, on the instance, the volume and the network interface,
-// in Create's input and in CheckRights' dry run.
+// qory:key, sorted by key, on the instance and the volume, in Create's input and in
+// CheckRights' dry run.
 func TestCreateTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": "test", "empty": ""}
@@ -142,7 +141,6 @@ func TestCreateTags(t *testing.T) {
 	want := []types.TagSpecification{
 		{ResourceType: types.ResourceTypeInstance, Tags: wantTags},
 		{ResourceType: types.ResourceTypeVolume, Tags: wantTags},
-		{ResourceType: types.ResourceTypeNetworkInterface, Tags: wantTags},
 	}
 	if len(f.runs) != 2 || !aws.ToBool(f.runs[1].DryRun) {
 		t.Fatalf("%d RunInstances calls, want Create's and a dry run", len(f.runs))

@@ -130,7 +130,7 @@ func wantRunForm(extra ...[2]string) url.Values {
 		"UserData":                                    {base64.StdEncoding.EncodeToString(testSpec().UserData)},
 	}
 	f.Set("BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
-	for i, rt := range []string{"instance", "volume", "network-interface"} {
+	for i, rt := range []string{"instance", "volume"} {
 		p := fmt.Sprintf("TagSpecification.%d.", i+1)
 		f.Set(p+"ResourceType", rt)
 		f.Set(p+"Tag.1.Key", "qory:managed")
@@ -174,8 +174,8 @@ func TestWireCreate(t *testing.T) {
 }
 
 // TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool
-// and qory:key and sorted by key, on all three resource types, in Create's request and
-// in CheckRights' dry run.
+// and qory:key and sorted by key, on the instance and the volume, in Create's request
+// and in CheckRights' dry run.
 func TestWireTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": ""}

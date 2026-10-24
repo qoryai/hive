@@ -83,9 +83,9 @@ JSON object:
 - `image_id`: the image that each machine starts from. Required.
 - `sizes`: 1 to 20 entries, each a size name of a make request set to an EC2 instance
   type. Required.
-- `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine,
-  its volume and its network interface get these tags after `qory:managed`,
-  `qory:pool` and `qory:key`. The dry run of `check` sends them too.
+- `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
+  and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
+  dry run of `check` sends them too.
 
 A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
@@ -173,8 +173,7 @@ pool. Replace these example values before you attach it to the instance role:
       "Action": "ec2:CreateTags",
       "Resource": [
         "arn:aws:ec2:<region>:<account-id>:instance/*",
-        "arn:aws:ec2:<region>:<account-id>:volume/*",
-        "arn:aws:ec2:<region>:<account-id>:network-interface/*"
+        "arn:aws:ec2:<region>:<account-id>:volume/*"
       ],
       "Condition": {
         "StringEquals": {
@@ -220,8 +219,7 @@ What each statement allows, and why:
 - `LaunchFromSettings` allows a launch only into the subnet and the security group of
   `aws-ec2.json`, and only from its image.
 - `TagAtLaunch` allows `ec2:CreateTags` only inside `ec2:RunInstances`, which tags the
-  instance, its volume and its network interface as it makes them. The adapter tags
-  nothing after a launch.
+  instance and its volume as it makes them. The adapter tags nothing after a launch.
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
   finds a machine by its key, and `ec2:DescribeImages`, which reads the image's root
   device name. Neither action accepts a limit to a resource, so the resource is `*`.

@@ -219,14 +219,13 @@ func TestMake(t *testing.T) {
 	}
 }
 
-// wantTagSpecs fails t unless in tags the instance, the volume and the network
-// interface, in that order, each with tags.
+// wantTagSpecs fails t unless in tags the instance and the volume, in that order,
+// each with tags.
 func wantTagSpecs(t *testing.T, in *ec2.RunInstancesInput, tags []types.Tag) {
 	t.Helper()
 	want := []types.TagSpecification{
 		{ResourceType: types.ResourceTypeInstance, Tags: tags},
 		{ResourceType: types.ResourceTypeVolume, Tags: tags},
-		{ResourceType: types.ResourceTypeNetworkInterface, Tags: tags},
 	}
 	if !reflect.DeepEqual(in.TagSpecifications, want) {
 		t.Errorf("tag specifications\n%+v\nwant\n%+v", in.TagSpecifications, want)
@@ -234,8 +233,8 @@ func wantTagSpecs(t *testing.T, in *ec2.RunInstancesInput, tags []types.Tag) {
 }
 
 // TestTags pins that make and check's dry run send the tags of the settings after
-// qory:managed, qory:pool and qory:key, sorted by key, on the instance, the volume
-// and the network interface.
+// qory:managed, qory:pool and qory:key, sorted by key, on the instance and the
+// volume.
 func TestTags(t *testing.T) {
 	f := &fakeAPI{
 		image: image,

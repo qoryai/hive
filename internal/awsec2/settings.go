@@ -34,8 +34,8 @@ type Settings struct {
 	// standard to t3.medium: 1 to 20 entries.
 	Sizes map[string]string
 	// Tags maps a tag key to its value, such as qory:stack to example-stack: at most 20
-	// entries. Each machine, its volume and its network interface get these tags
-	// after qory:managed, qory:pool and qory:key. Tags is nil when the member tags is
+	// entries. Each machine and its volume get these tags after qory:managed,
+	// qory:pool and qory:key. Tags is nil when the member tags is
 	// absent or an empty object.
 	Tags map[string]string
 }
