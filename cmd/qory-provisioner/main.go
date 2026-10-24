@@ -98,10 +98,11 @@ the node pool's enrolment code (qecp_…). serve reads the code from the file at
 enrolment_code_file in the settings file, which Qory Apiary writes for a node pool
 installed with it, or else from QORY_ENROLMENT_CODE. Set only one of the two: with both
 set, serve exits with status 1. While the file is missing, serve reads it again every
-10 seconds. Make root or the user that serve runs as the owner of the file and of each
-folder above it. Other users may not write them, and a group may write them only when
-it is gid 0, wheel, admin, or the owner's primary group with the owner's name;
-otherwise serve exits with status 1.
+10 seconds. Make root or the user that serve runs as the owner of the file, of each
+link on the way, and of each folder above them. Other users may not write the file or
+the folders, except a folder that root owns with the sticky bit set, such as /tmp. A
+group may write them only when it is gid 0, wheel, admin, or the owner's primary group
+with the owner's name. Otherwise serve exits with status 1.
 
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
 machines and deletes each machine whose dispatch has no entry in the journal, with the

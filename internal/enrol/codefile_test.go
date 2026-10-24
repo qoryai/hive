@@ -118,7 +118,7 @@ func errText(err error) string {
 func TestStartEnrolsFromTheCodeFile(t *testing.T) {
 	f := newFakeApiary(t, poolEnrolled)
 	dir := stateDir(t)
-	code := strings.ReplaceAll(poolCode(f), "-", "")
+	code := accesskey.CodePrefixPool + codeCore + "." + f.signer.Fingerprint()
 	path := writeCodeFile(t, code+"\n")
 	r := startWith(t, context.Background(), f, dir, "", withCodeFile(t, path))
 	if r.err != nil {
@@ -335,8 +335,8 @@ func TestStartRefusesACodeFileOthersMayWrite(t *testing.T) {
 	}
 }
 
-// TestReadCodeFileChecksTheOwnerAndTheGroup pins, on files, that a code file another
-// user owns is refused with its uid, and that a group may write the file or its folder
+// TestReadCodeFileChecksTheOwnerAndTheGroup pins, on files, that a code file in a
+// folder another user owns is refused with the folder's owner, and that a group may write the file or its folder
 // only as the names allow.
 func TestReadCodeFileChecksTheOwnerAndTheGroup(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -349,7 +349,7 @@ func TestReadCodeFileChecksTheOwnerAndTheGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = readCodeFile(path, euid+1, systemNames)
-	want := "Make root or uid " + strconv.Itoa(int(euid)+1) + " the owner of " + resolved + ", then start the provisioner again: uid " + strconv.Itoa(int(euid)) + " owns it, so a user other than root and the provisioner could change the enrolment code."
+	want := "Make root or uid " + strconv.Itoa(int(euid)+1) + " the owner of " + filepath.Dir(resolved) + ", then start the provisioner again: uid " + strconv.Itoa(int(euid)) + " owns it, so a user other than root and the provisioner could change the enrolment code."
 	if err == nil || err.Error() != want {
 		t.Errorf("%v, want %q", err, want)
 	}
@@ -408,8 +408,12 @@ func TestReadCodeFileChecksLinks(t *testing.T) {
 	if err := os.Chmod(open, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	_, err := readCodeFile(link, euid, systemNames)
-	if err == nil || !strings.HasPrefix(err.Error(), "Remove the write permission of other users from "+open+",") {
+	resolvedOpen, err := filepath.EvalSymlinks(open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = readCodeFile(link, euid, systemNames)
+	if err == nil || !strings.HasPrefix(err.Error(), "Remove the write permission of other users from "+resolvedOpen+",") {
 		t.Errorf("%v", err)
 	}
 	if err := os.Chmod(open, 0o700); err != nil {
@@ -476,9 +480,68 @@ func TestReadCodeFileBoundsTheRead(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = readCodeFile(path, euid, systemNames)
-		want := "Set enrolment_code_file in the settings file to the file in which Qory Apiary writes a node pool's enrolment code: " + resolved + " is longer than one code and a newline, 78 bytes."
+		want := "Set enrolment_code_file in the settings file to the file in which Qory Apiary writes a node pool's enrolment code: " + resolved + " is longer than 78 bytes, the most that one code and a newline take."
 		if err == nil || err.Error() != want {
 			t.Errorf("%d bytes: %v", len(content), err)
 		}
+	}
+}
+
+// TestReadCodeFileChecksEveryLinkOnTheWay pins that a link to a link is followed one
+// link at a time: the folder of the second link is checked too, so a folder that every
+// user may write, which holds the second link, is refused. A relative target is read
+// from the link's folder, and a loop of links is refused.
+func TestReadCodeFileChecksEveryLinkOnTheWay(t *testing.T) {
+	euid := uint32(os.Geteuid())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(base, "real")
+	open := filepath.Join(base, "open")
+	for _, d := range []string{realDir, open} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "code"), []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../real", filepath.Join(open, "l2")); err != nil {
+		t.Fatal(err)
+	}
+	l1 := filepath.Join(base, "l1")
+	if err := os.Symlink(filepath.Join(open, "l2"), l1); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readCodeFile(filepath.Join(l1, "code"), euid, systemNames); err != nil || got != "marker" {
+		t.Errorf("%q %v", got, err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err = readCodeFile(filepath.Join(l1, "code"), euid, systemNames)
+	want := "Remove the write permission of other users from " + open + ", then start the provisioner again: every user may write it (drwxrwxrwx, owner uid " + strconv.Itoa(int(euid)) + ")."
+	if err == nil || err.Error() != want {
+		t.Errorf("%v, want %q", err, want)
+	}
+
+	loop := filepath.Join(base, "loop")
+	if err := os.Symlink("loop", loop); err != nil {
+		t.Fatal(err)
+	}
+	_, err = readCodeFile(loop, euid, systemNames)
+	want = "Set enrolment_code_file in the settings file to a path that leads through at most 40 links: " + loop + " leads through more."
+	if err == nil || err.Error() != want {
+		t.Errorf("%v, want %q", err, want)
+	}
+	if _, err := readCodeFile(filepath.Join(base, "dangling"), euid, systemNames); !errors.Is(err, errMissing) {
+		t.Errorf("a missing file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "none"), filepath.Join(realDir, "gone")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCodeFile(filepath.Join(realDir, "gone"), euid, systemNames); !errors.Is(err, errMissing) {
+		t.Errorf("a link to a missing file: %v", err)
 	}
 }

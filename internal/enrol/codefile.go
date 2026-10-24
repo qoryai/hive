@@ -64,21 +64,29 @@ func sleep(ctx context.Context, d time.Duration) error {
 }
 
 // readCodeFile returns the content of the enrolment code file at path, without one
-// trailing newline, or errMissing when the file or a folder above it is not there. Before
-// it reads a byte, it checks the file and every folder above it, on the path as given
-// and on the path with its links resolved, by [trusted]: so only root and the user euid
-// may change the code. The file is a regular file of at most maxCodeFile bytes. No error
-// contains the content.
+// trailing newline, or errMissing when the file, a folder above it or a link's target is
+// not there. Before it reads a byte, it checks by [trusted] the file, every folder above
+// it, and for each link on the way, as [resolve] follows them, the link and every folder
+// above it: so only root and the user euid may change the code. The file is a regular
+// file of at most maxCodeFile bytes. No error contains the content.
 func readCodeFile(path string, euid uint32, n names) (string, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", errMissing
-	}
+	resolved, links, err := resolve(path)
 	if err != nil {
-		return "", readError(path, err)
+		return "", err
 	}
-	// O_NOFOLLOW refuses a link put in place after EvalSymlinks, and O_NONBLOCK keeps
-	// the open of a named pipe from blocking.
+	for _, l := range links {
+		if err := trusted(l.path, "the link ", l.owner, euid, n); err != nil {
+			return "", err
+		}
+		if err := chainTrusted(filepath.Dir(l.path), euid, n); err != nil {
+			return "", err
+		}
+	}
+	if err := chainTrusted(filepath.Dir(resolved), euid, n); err != nil {
+		return "", err
+	}
+	// O_NOFOLLOW refuses a link put in place after resolve, and O_NONBLOCK keeps the
+	// open of a named pipe from blocking.
 	f, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", errMissing
@@ -97,22 +105,72 @@ func readCodeFile(path string, euid uint32, n names) (string, error) {
 	if err := trusted(resolved, "", ownerOf(info), euid, n); err != nil {
 		return "", err
 	}
-	if err := chainTrusted(filepath.Dir(resolved), euid, n); err != nil {
-		return "", err
-	}
-	if resolved != path {
-		if err := chainTrusted(path, euid, n); err != nil {
-			return "", err
-		}
-	}
 	b, err := io.ReadAll(io.LimitReader(f, int64(maxCodeFile)+1))
 	if err != nil {
 		return "", readError(path, err)
 	}
 	if len(b) > maxCodeFile {
-		return "", fmt.Errorf("Set enrolment_code_file in the settings file to the file in which Qory Apiary writes a node pool's enrolment code: %s is longer than one code and a newline, %d bytes.", resolved, maxCodeFile)
+		return "", fmt.Errorf("Set enrolment_code_file in the settings file to the file in which Qory Apiary writes a node pool's enrolment code: %s is longer than %d bytes, the most that one code and a newline take.", resolved, maxCodeFile)
 	}
 	return strings.TrimSuffix(string(b), "\n"), nil
+}
+
+// maxLinks is the most links resolve follows, the most Linux follows.
+const maxLinks = 40
+
+// link is a link that resolve followed: its path, in a folder with no link in its path,
+// and its owner.
+type link struct {
+	path  string
+	owner fileOwner
+}
+
+// resolve follows the absolute path one part at a time, as the system does, and returns
+// it with every link resolved, and each link it followed on the way. A link's target
+// takes the place of the link, read from the link's folder when it is relative. So
+// every folder above a link or the file is a folder with no link in its path, and
+// [chainTrusted] checks the folders that a person who changes a link writes. A part
+// that is not there is errMissing.
+func resolve(path string) (string, []link, error) {
+	var links []link
+	current := "/"
+	rest := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	for len(rest) > 0 {
+		part := rest[0]
+		rest = rest[1:]
+		if part == "" || part == "." {
+			continue
+		}
+		next := filepath.Join(current, part)
+		if part == ".." {
+			current = next
+			continue
+		}
+		info, err := os.Lstat(next)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, errMissing
+		}
+		if err != nil {
+			return "", nil, readError(path, err)
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			current = next
+			continue
+		}
+		links = append(links, link{path: next, owner: ownerOf(info)})
+		if len(links) > maxLinks {
+			return "", nil, fmt.Errorf("Set enrolment_code_file in the settings file to a path that leads through at most %d links: %s leads through more.", maxLinks, path)
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", nil, readError(path, err)
+		}
+		if filepath.IsAbs(target) {
+			current = "/"
+		}
+		rest = append(strings.Split(target, "/"), rest...)
+	}
+	return current, links, nil
 }
 
 // readError is the error of reading the enrolment code file at path that failed with
