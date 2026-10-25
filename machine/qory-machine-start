@@ -2,8 +2,9 @@
 # qory-machine-start: the start unit's script, run as root by qory-machine.service at
 # boot, once on each machine that the provisioner makes. It reads the start data, drops
 # every packet to the instance metadata service, sets up the engine proxy, starts
-# docker.service, runs qory run as the user qory, and powers the machine off when qory
-# run exits, when any step fails, or when the machine's lifetime ends.
+# docker.service, runs qory run as the user qory in the folder
+# /var/lib/qory-machine/work, and powers the machine off when qory run exits, when any
+# step fails, or when the machine's lifetime ends.
 #
 # The machine image must contain bash 5, curl, jq, iptables, ip6tables, runuser (from
 # util-linux), systemd (shutdown, systemctl and systemd-notify), sed, and the coreutils
@@ -45,6 +46,8 @@ qory_dir=$root/etc/qory
 engine_proxy_json=$qory_dir/engine-proxy.json
 run_code_dir=$root/run/qory-machine
 run_code_file=$run_code_dir/run-code
+state_dir=$root/var/lib/qory-machine
+work_dir=$state_dir/work
 
 # Every exit, after a failure, a signal or the end of qory run, removes the run code and
 # powers the machine off.
@@ -313,7 +316,22 @@ unset run_code
 chmod 0600 "$run_code_file" 2>/dev/null || fail "Check that root can write $run_code_dir. Setting $run_code_file to mode 0600 failed."
 chown qory "$run_code_file" "$run_code_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $run_code_dir and $run_code_file to qory failed."
 
-# 6. The run. Its exit powers the machine off, through on_exit.
+# 6. The working folder of qory run, which qory takes as the root of the work. qory run
+# exits with an error when the home of its harness, under $home/.cache, is inside that
+# folder, so the folder is neither / nor $home, and neither is inside the other once
+# their links are resolved. The check runs before chown, which follows links.
+mkdir -p -m 0755 "$state_dir" 2>/dev/null || fail "Check that root can write $root/var/lib. Making $state_dir failed."
+mkdir -p -m 0700 "$work_dir" 2>/dev/null || fail "Check that root can write $state_dir. Making $work_dir failed."
+work_real=$(cd -- "$work_dir" 2>/dev/null && pwd -P) && home_real=$(cd -- "$home" 2>/dev/null && pwd -P) ||
+	fail "Check that root can read $work_dir and $home. Resolving their links failed."
+if [[ $work_real/ == "${home_real%/}"/* || $home_real/ == "${work_real%/}"/* ]]; then
+	fail "Make $work_dir and $home two folders in the machine image, neither inside the other. With links resolved, they are $work_real and $home_real."
+fi
+chown qory "$work_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $work_dir to qory failed."
+# runuser without --login keeps the working directory, so qory runs in $work_dir.
+cd -- "$work_dir" 2>/dev/null || fail "Check that root can read $work_dir. Changing to the folder failed."
+
+# 7. The run. Its exit powers the machine off, through on_exit.
 status=0
 HOME=$home runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" || status=$?
 if ((status != 0)); then
