@@ -203,11 +203,7 @@ func TestMake(t *testing.T) {
 		{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
 		{Key: aws.String("qory:key"), Value: aws.String(testKey)},
 	}
-	for _, ts := range in.TagSpecifications {
-		if !reflect.DeepEqual(ts.Tags, wantTags) {
-			t.Errorf("%s tags %+v", ts.ResourceType, ts.Tags)
-		}
-	}
+	wantTagSpecs(t, in, wantTags)
 	ni := in.NetworkInterfaces
 	if len(ni) != 1 || aws.ToBool(ni[0].AssociatePublicIpAddress) || ni[0].AssociatePublicIpAddress == nil ||
 		aws.ToString(ni[0].SubnetId) != "subnet-0123456789abcdef0" || !reflect.DeepEqual(ni[0].Groups, []string{"sg-0123456789abcdef0"}) ||
@@ -220,6 +216,61 @@ func TestMake(t *testing.T) {
 	}
 	if in.InstanceInitiatedShutdownBehavior != types.ShutdownBehaviorStop || aws.ToString(in.BlockDeviceMappings[0].DeviceName) != "/dev/xvda" {
 		t.Errorf("shutdown %q, root device %q", in.InstanceInitiatedShutdownBehavior, aws.ToString(in.BlockDeviceMappings[0].DeviceName))
+	}
+}
+
+// wantTagSpecs fails t unless in tags the instance and the volume, in that order,
+// each with tags.
+func wantTagSpecs(t *testing.T, in *ec2.RunInstancesInput, tags []types.Tag) {
+	t.Helper()
+	want := []types.TagSpecification{
+		{ResourceType: types.ResourceTypeInstance, Tags: tags},
+		{ResourceType: types.ResourceTypeVolume, Tags: tags},
+	}
+	if !reflect.DeepEqual(in.TagSpecifications, want) {
+		t.Errorf("tag specifications\n%+v\nwant\n%+v", in.TagSpecifications, want)
+	}
+}
+
+// TestTags pins that make and check's dry run send the tags of the settings after
+// qory:managed, qory:pool and qory:key, sorted by key, on the instance and the
+// volume.
+func TestTags(t *testing.T) {
+	f := &fakeAPI{
+		image: image,
+		run: func(in *ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
+			if aws.ToBool(in.DryRun) {
+				return nil, apiError("DryRunOperation")
+			}
+			return &ec2.RunInstancesOutput{Instances: []types.Instance{launched(testID, "pending", testKey)}}, nil
+		},
+		describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
+			return nil, apiError("DryRunOperation")
+		},
+	}
+	h, _, _ := testHandler(f)
+	path := writeSettings(t, withTags(`{"qory:stack": "example-stack", "env": "test"}`))
+	if status, out := serve(t, h, "make", path, makeRequest("large", []byte("x"))); status != adapterio.ExitOK {
+		t.Fatalf("make: exit status %d, output %q", status, out)
+	}
+	if status, out := serve(t, h, "check", path, `{"version": 1}`); status != adapterio.ExitOK {
+		t.Fatalf("check: exit status %d, output %q", status, out)
+	}
+	if len(f.runs) != 3 {
+		t.Fatalf("%d RunInstances calls, want make's and 2 dry runs", len(f.runs))
+	}
+	for i, in := range f.runs {
+		pool, key := testPool, testKey
+		if i > 0 {
+			pool, key = "np_0000000000000000", "dp_0000000000000000"
+		}
+		wantTagSpecs(t, in, []types.Tag{
+			{Key: aws.String("qory:managed"), Value: aws.String("true")},
+			{Key: aws.String("qory:pool"), Value: aws.String(pool)},
+			{Key: aws.String("qory:key"), Value: aws.String(key)},
+			{Key: aws.String("env"), Value: aws.String("test")},
+			{Key: aws.String("qory:stack"), Value: aws.String("example-stack")},
+		})
 	}
 }
 

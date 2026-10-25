@@ -48,10 +48,10 @@ var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed"
 // stub is the script behind every stub. It appends its name and arguments to
 // $STUB_LOG, one line per call. The curl stub returns $STUB_TOKEN for the token PUT and
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
-// stdin. The runuser stub logs HOME and NOTIFY_SOCKET, and links the run code file to
-// $STUB_KEEP, so the test can read it after the script removes it; with $STUB_TERM set,
-// it sends SIGTERM to the script. A STUB_FAIL_ variable makes one stub exit with an
-// error.
+// stdin. The runuser stub logs HOME, NOTIFY_SOCKET and the working directory, and
+// links the run code file to $STUB_KEEP, so the test can read it after the script
+// removes it; with $STUB_TERM set, it sends SIGTERM to the script. A STUB_FAIL_
+// variable makes one stub exit with an error.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
@@ -86,6 +86,7 @@ systemd-notify | chown) ;;
 runuser)
 	printf 'runuser-home %s\n' "$HOME" >>"$STUB_LOG"
 	printf 'runuser-notify-socket %s\n' "${NOTIFY_SOCKET-unset}" >>"$STUB_LOG"
+	printf 'runuser-pwd %s\n' "$PWD" >>"$STUB_LOG"
 	ln "$7" "$STUB_KEEP" 2>/dev/null || true
 	[[ -z ${STUB_TERM:-} ]] || kill -TERM "$PPID"
 	exit "${STUB_QORY_EXIT:-0}"
@@ -171,8 +172,8 @@ type env struct {
 	root, userData, keep, log, path string
 }
 
-// newEnv makes a root folder with forager.yaml, /etc/hosts and /dev/urandom, and a user
-// data file with valid start data.
+// newEnv makes a root folder with forager.yaml, /etc/hosts, /dev/urandom and /var/lib,
+// and a user data file with valid start data.
 func newEnv(t *testing.T, path string) *env {
 	t.Helper()
 	dir := t.TempDir()
@@ -183,7 +184,7 @@ func newEnv(t *testing.T, path string) *env {
 		log:      filepath.Join(dir, "stub.log"),
 		path:     path,
 	}
-	for _, d := range []string{"/home/qory/.config/qory", "/etc", "/run", "/dev"} {
+	for _, d := range []string{"/home/qory/.config/qory", "/etc", "/run", "/var/lib", "/dev"} {
 		if err := os.MkdirAll(e.root+d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -289,6 +290,12 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 	return r
 }
 
+// inside reports whether path is dir or inside dir.
+func inside(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 func mode(t *testing.T, path string) fs.FileMode {
 	t.Helper()
 	info, err := os.Lstat(path)
@@ -310,7 +317,7 @@ func read(t *testing.T, path string) string {
 // TestStartUnitRunsQory follows one boot: the script reads the start data, drops the
 // metadata service's packets, writes the hosts line, schedules the power-off at the end
 // of the lifetime, writes the engine proxy files, starts docker.service, runs qory with
-// the run code file, and powers the machine off.
+// the run code file in the working folder, and powers the machine off.
 func TestStartUnitRunsQory(t *testing.T) {
 	sh := bash(t)
 	path := commands(t, sh)
@@ -370,9 +377,11 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"systemd-notify --ready",
 				"systemctl start docker.service",
 				"chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine",
+				"chown qory " + e.root + "/var/lib/qory-machine/work",
 				"runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + c.url,
 				"runuser-home " + e.root + "/home/qory",
 				"runuser-notify-socket unset",
+				"runuser-pwd " + e.root + "/var/lib/qory-machine/work",
 				"systemctl poweroff",
 			}
 			if !slices.Equal(r.log, want) {
@@ -428,6 +437,19 @@ func TestStartUnitRunsQory(t *testing.T) {
 			if got := mode(t, e.root+"/run/qory-machine"); got != fs.ModeDir|0o700 {
 				t.Errorf("/run/qory-machine has mode %v, want 0700", got)
 			}
+
+			// qory run exits with an error when its home, under HOME, is inside the folder
+			// it runs in.
+			work := e.root + "/var/lib/qory-machine/work"
+			if got := mode(t, work); got != fs.ModeDir|0o700 {
+				t.Errorf("/var/lib/qory-machine/work has mode %v, want 0700", got)
+			}
+			if got := mode(t, e.root+"/var/lib/qory-machine"); got != fs.ModeDir|0o755 {
+				t.Errorf("/var/lib/qory-machine has mode %v, want 0755", got)
+			}
+			if work == "/" || inside(e.root+"/home/qory", work) || inside(work, e.root+"/home/qory") {
+				t.Errorf("qory runs in %s, which is / or is inside or contains HOME %s", work, e.root+"/home/qory")
+			}
 		})
 	}
 }
@@ -447,6 +469,17 @@ func readOnly(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(path, 0o755) })
+}
+
+// link makes a symbolic link at path to target, and the folders that contain path.
+func link(t *testing.T, target, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
@@ -482,6 +515,8 @@ func TestStartUnitFails(t *testing.T) {
 		want     string
 		// orWant is a second accepted line, for input that jq versions parse differently.
 		orWant string
+		// setup changes the root folder before the run.
+		setup func(t *testing.T, root string)
 	}{
 		{name: "not JSON", userData: `{"version": 1,`, want: json1},
 		{name: "empty", userData: ``, want: json1},
@@ -557,6 +592,37 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "/etc/qory not writable", readOnly: "/etc/qory", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/qory. Writing {root}/etc/qory/engine-proxy.json failed."},
 		{name: "/run/qory-machine not writable", readOnly: "/run/qory-machine", ran: "systemctl start docker.service", want: "Check that root can write {root}/run/qory-machine. Writing {root}/run/qory-machine/run-code failed."},
 		{name: "qory run fails", vars: []string{"STUB_QORY_EXIT=3"}, status: 3, ran: "runuser-home {root}/home/qory", want: "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status 3."},
+		{name: "/var/lib/qory-machine not writable", readOnly: "/var/lib/qory-machine", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine", want: "Check that root can write {root}/var/lib/qory-machine. Making {root}/var/lib/qory-machine/work failed."},
+		// The script resolves the link and stops before it writes into /.
+		{
+			name: "working folder links to /", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			setup: func(t *testing.T, root string) { link(t, "/", root+"/var/lib/qory-machine/work") },
+			want:  "Make {root}/var/lib/qory-machine/work and {root}/home/qory two folders in the machine image, neither inside the other. With links resolved, they are / and {real}/home/qory.",
+		},
+		{
+			name: "working folder links into home", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(root+"/home/qory/work", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link(t, root+"/home/qory/work", root+"/var/lib/qory-machine/work")
+			},
+			want: "Make {root}/var/lib/qory-machine/work and {root}/home/qory two folders in the machine image, neither inside the other. With links resolved, they are {real}/home/qory/work and {real}/home/qory.",
+		},
+		{
+			name: "home links into the working folder", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			setup: func(t *testing.T, root string) {
+				work := root + "/var/lib/qory-machine/work"
+				if err := os.MkdirAll(work, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(root+"/home/qory", work+"/qory"); err != nil {
+					t.Fatal(err)
+				}
+				link(t, work+"/qory", root+"/home/qory")
+			},
+			want: "Make {root}/var/lib/qory-machine/work and {root}/home/qory two folders in the machine image, neither inside the other. With links resolved, they are {real}/var/lib/qory-machine/work and {real}/var/lib/qory-machine/work/qory.",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -583,6 +649,9 @@ func TestStartUnitFails(t *testing.T) {
 			if c.readOnly != "" {
 				readOnly(t, e.root+c.readOnly)
 			}
+			if c.setup != nil {
+				c.setup(t, e.root)
+			}
 			r := e.run(t, sh, c.vars...)
 			status := c.status
 			if status == 0 {
@@ -591,7 +660,11 @@ func TestStartUnitFails(t *testing.T) {
 			if r.status != status {
 				t.Errorf("status %d, want %d", r.status, status)
 			}
-			want := strings.ReplaceAll(c.want, "{root}", e.root) + "\n"
+			real, err := filepath.EvalSymlinks(e.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := strings.NewReplacer("{root}", e.root, "{real}", real).Replace(c.want) + "\n"
 			if c.orWant != "" && r.stderr == c.orWant+"\n" {
 				want = r.stderr
 			}

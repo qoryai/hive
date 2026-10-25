@@ -1,6 +1,6 @@
 // Package settings reads the provisioner's settings file: one JSON object, read
-// strictly, that contains no secret. The access key is in the state folder, and the
-// enrolment code is in the environment.
+// strictly, that contains no secret. The access key is in the state folder. The
+// enrolment code is in the environment, or in the file at enrolment_code_file.
 package settings
 
 import (
@@ -38,6 +38,10 @@ type Settings struct {
 	MaxMachines int
 	// Adapter is the machine adapter: its program and its settings file.
 	Adapter Adapter
+	// EnrolmentCodeFile is the path of the file that contains the node pool's enrolment
+	// code, which Qory Apiary writes for a node pool installed with it, or "" when the
+	// member is left out. It is a path as [Adapter]'s paths are.
+	EnrolmentCodeFile string
 }
 
 // Adapter is the machine adapter's program and its settings file. Each is an absolute
@@ -53,10 +57,10 @@ type Adapter struct {
 const DefaultMaxMachines = 1
 
 // members are the settings' members, in the order an error lists the missing ones.
-var members = []string{"apiary_url", "gateway_address", "max_machines", "adapter"}
+var members = []string{"apiary_url", "gateway_address", "max_machines", "adapter", "enrolment_code_file"}
 
 // optional are the members that may be left out.
-var optional = []string{"max_machines"}
+var optional = []string{"max_machines", "enrolment_code_file"}
 
 // adapterMembers are the members of adapter, in the order an error lists the missing
 // ones. Neither may be left out.
@@ -65,21 +69,24 @@ var adapterMembers = []string{"command", "settings"}
 // maxFile is the most bytes a settings file may contain.
 const maxFile = 64 << 10
 
-// maxPath is the most bytes of adapter.command and adapter.settings.
+// maxPath is the most bytes of adapter.command, adapter.settings and
+// enrolment_code_file.
 const maxPath = 4096
 
-// pathRule is the rule of adapter.command and adapter.settings, before an example.
+// pathRule is the rule of adapter.command, adapter.settings and enrolment_code_file,
+// before an example.
 const pathRule = "an absolute path of at most 4096 bytes, with no . or .. element, no double slash, no trailing slash and no NUL byte, such as "
 
 // The rule of each member, which the error of a wrong value states. An error never
 // quotes the value.
 var rules = map[string]string{
-	"apiary_url":       "an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1]",
-	"gateway_address":  "the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address",
-	"max_machines":     "a whole number from 1 to 100, or leave it out for 1",
-	"adapter":          "an object with two members, command and settings",
-	"adapter.command":  pathRule + "/usr/local/bin/qory-machines-aws-ec2",
-	"adapter.settings": pathRule + "/etc/qory-provisioner/aws-ec2.json",
+	"apiary_url":          "an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1]",
+	"gateway_address":     "the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address",
+	"max_machines":        "a whole number from 1 to 100, or leave it out for 1",
+	"adapter":             "an object with two members, command and settings",
+	"adapter.command":     pathRule + "/usr/local/bin/qory-machines-aws-ec2",
+	"adapter.settings":    pathRule + "/etc/qory-provisioner/aws-ec2.json",
+	"enrolment_code_file": pathRule + "/run/qory-enrolment/provisioner/code, or leave it out",
 }
 
 var integerShape = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
@@ -161,6 +168,8 @@ func Parse(b []byte) (Settings, error) {
 				return Settings{}, err
 			}
 			good = true
+		case "enrolment_code_file":
+			s.EnrolmentCodeFile, good = cleanPath(raw)
 		}
 		if !good {
 			return Settings{}, wrong(name)
@@ -183,7 +192,7 @@ var (
 	errSecret  = errors.New("Remove the access key secret (qak_) from the settings file: the provisioner stores its access key in the state folder.")
 	errRunKey  = errors.New("Remove the run key (qrk_) from the settings file: a run key belongs in no file.")
 	errRunCode = errors.New("Remove the run code (qecr_) from the settings file: a run code belongs in no file.")
-	errCode    = errors.New("Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE.")
+	errCode    = errors.New("Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE, or in the file at enrolment_code_file.")
 )
 
 // secretIn is the error of settings b that contain what looks like an access key

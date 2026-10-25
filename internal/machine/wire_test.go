@@ -106,9 +106,10 @@ const runReply = `<?xml version="1.0" encoding="UTF-8"?>
   </item></instancesSet>
 </RunInstancesResponse>`
 
-// wantRunForm is the RunInstances request that Create sends for testSpec, without
-// the client token, every field as the EC2 Query protocol writes it.
-func wantRunForm() url.Values {
+// wantRunForm is the RunInstances request that Create sends for testSpec with the
+// more tags extra, as key and value pairs sorted by key, without the client token,
+// every field as the EC2 Query protocol writes it.
+func wantRunForm(extra ...[2]string) url.Values {
 	f := url.Values{
 		"Action":                         {"RunInstances"},
 		"Version":                        {"2016-11-15"},
@@ -138,6 +139,10 @@ func wantRunForm() url.Values {
 		f.Set(p+"Tag.2.Value", "np_0123456789abcdef")
 		f.Set(p+"Tag.3.Key", "qory:key")
 		f.Set(p+"Tag.3.Value", "dp_0123456789abcdef")
+		for j, kv := range extra {
+			f.Set(fmt.Sprintf("%sTag.%d.Key", p, j+4), kv[0])
+			f.Set(fmt.Sprintf("%sTag.%d.Value", p, j+4), kv[1])
+		}
 	}
 	return f
 }
@@ -165,6 +170,36 @@ func TestWireCreate(t *testing.T) {
 	}
 	if !strings.HasPrefix(s.headers[0].Get("Authorization"), "AWS4-HMAC-SHA256 Credential=AKIDTESTONLY/") {
 		t.Errorf("Authorization %q", s.headers[0].Get("Authorization"))
+	}
+}
+
+// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool
+// and qory:key and sorted by key, on the instance and the volume, in Create's request
+// and in CheckRights' dry run.
+func TestWireTags(t *testing.T) {
+	spec := testSpec()
+	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": ""}
+	extra := [][2]string{{"env", ""}, {"qory:stack", "example-stack"}}
+	c, s := newWireClient(t, reply{200, runReply})
+	if _, err := c.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	want := wantRunForm(extra...)
+	want.Set("ClientToken", spec.Key)
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
+	}
+
+	c, s = newWireClient(t, reply{412, errorXML("DryRunOperation")})
+	if err := c.CheckRights(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	got := s.forms[0]
+	got.Del("ClientToken")
+	want = wantRunForm(extra...)
+	want.Set("DryRun", "true")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dry run request\n%v\nwant\n%v", got, want)
 	}
 }
 

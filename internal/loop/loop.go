@@ -45,8 +45,8 @@ import (
 
 // DefaultSize is the size that the loop asks the machine adapter for when a claim
 // names no machine type. Each adapter's settings map size names to the vendor's
-// machine types, so an operator who sets "standard" in them sets the machine of every
-// claim that names no type.
+// machine types, so the instance admin who sets "standard" in them sets the machine
+// of every claim that names no type.
 const DefaultSize = "standard"
 
 // The times of the loop.

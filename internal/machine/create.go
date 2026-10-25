@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -37,6 +39,11 @@ type Spec struct {
 	// UserData is the raw user data, at most MaxUserData bytes. Create encodes it
 	// with base64.
 	UserData []byte
+	// Tags maps more tag keys to their values. The machine and its volume get them
+	// after qory:managed, qory:pool and qory:key, sorted by key, so a repeated Create
+	// sends the same input. EC2 accepts at most 50 tags
+	// on a resource.
+	Tags map[string]string
 }
 
 // Create makes one machine for spec and returns it as RunInstances returned it,
@@ -88,6 +95,9 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 		{Key: aws.String(TagManaged), Value: aws.String("true")},
 		{Key: aws.String(TagPool), Value: aws.String(spec.PoolID)},
 		{Key: aws.String(TagKey), Value: aws.String(spec.Key)},
+	}
+	for _, k := range slices.Sorted(maps.Keys(spec.Tags)) {
+		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(spec.Tags[k])})
 	}
 	in := &ec2.RunInstancesInput{
 		MinCount:     aws.Int32(1),

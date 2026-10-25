@@ -25,6 +25,74 @@ node pool, stop the old provisioner before you start the new one. A new provisio
 with a new state folder starts with an empty journal, so it deletes the machines that
 the old one made, also those that run a dispatch.
 
+## Enrol the access key
+
+On the first start, while the state folder has no access key, `serve` enrols one with
+the node pool's enrolment code (`qecp_…`). Pass the code in one of two ways:
+
+- `enrolment_code_file` in the settings file: the absolute path of the file that Qory
+  Apiary writes for a node pool installed with it, such as
+  `/run/qory-enrolment/provisioner/code`. The member is optional.
+- `QORY_ENROLMENT_CODE` in the environment: a code from the node pool's **Access key**
+  tab in Qory Apiary.
+
+Set only one of the two. With both set, `serve` exits with status 1, and the error
+starts with "Remove QORY_ENROLMENT_CODE from the environment or enrolment_code_file
+from the settings file".
+
+While the file is missing, `serve` logs one line that starts with `the enrolment code
+file is missing` and reads the file again every 10 seconds. It reads at most 79 bytes
+and stops on a file longer than 78 bytes, the longest code and a newline. It removes
+one trailing newline. A code for another kind of node stops `serve` before it sends a
+request.
+
+Before `serve` reads the file, it follows the path one link at a time, and checks the
+file, each link on the way, and each folder above them:
+
+1. Root or the user that `serve` runs as, uid 65532 in the image, owns each of them.
+2. Other users may not write the file or the folders. A folder that root owns with the
+   sticky bit set, such as `/tmp`, passes.
+3. A group may write them only when it is gid 0, `wheel`, `admin`, or the owner's
+   primary group with the owner's name.
+
+Use a regular file, not a folder or a named pipe, and a path through at most 40 links.
+If a check fails, `serve` exits with status 1, and the error starts with the fix and
+contains the path. An error about an owner or a write permission also contains the
+owner's uid.
+
+When the state folder has an access key, `serve` reads neither the file nor the
+variable, and logs one line that the one that is set is not used.
+
+## Settings of the EC2 machine adapter
+
+`qory-machines-aws-ec2 check` and `make` read the settings file `aws-ec2.json`, one
+JSON object:
+
+```json
+{
+  "subnet_id": "subnet-0123456789abcdef0",
+  "security_group_id": "sg-0123456789abcdef0",
+  "image_id": "ami-0123456789abcdef0",
+  "sizes": {"standard": "t3.medium", "large": "m7g.large"},
+  "tags": {"qory:stack": "example-stack"}
+}
+```
+
+- `subnet_id` and `security_group_id`: the run subnet and the security group of each
+  machine's network interface. Required.
+- `image_id`: the image that each machine starts from. Required.
+- `sizes`: 1 to 20 entries, each a size name of a make request set to an EC2 instance
+  type. Required.
+- `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
+  and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
+  dry run of `check` sends them too.
+
+A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
+digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
+`qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
+a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
+member breaks a rule, `check` and `make` fail, and the error starts with the fix.
+
 ## Instance role policy
 
 The provisioner makes no AWS call. The EC2 machine adapter calls EC2 with the
@@ -140,9 +208,12 @@ What each statement allows, and why:
 - `LaunchInstance` allows `ec2:RunInstances` to make an instance only with the tag
   `qory:managed` set to `true`, no tag keys other than `qory:managed`, `qory:pool` and
   `qory:key`, IMDSv2 required, and a metadata hop limit of 1. The adapter sends each
-  make with these tags and metadata options.
+  make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
+  key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
+  `UnauthorizedOperation`.
 - `LaunchVolume` allows the volumes of a launch only with the same tags, and only
-  encrypted. The adapter marks the root volume encrypted.
+  encrypted. The adapter marks the root volume encrypted. Add the keys of `tags` to
+  its `aws:TagKeys` too.
 - `LaunchNetworkInterface` allows the network interface of a launch only without a
   public IP address. The adapter sends `AssociatePublicIpAddress` set to false.
 - `LaunchFromSettings` allows a launch only into the subnet and the security group of

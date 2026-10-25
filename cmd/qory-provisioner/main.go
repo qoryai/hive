@@ -94,7 +94,15 @@ machine adapter, and deletes each machine once its dispatch ends. It writes its 
 standard error.
 
 On the first start, while the state folder has no access key, serve enrols one with
-the node pool's enrolment code (qecp_…) from QORY_ENROLMENT_CODE.
+the node pool's enrolment code (qecp_…). serve reads the code from the file at
+enrolment_code_file in the settings file, which Qory Apiary writes for a node pool
+installed with it, or else from QORY_ENROLMENT_CODE. Set only one of the two: with both
+set, serve exits with status 1. While the file is missing, serve reads it again every
+10 seconds. Make root or the user that serve runs as the owner of the file, of each
+link on the way, and of each folder above them. Other users may not write the file or
+the folders, except a folder that root owns with the sticky bit set, such as /tmp. A
+group may write them only when it is gid 0, wheel, admin, or the owner's primary group
+with the owner's name. Otherwise serve exits with status 1.
 
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
 machines and deletes each machine whose dispatch has no entry in the journal, with the
@@ -172,7 +180,7 @@ func start(ctx context.Context, f serveFlags, e env, log *slog.Logger) int {
 	if err != nil {
 		return failed(ctx, log, err)
 	}
-	st, err := enrol.Start(ctx, enrol.Config{Dir: f.stateDir, ApiaryURL: s.ApiaryURL, Version: version, Log: log, Getenv: e.getenv})
+	st, err := enrol.Start(ctx, enrol.Config{Dir: f.stateDir, ApiaryURL: s.ApiaryURL, Version: version, Log: log, Getenv: e.getenv, CodeFile: s.EnrolmentCodeFile})
 	if err != nil {
 		return failed(ctx, log, err)
 	}

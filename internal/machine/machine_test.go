@@ -52,7 +52,8 @@ func instance(id, state, token string) types.Instance {
 // TestCreateInput pins every field of the RunInstances input that Create sends: the
 // subnet and the security group only on the network interface, which has no public
 // address, the IMDSv2 options, the stop on shutdown, the encrypted root volume, and
-// the tags qory:managed, qory:pool and qory:key on the instance and its volume.
+// only the tags qory:managed, qory:pool and qory:key on the instance and its volume
+// when the spec has no more tags.
 func TestCreateInput(t *testing.T) {
 	spec := testSpec()
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
@@ -110,21 +111,75 @@ func TestCreateInput(t *testing.T) {
 	}
 }
 
+// TestCreateTags pins that the tags of the spec follow qory:managed, qory:pool and
+// qory:key, sorted by key, on the instance and the volume, in Create's input and in
+// CheckRights' dry run.
+func TestCreateTags(t *testing.T) {
+	spec := testSpec()
+	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": "test", "empty": ""}
+	f := &fakeAPI{run: func(in *ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
+		if aws.ToBool(in.DryRun) {
+			return nil, apiError("DryRunOperation")
+		}
+		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.Key)}}, nil
+	}}
+	c := New(f)
+	if _, err := c.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CheckRights(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	wantTags := []types.Tag{
+		{Key: aws.String("qory:managed"), Value: aws.String("true")},
+		{Key: aws.String("qory:pool"), Value: aws.String("np_0123456789abcdef")},
+		{Key: aws.String("qory:key"), Value: aws.String("dp_0123456789abcdef")},
+		{Key: aws.String("empty"), Value: aws.String("")},
+		{Key: aws.String("env"), Value: aws.String("test")},
+		{Key: aws.String("qory:stack"), Value: aws.String("example-stack")},
+	}
+	want := []types.TagSpecification{
+		{ResourceType: types.ResourceTypeInstance, Tags: wantTags},
+		{ResourceType: types.ResourceTypeVolume, Tags: wantTags},
+	}
+	if len(f.runs) != 2 || !aws.ToBool(f.runs[1].DryRun) {
+		t.Fatalf("%d RunInstances calls, want Create's and a dry run", len(f.runs))
+	}
+	for i, in := range f.runs {
+		if !reflect.DeepEqual(in.TagSpecifications, want) {
+			t.Errorf("call %d: tag specifications\n%+v\nwant\n%+v", i+1, in.TagSpecifications, want)
+		}
+	}
+}
+
 // TestCreateIsRepeatable pins that two Creates with one spec send the same input, so
-// EC2 matches the client token to one machine.
+// EC2 matches the client token to one machine, also with several tags in the spec.
 func TestCreateIsRepeatable(t *testing.T) {
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, "x")}}, nil
 	}}
 	c := New(f)
-	for range 2 {
-		if _, err := c.Create(context.Background(), testSpec()); err != nil {
-			t.Fatal(err)
+	for _, spec := range []Spec{testSpec(), tagged(20)} {
+		f.runs = nil
+		for range 2 {
+			if _, err := c.Create(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !reflect.DeepEqual(f.runs[0], f.runs[1]) {
+			t.Errorf("%d tags: the second input differs:\n%+v\n%+v", len(spec.Tags), f.runs[0], f.runs[1])
 		}
 	}
-	if !reflect.DeepEqual(f.runs[0], f.runs[1]) {
-		t.Errorf("the second input differs:\n%+v\n%+v", f.runs[0], f.runs[1])
+}
+
+// tagged returns testSpec with n more tags.
+func tagged(n int) Spec {
+	spec := testSpec()
+	spec.Tags = map[string]string{}
+	for i := range n {
+		spec.Tags[fmt.Sprintf("tag-%d", i)] = fmt.Sprintf("value-%d", i)
 	}
+	return spec
 }
 
 // TestCreateUserDataBound pins that 16384 bytes of user data are sent and 16385 bytes

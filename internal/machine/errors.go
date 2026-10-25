@@ -45,7 +45,7 @@ type Error struct {
 // settingsFile is how an error refers to the adapter's settings file.
 const settingsFile = "aws-ec2.json"
 
-// Error starts with what the operator does, then the cause.
+// Error starts with what the instance admin does, then the cause.
 func (e *Error) Error() string {
 	var maxAttempts *retry.MaxAttemptsError
 	switch {

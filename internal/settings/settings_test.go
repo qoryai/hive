@@ -58,7 +58,8 @@ func TestParseTakesEveryMember(t *testing.T) {
 	}
 }
 
-// TestParseSetsTheDefaults pins max_machines 1 when the member is left out.
+// TestParseSetsTheDefaults pins max_machines 1 and no enrolment code file when the
+// members are left out.
 func TestParseSetsTheDefaults(t *testing.T) {
 	m := valid()
 	delete(m, "max_machines")
@@ -66,8 +67,31 @@ func TestParseSetsTheDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.MaxMachines != 1 {
+	if s.MaxMachines != 1 || s.EnrolmentCodeFile != "" {
 		t.Errorf("%+v", s)
+	}
+}
+
+// TestParseTakesTheEnrolmentCodeFile pins enrolment_code_file, an optional absolute
+// path, kept as it is written.
+func TestParseTakesTheEnrolmentCodeFile(t *testing.T) {
+	m := valid()
+	m["enrolment_code_file"] = "/run/qory-enrolment/provisioner/code"
+	s, err := parse(t, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.EnrolmentCodeFile != "/run/qory-enrolment/provisioner/code" {
+		t.Errorf("%+v", s)
+	}
+	_, err = Parse([]byte(`{"apiary_url": "https://apiary.example.com", "gateway_address": "10.0.1.5", "adapter": {"command": "/a", "settings": "/b"}, "enrolment_code_file": "/c", "enrolment_code_file": "/d"}`))
+	if err == nil || err.Error() != `Write each member once in the settings file: "/enrolment_code_file" appears more than once.` {
+		t.Errorf("%v", err)
+	}
+	m = valid()
+	m["enrolment_code"] = "/run/qory-enrolment/provisioner/code"
+	if _, err := parse(t, m); err == nil || err.Error() != `Remove the unknown members from the settings file: "enrolment_code".` {
+		t.Errorf("%v", err)
 	}
 }
 
@@ -174,12 +198,13 @@ const wantPathRule = " in the settings file to an absolute path of at most 4096 
 // of bounds, and that the error states the rule and never the value.
 func TestParseRefusesAWrongValue(t *testing.T) {
 	rules := map[string]string{
-		"apiary_url":       "Set apiary_url in the settings file to an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1].",
-		"gateway_address":  "Set gateway_address in the settings file to the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address.",
-		"max_machines":     "Set max_machines in the settings file to a whole number from 1 to 100, or leave it out for 1.",
-		"adapter":          "Set adapter in the settings file to an object with two members, command and settings.",
-		"adapter.command":  "Set adapter.command" + wantPathRule + "/usr/local/bin/qory-machines-aws-ec2.",
-		"adapter.settings": "Set adapter.settings" + wantPathRule + "/etc/qory-provisioner/aws-ec2.json.",
+		"apiary_url":          "Set apiary_url in the settings file to an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1].",
+		"gateway_address":     "Set gateway_address in the settings file to the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address.",
+		"max_machines":        "Set max_machines in the settings file to a whole number from 1 to 100, or leave it out for 1.",
+		"adapter":             "Set adapter in the settings file to an object with two members, command and settings.",
+		"adapter.command":     "Set adapter.command" + wantPathRule + "/usr/local/bin/qory-machines-aws-ec2.",
+		"adapter.settings":    "Set adapter.settings" + wantPathRule + "/etc/qory-provisioner/aws-ec2.json.",
+		"enrolment_code_file": "Set enrolment_code_file" + wantPathRule + "/run/qory-enrolment/provisioner/code, or leave it out.",
 	}
 	paths := []string{`null`, `1`, `""`, `true`, `[]`, `{}`, `"qory-machines-aws-ec2"`, `"bin/qory-machines-aws-ec2"`, `"./qory-machines-aws-ec2"`,
 		`"/usr//local/bin/x"`, `"/usr/local/bin/"`, `"/usr/./local/bin/x"`, `"/usr/local/../bin/x"`, `"/usr/local/bin/x/.."`, `"/usr/local/bin/."`,
@@ -190,10 +215,11 @@ func TestParseRefusesAWrongValue(t *testing.T) {
 		"gateway_address": {`null`, `1`, `""`, `true`, `[]`, `{}`, `"gateway.example.com"`, `"10.0.1"`, `"010.0.1.5"`, `"10.0.1.256"`, `" 10.0.1.5"`, `"10.0.1.5 "`,
 			`"10.0.1.5:8443"`, `"[fd00::5]"`, `"[fd00::5]:8443"`, `"10.0.1.5/32"`, `"fd00::5%eth0"`, `"fe80::1%eth0"`,
 			`"0.0.0.0"`, `"::"`, `"::ffff:0.0.0.0"`, `"127.0.0.1"`, `"127.1.2.3"`, `"::1"`, `"::ffff:127.0.0.1"`, `"224.0.0.1"`, `"239.255.255.250"`, `"ff02::1"`, `"::ffff:224.0.0.1"`},
-		"max_machines":     {`null`, `"1"`, `0`, `101`, `-1`, `1.5`, `2.0`, `1e1`, `true`},
-		"adapter":          {`null`, `1`, `""`, `"/usr/local/bin/qory-machines-aws-ec2"`, `true`, `[]`, `["/usr/local/bin/qory-machines-aws-ec2", "/etc/qory-provisioner/aws-ec2.json"]`},
-		"adapter.command":  paths,
-		"adapter.settings": paths,
+		"max_machines":        {`null`, `"1"`, `0`, `101`, `-1`, `1.5`, `2.0`, `1e1`, `true`},
+		"adapter":             {`null`, `1`, `""`, `"/usr/local/bin/qory-machines-aws-ec2"`, `true`, `[]`, `["/usr/local/bin/qory-machines-aws-ec2", "/etc/qory-provisioner/aws-ec2.json"]`},
+		"adapter.command":     paths,
+		"adapter.settings":    paths,
+		"enrolment_code_file": paths,
 	}
 	for name, values := range bad {
 		for _, v := range values {
@@ -212,11 +238,12 @@ func TestParseRefusesAWrongValue(t *testing.T) {
 func TestParseTakesTheBounds(t *testing.T) {
 	longest := "/" + strings.Repeat("a", 4095)
 	for name, values := range map[string][]any{
-		"apiary_url":       {"https://apiary.example.com/", "https://APIARY.example.com", "https://apiary.example.com:8443", "http://localhost:4000", "http://127.0.0.1:4000", "http://[::1]:4000", "https://10.0.0.1"},
-		"gateway_address":  {"10.0.1.5", "10.255.255.255", "192.168.0.1", "169.254.0.1", "fd00::5", "2001:db8::1", "fe80::1", "::ffff:10.0.1.5"},
-		"max_machines":     {1, 100},
-		"adapter.command":  {"/a", longest, "/opt/qory machines/aws-ec2", "/opt/a..b/.c", "/usr/local/bin/qory-machines-aws-ec2"},
-		"adapter.settings": {"/a", longest, "/etc/qory-provisioner/aws-ec2.json"},
+		"apiary_url":          {"https://apiary.example.com/", "https://APIARY.example.com", "https://apiary.example.com:8443", "http://localhost:4000", "http://127.0.0.1:4000", "http://[::1]:4000", "https://10.0.0.1"},
+		"gateway_address":     {"10.0.1.5", "10.255.255.255", "192.168.0.1", "169.254.0.1", "fd00::5", "2001:db8::1", "fe80::1", "::ffff:10.0.1.5"},
+		"max_machines":        {1, 100},
+		"adapter.command":     {"/a", longest, "/opt/qory machines/aws-ec2", "/opt/a..b/.c", "/usr/local/bin/qory-machines-aws-ec2"},
+		"adapter.settings":    {"/a", longest, "/etc/qory-provisioner/aws-ec2.json"},
+		"enrolment_code_file": {"/a", longest, "/run/qory-enrolment/provisioner/code"},
 	} {
 		for _, v := range values {
 			m := valid()
@@ -252,7 +279,7 @@ func TestParseRefusesASecretOrACode(t *testing.T) {
 		secret  = "Remove the access key secret (qak_) from the settings file: the provisioner stores its access key in the state folder."
 		runKey  = "Remove the run key (qrk_) from the settings file: a run key belongs in no file."
 		runCode = "Remove the run code (qecr_) from the settings file: a run code belongs in no file."
-		code    = "Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE."
+		code    = "Remove the enrolment code (qecn_, qecp_, qecg_ or qeci_) from the settings file: pass a node pool's code in QORY_ENROLMENT_CODE, or in the file at enrolment_code_file."
 		marker  = "MARKER0123456789ABCDEFGHJK"
 		escaped = `q`
 	)
@@ -276,6 +303,7 @@ func TestParseRefusesASecretOrACode(t *testing.T) {
 			`{"gateway_address": "` + tc.value + `"}`,
 			`{"adapter": {"command": "/` + tc.value + `"}}`,
 			`{"adapter": {"settings": "` + tc.value + `"}}`,
+			`{"enrolment_code_file": "/run/` + tc.value + `"}`,
 			`{"` + tc.value + `": 1}`,
 			`{"adapter": {"` + tc.value + `": 1}}`,
 			`{"max_machines": 1, "max_machines": "` + tc.value + `"}`,
@@ -298,7 +326,7 @@ func TestParseRefusesASecretOrACode(t *testing.T) {
 // value, whatever the member.
 func TestNoErrorQuotesAValue(t *testing.T) {
 	const marker = "ZZ marker value"
-	for _, name := range []string{"apiary_url", "gateway_address", "max_machines", "adapter", "adapter.command", "adapter.settings"} {
+	for _, name := range []string{"apiary_url", "gateway_address", "max_machines", "adapter", "adapter.command", "adapter.settings", "enrolment_code_file"} {
 		m := valid()
 		set(m, name, marker)
 		_, err := parse(t, m)
