@@ -34,6 +34,11 @@
 # stage line contains no value of the start data. A stage line that cannot be written
 # does not stop the script.
 #
+# qory run gets QORY_STATUS_FD=3, and descriptor 3 is the script's stderr, so qory run's
+# status and error lines reach the console and the machine log. qory run's stdout and
+# stderr go to the script's stdout, which reaches the journal only: the output of the
+# agent, the setup and the prebuild stays out of the machine log.
+#
 # qory-machine.service needs systemd 246 or later. From that version, systemd-notify
 # waits until systemd has processed READY (a synchronous barrier) before it exits, so
 # systemd links READY to this unit under NotifyAccess=all.
@@ -371,14 +376,15 @@ if [[ $work_real/ == "${home_real%/}"/* || $home_real/ == "${work_real%/}"/* ]];
 	fail "Make $work_dir and $home two folders in the machine image, neither inside the other. With links resolved, they are $work_real and $home_real."
 fi
 chown qory "$work_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $work_dir to qory failed."
-# runuser without --login keeps the working directory, so qory runs in $work_dir.
+# runuser without --login keeps the working directory, so qory runs in $work_dir. It
+# also keeps QORY_STATUS_FD and passes descriptor 3 on to qory.
 cd -- "$work_dir" 2>/dev/null || fail "Check that root can read $work_dir. Changing to the folder failed."
 
 # 7. The run. Its exit powers the machine off, through on_exit.
 status=0
 stage "qory run started"
-HOME=$home runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" || status=$?
+HOME=$home QORY_STATUS_FD=3 runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" 3>&2 2>&1 || status=$?
 if ((status != 0)); then
-	printf '%s\n' "Read the lines of qory run above this line in the machine log for the cause. qory run exited with status $status." >&2
+	printf '%s\n' "Read the status lines of qory run above this line in the machine log for the cause. qory run exited with status $status." >&2
 	exit "$status"
 fi

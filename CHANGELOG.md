@@ -39,6 +39,14 @@ The changes to Hive that no release contains yet, in the shape of
   of docker.service for the cause", and that journal is gone once the machine is
   deleted. After, it reads "Read the lines of docker.service above this line in the
   machine log for the cause".
+- The console, and with it the machine log, gets only qory run's status and error
+  lines. The start script sets `QORY_STATUS_FD=3` for qory run, with descriptor 3 on
+  the console and the journal, and sends qory run's stdout and stderr to the journal
+  only. Before, the standard error of qory run, with the output of the agent, the setup
+  and the prebuild, reached the console and the machine log. After, that output stays
+  in the journal. The failure line after qory run reads "Read the status lines of qory
+  run above this line in the machine log for the cause", where it read "Read the lines
+  of qory run above this line in the machine log for the cause".
 
 ### Fixed
 
