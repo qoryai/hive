@@ -12,12 +12,14 @@ Every change to Hive, newest first, in the shape of
   `qory-machine-start: 2026-10-30T14:02:13Z Docker started`. The stages are start data
   read, firewall set, Docker started, run code written and qory run started. No line
   contains a value of the start data.
-- When the machine adapter cannot make a machine, the provisioner releases the dispatch
-  and then uploads the adapter's error as the dispatch's machine log, which instance
-  admins read. When the release shows that a machine exists after all, the provisioner
-  uploads no error, and the machine's console text becomes the machine log. A text that contains the run code, the start data, a run key or an access key
-  secret is replaced by a fixed text. The release reason stays the fixed text for each
-  kind of failure.
+- When the machine adapter cannot make a machine, the provisioner releases the dispatch.
+  When the release returns 204 or 409 lease_expired, the provisioner then uploads the
+  adapter's error as the dispatch's machine log, which instance admins read. After any
+  other answer, such as 409 machine_exists, 410 gone or a failed request, a machine may
+  exist, so the provisioner uploads no error and keeps the machine log for that
+  machine's console text. A text that contains the run code, the start data, a run key
+  or an access key secret is replaced by a fixed text. The release reason stays the
+  fixed text for each kind of failure.
 
 ### Changed
 

@@ -88,9 +88,9 @@ func (l *loop) claim(ctx context.Context) error {
 }
 
 // handle makes the machine of the claim c and sends dispatched. When the make fails,
-// it releases the dispatch and then uploads the make's error as the dispatch's machine
-// log, unless the release returned 409 machine_exists. It returns an error only when
-// the journal cannot be written before or after the make.
+// it releases the dispatch. When the release returns 204 or 409 lease_expired, it then
+// uploads the make's error as the dispatch's machine log. It returns an error only
+// when the journal cannot be written before or after the make.
 func (l *loop) handle(ctx context.Context, c Claim) error {
 	id := c.DispatchID
 	l.Log.Info("claimed a dispatch", slog.String("dispatch_id", id))
@@ -135,9 +135,10 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		kind := kindOf(err)
 		reason, wait, level := makeFailure(kind)
 		l.Log.Log(ctx, level, "making a machine failed", slog.String("dispatch_id", id), slog.String("kind", string(kind)), errorAttr(err, data))
-		// After 409 machine_exists, the watch adopts the machine, and the machine's
-		// log needs the dispatch's one machine log.
-		if !l.releaseEntry(ctx, id, reason) {
+		// Only 204 and 409 lease_expired show that no machine redeemed the run code.
+		// After any other answer a machine may exist, and its log needs the dispatch's
+		// one machine log.
+		if rerr := l.releaseEntry(ctx, id, reason); rerr == nil || errors.Is(rerr, ErrLeaseExpired) {
 			l.uploadMakeError(ctx, id, shown(err, data), data)
 		}
 		// An entry kept by 409 machine_exists is the watch's during the wait.

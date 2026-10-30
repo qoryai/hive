@@ -183,23 +183,44 @@ func TestAFailedUploadOfAMakeErrorIsLoggedOnce(t *testing.T) {
 	}
 }
 
-// TestAMakeFailureWithAMachineThatExistsUploadsNoError releases the dispatch, which
-// returns 409 machine_exists, and uploads no machine log: the machine's log, which the
-// watch uploads once it adopts the machine, needs the dispatch's one machine log.
-func TestAMakeFailureWithAMachineThatExistsUploadsNoError(t *testing.T) {
-	h := newHarness(t)
-	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later: the vendor's answer was lost"}
-	h.apiary.releaseErr = machineExists
-	h.start()
-	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
-	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + loop.ReasonRetry})
-	equal(t, "the machine logs", h.apiary.takeUploads(), nil)
-	if len(h.find("uploaded the make's error as the machine log")) != 0 || len(h.find("uploading the make's error as the machine log failed")) != 0 {
-		t.Error("the log has a line for an upload of the make's error")
-	}
-	if err := h.stop(); err != nil {
-		t.Error(err)
+// TestAMakeErrorIsUploadedOnlyWhenNoMachineExists releases the dispatch after a failed
+// make, and uploads the make's error only when the release returns 204 or 409
+// lease_expired. After 409 machine_exists, 410 gone or a failed release, a machine may
+// exist, and its log needs the dispatch's one machine log, so no upload follows.
+func TestAMakeErrorIsUploadedOnlyWhenNoMachineExists(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		releaseErr error
+		upload     bool
+	}{
+		{"204", nil, true},
+		{"409 lease_expired", fmt.Errorf("Qory Apiary answered: %w", loop.ErrLeaseExpired), true},
+		{"409 machine_exists", machineExists, false},
+		{"410 gone", fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone), false},
+		{"a failed release", errors.New("Qory Apiary answered 503"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later: the vendor's answer was lost"}
+			h.apiary.releaseErr = c.releaseErr
+			h.start()
+			h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+			h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+			want := []string{"release " + dispatchA + " " + loop.ReasonRetry}
+			var uploads []upload
+			if c.upload {
+				want = append(want, "machine-log "+dispatchA+" false")
+				uploads = []upload{{dispatchA, "Try again later: the vendor's answer was lost (machine adapter command make, kind retry)", false}}
+			}
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), want)
+			equal(t, "the machine logs", h.apiary.takeUploads(), uploads)
+			if got := len(h.find("uploaded the make's error as the machine log")); got != len(uploads) {
+				t.Errorf("the log has %d lines for an upload of the make's error, want %d", got, len(uploads))
+			}
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }
 
