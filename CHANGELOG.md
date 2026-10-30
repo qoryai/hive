@@ -1,6 +1,6 @@
 # Changelog
 
-Every change to Hive, newest first, in the shape of
+The changes to Hive that no release contains yet, in the shape of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
@@ -8,10 +8,11 @@ Every change to Hive, newest first, in the shape of
 ### Added
 
 - The machine's start script, `qory-machine-start`, prints one line to standard error at
-  the end of each stage, with the time in UTC, such as
-  `qory-machine-start: 2026-10-30T14:02:13Z Docker started`. The stages are start data
-  read, firewall set, Docker started, run code written and qory run started. No line
-  contains a value of the start data.
+  each stage, with the time in UTC, such as
+  `qory-machine-start: 2026-10-30T14:02:13Z Docker started`. It prints start data read,
+  firewall set, Docker started and run code written as each of those stages ends, and
+  qory run started just before it runs `qory run`. No line contains a value of the start
+  data. A line that cannot be written does not stop the script.
 - When the machine adapter cannot make a machine, the provisioner releases the dispatch.
   When the release returns 204 or 409 lease_expired, the provisioner then uploads the
   adapter's error as the dispatch's machine log, which instance admins read. After any
