@@ -217,6 +217,15 @@ func (a *fakeApiary) takeCallsKeep() []string {
 	return slices.Clone(a.calls)
 }
 
+// takeUploads returns the machine logs since the last takeUploads.
+func (a *fakeApiary) takeUploads() []upload {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.uploads
+	a.uploads = nil
+	return out
+}
+
 // claimCount is the number of calls of Claim.
 func (a *fakeApiary) claimCount() int {
 	a.mu.Lock()

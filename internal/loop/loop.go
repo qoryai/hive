@@ -8,7 +8,9 @@
 // journal of live dispatches after a restart. Then the claim path and the watch run in
 // parallel until the context ends:
 //   - The claim path claims a dispatch while the journal has fewer entries than
-//     max_machines, records it, makes its machine and sends dispatched.
+//     max_machines, records it, makes its machine and sends dispatched. When the
+//     make fails, it uploads the make's error as the dispatch's machine log and
+//     releases the dispatch.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
 //     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
@@ -118,8 +120,9 @@ type Apiary interface {
 	// Release gives the dispatch back, with a reason of 1 to 200 characters. Its error
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.
 	Release(ctx context.Context, dispatchID, reason string) error
-	// MachineLog uploads the machine's log of the dispatch. truncated is true when
-	// the log is the last part of a longer one.
+	// MachineLog uploads the machine's log of the dispatch, or the error of a make
+	// that made no machine. truncated is true when the log is the last part of a
+	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
 }
 

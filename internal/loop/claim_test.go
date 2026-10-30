@@ -1,6 +1,7 @@
 package loop_test
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -70,10 +71,10 @@ func TestTheDefaultSizeIsStandard(t *testing.T) {
 	}
 }
 
-// TestAMakeFailureOfEachKind releases the dispatch with the kind's reason, removes the
-// entry and waits before the next claim: 60 s for limit and defect, 15 s for retry
-// and other. A defect is logged at the level error. No adapter text reaches the
-// release.
+// TestAMakeFailureOfEachKind uploads the make's error as the machine log, then
+// releases the dispatch with the kind's reason, removes the entry and waits before the
+// next claim: 60 s for limit and defect, 15 s for retry and other. A defect is logged
+// at the level error. No adapter text reaches the release.
 func TestAMakeFailureOfEachKind(t *testing.T) {
 	adapterError := func(k string) error {
 		return &adapter.Error{Command: "make", Kind: k, Message: "Fix the vendor account: adapter text"}
@@ -98,7 +99,8 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 			h.start()
 			h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 			h.clock.waitPending(t, c.wait, loop.WatchInterval)
-			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + c.reason})
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "release " + dispatchA + " " + c.reason})
+			equal(t, "the machine logs", h.apiary.takeUploads(), []upload{{dispatchA, c.err.Error(), false}})
 			if strings.Contains(c.reason, "adapter text") {
 				t.Errorf("the reason %q contains the adapter's text", c.reason)
 			}
@@ -117,6 +119,67 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 				t.Error(err)
 			}
 		})
+	}
+}
+
+// TestAMakeErrorWithASecretIsHidden uploads a fixed text as the machine log in place
+// of a make's error that contains the run code, a piece of the start data, a run key
+// or an access key secret.
+func TestAMakeErrorWithASecretIsHidden(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	// The start data of each claim of newClaim.
+	data := `{"version":1,"run_code":"` + runCode + `","gateway":{"url":"` + gatewayURL + `","address":"10.0.1.5"},"max_lifetime_minutes":60}`
+	piece := base64.StdEncoding.EncodeToString([]byte(data))[20:40]
+	for i, text := range []string{
+		"Fix it: " + runCode,
+		"Fix it: " + piece,
+		"Fix it: qrk_MARKERrunkey000000000000",
+		"Fix it: QAK_MARKERaccesskey0000000000",
+	} {
+		id := []string{dispatchA, dispatchB, dispatchC, dispatchD}[i]
+		if i > 0 {
+			h.clock.Advance(loop.ShortWait)
+		}
+		h.machines.mu.Lock()
+		h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: text}
+		h.machines.mu.Unlock()
+		h.send(claimResult{claim: newClaim(id), ok: true})
+		h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval-time.Duration(i)*loop.ShortWait)
+		if got := string(h.machines.lastStartData()); got != data {
+			t.Fatalf("the start data is %s, want %s", got, data)
+		}
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + id + " false", "release " + id + " " + loop.ReasonRetry})
+		uploads := h.apiary.takeUploads()
+		if len(uploads) != 1 || !strings.Contains(uploads[0].log, "so the provisioner does not show it") || strings.Contains(uploads[0].log, "MARKER") {
+			t.Errorf("the machine logs for %q are %+v, want the fixed text", text, uploads)
+		}
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAFailedUploadOfAMakeErrorStillReleases logs a failed upload of a make's error
+// once, and releases the dispatch with the kind's reason.
+func TestAFailedUploadOfAMakeErrorStillReleases(t *testing.T) {
+	h := newHarness(t)
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the quota"}
+	h.apiary.logErr = errors.New("409 machine_log_exists")
+	h.start()
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+	h.clock.waitPending(t, loop.LongWait, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "release " + dispatchA + " " + loop.ReasonLimit})
+	equal(t, "the journal", h.entries(), nil)
+	lines := h.find("uploading the make's error as the machine log failed")
+	if len(lines) != 1 || lines[0]["level"] != "WARN" || lines[0]["dispatch_id"] != dispatchA || lines[0]["error"] != "409 machine_log_exists" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	if len(h.find("uploaded the make's error as the machine log")) != 0 || len(h.find("released a dispatch")) != 1 {
+		t.Error("the log has a line for an upload, or no line for the release")
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
 	}
 }
 
