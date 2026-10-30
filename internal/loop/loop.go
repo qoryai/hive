@@ -9,8 +9,8 @@
 // parallel until the context ends:
 //   - The claim path claims a dispatch while the journal has fewer entries than
 //     max_machines, records it, makes its machine and sends dispatched. When the
-//     make fails, it uploads the make's error as the dispatch's machine log and
-//     releases the dispatch.
+//     make fails, it releases the dispatch and then uploads the make's error as
+//     the dispatch's machine log, unless a machine redeemed the run code.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
 //     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
@@ -342,11 +342,14 @@ func (l *loop) release(ctx context.Context, id, reason string) (exists bool) {
 
 // releaseEntry releases the dispatch of a claimed entry and removes the entry. When
 // the release returns 409 machine_exists, the entry stays in the phase claimed, so
-// that the watch adopts the machine and no watch deletes it as a stray.
-func (l *loop) releaseEntry(ctx context.Context, id, reason string) {
-	if !l.release(ctx, id, reason) {
-		l.remove(id)
+// that the watch adopts the machine and no watch deletes it as a stray, and exists is
+// true.
+func (l *loop) releaseEntry(ctx context.Context, id, reason string) (exists bool) {
+	if l.release(ctx, id, reason) {
+		return true
 	}
+	l.remove(id)
+	return false
 }
 
 // hiddenError replaces an error's text that contains what looks like a secret.

@@ -88,8 +88,8 @@ func (l *loop) claim(ctx context.Context) error {
 }
 
 // handle makes the machine of the claim c and sends dispatched. When the make fails,
-// it uploads the make's error as the dispatch's machine log and then releases the
-// dispatch. It returns an error only when the journal cannot be written before or
+// it releases the dispatch and then uploads the make's error as the dispatch's machine
+// log, unless the release returned 409 machine_exists. It returns an error only when the journal cannot be written before or
 // after the make.
 func (l *loop) handle(ctx context.Context, c Claim) error {
 	id := c.DispatchID
@@ -135,8 +135,11 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		kind := kindOf(err)
 		reason, wait, level := makeFailure(kind)
 		l.Log.Log(ctx, level, "making a machine failed", slog.String("dispatch_id", id), slog.String("kind", string(kind)), errorAttr(err, data))
-		l.uploadMakeError(ctx, id, shown(err, data), data)
-		l.releaseEntry(ctx, id, reason)
+		// After 409 machine_exists, the watch adopts the machine, and the machine's
+		// log needs the dispatch's one machine log.
+		if !l.releaseEntry(ctx, id, reason) {
+			l.uploadMakeError(ctx, id, shown(err, data), data)
+		}
 		// An entry kept by 409 machine_exists is the watch's during the wait.
 		l.setBusy(id, false)
 		l.wait(ctx, wait)
@@ -162,8 +165,8 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 // uploadMakeError uploads text, the error of a make that made no machine as [shown]
 // gives it, as the machine log of the dispatch id. The machine log is for instance
 // admins, and the release reason, which organisation members read, stays a fixed text.
-// The upload runs also after ctx ends, as the release after it does. A failed upload is
-// logged, with startData hidden from its error, and does not stop the release.
+// The upload runs also after ctx ends, as the release before it does. A failed upload
+// is logged, with startData hidden from its error.
 func (l *loop) uploadMakeError(ctx context.Context, id, text string, startData []byte) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()

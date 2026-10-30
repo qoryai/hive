@@ -71,8 +71,8 @@ func TestTheDefaultSizeIsStandard(t *testing.T) {
 	}
 }
 
-// TestAMakeFailureOfEachKind uploads the make's error as the machine log, then
-// releases the dispatch with the kind's reason, removes the entry and waits before the
+// TestAMakeFailureOfEachKind releases the dispatch with the kind's reason, then
+// uploads the make's error as the machine log, removes the entry and waits before the
 // next claim: 60 s for limit and defect, 15 s for retry and other. A defect is logged
 // at the level error. No adapter text reaches the release.
 func TestAMakeFailureOfEachKind(t *testing.T) {
@@ -99,7 +99,7 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 			h.start()
 			h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 			h.clock.waitPending(t, c.wait, loop.WatchInterval)
-			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "release " + dispatchA + " " + c.reason})
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + c.reason, "machine-log " + dispatchA + " false"})
 			equal(t, "the machine logs", h.apiary.takeUploads(), []upload{{dispatchA, c.err.Error(), false}})
 			if strings.Contains(c.reason, "adapter text") {
 				t.Errorf("the reason %q contains the adapter's text", c.reason)
@@ -149,7 +149,7 @@ func TestAMakeErrorWithASecretIsHidden(t *testing.T) {
 		if got := string(h.machines.lastStartData()); got != data {
 			t.Fatalf("the start data is %s, want %s", got, data)
 		}
-		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + id + " false", "release " + id + " " + loop.ReasonRetry})
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + id + " " + loop.ReasonRetry, "machine-log " + id + " false"})
 		uploads := h.apiary.takeUploads()
 		if len(uploads) != 1 || !strings.Contains(uploads[0].log, "so the provisioner does not show it") || strings.Contains(uploads[0].log, "MARKER") {
 			t.Errorf("the machine logs for %q are %+v, want the fixed text", text, uploads)
@@ -160,16 +160,16 @@ func TestAMakeErrorWithASecretIsHidden(t *testing.T) {
 	}
 }
 
-// TestAFailedUploadOfAMakeErrorStillReleases logs a failed upload of a make's error
-// once, and releases the dispatch with the kind's reason.
-func TestAFailedUploadOfAMakeErrorStillReleases(t *testing.T) {
+// TestAFailedUploadOfAMakeErrorIsLoggedOnce releases the dispatch with the kind's
+// reason, and logs the failed upload of the make's error once.
+func TestAFailedUploadOfAMakeErrorIsLoggedOnce(t *testing.T) {
 	h := newHarness(t)
 	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the quota"}
 	h.apiary.logErr = errors.New("409 machine_log_exists")
 	h.start()
 	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 	h.clock.waitPending(t, loop.LongWait, loop.WatchInterval)
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "release " + dispatchA + " " + loop.ReasonLimit})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + loop.ReasonLimit, "machine-log " + dispatchA + " false"})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("uploading the make's error as the machine log failed")
 	if len(lines) != 1 || lines[0]["level"] != "WARN" || lines[0]["dispatch_id"] != dispatchA || lines[0]["error"] != "409 machine_log_exists" {
@@ -177,6 +177,26 @@ func TestAFailedUploadOfAMakeErrorStillReleases(t *testing.T) {
 	}
 	if len(h.find("uploaded the make's error as the machine log")) != 0 || len(h.find("released a dispatch")) != 1 {
 		t.Error("the log has a line for an upload, or no line for the release")
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAMakeFailureWithAMachineThatExistsUploadsNoError releases the dispatch, which
+// returns 409 machine_exists, and uploads no machine log: the machine's log, which the
+// watch uploads once it adopts the machine, needs the dispatch's one machine log.
+func TestAMakeFailureWithAMachineThatExistsUploadsNoError(t *testing.T) {
+	h := newHarness(t)
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later: the vendor's answer was lost"}
+	h.apiary.releaseErr = machineExists
+	h.start()
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + loop.ReasonRetry})
+	equal(t, "the machine logs", h.apiary.takeUploads(), nil)
+	if len(h.find("uploaded the make's error as the machine log")) != 0 || len(h.find("uploading the make's error as the machine log failed")) != 0 {
+		t.Error("the log has a line for an upload of the make's error")
 	}
 	if err := h.stop(); err != nil {
 		t.Error(err)
