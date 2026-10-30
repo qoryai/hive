@@ -26,14 +26,14 @@ The changes to Hive that no release contains yet, in the shape of
 
 - `qory-machine.service` sends standard error to the console as well as the journal
   (`StandardError=journal+console`). So the machine log, which is the vendor's console
-  text, contains the start script's lines and the standard error of `qory run`.
+  text, contains the start script's lines and the status lines of `qory run`.
 - When `qory run` exits with an error, the start script's last line points to the
   machine log. Before, it read "Read the lines of qory run in the journal of
   qory-machine.service for the cause", and that journal is gone once the machine is
   deleted. After, it reads "Read the lines of qory run above this line in the machine
   log for the cause".
 - When `docker.service` fails to start, the start script prints the last 20 lines of
-  its journal before its failure line, so the machine log contains them. In those
+  its journal from this boot before its failure line, so the machine log contains them. In those
   lines, the engine proxy password is replaced by `[hidden]`, and a line that contains
   `qak_`, `qrk_` or `qecr_` is left out. Before, the failure line read "Read the journal
   of docker.service for the cause", and that journal is gone once the machine is

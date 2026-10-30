@@ -664,11 +664,12 @@ func TestStartUnitFails(t *testing.T) {
 		// The journal's lines reach stderr with the password replaced and without the
 		// lines that look like a secret, before the failure line.
 		{
-			name: "docker.service fails", stage: "firewall set", ran: "journalctl -u docker.service -n 20 --no-pager -o cat",
+			name: "docker.service fails", stage: "firewall set", ran: "journalctl -b -u docker.service -n 20 --no-pager -o cat",
 			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_JOURNAL=" + strings.Join([]string{
 				"Starting docker.service",
 				"proxy http://qory:" + password + "@127.0.0.1:3129 refused",
 				"a key qrk_TESTrunkey000000000000 in a line",
+				"an access key qak_TESTaccesskey0000000000 in a line",
 				"a run code QECR_TEST in a line",
 				password + " twice " + password,
 				"docker.service failed",
@@ -680,7 +681,7 @@ func TestStartUnitFails(t *testing.T) {
 				"Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
 		},
 		{
-			name: "docker.service and journalctl fail", stage: "firewall set", ran: "journalctl -u docker.service -n 20 --no-pager -o cat",
+			name: "docker.service and journalctl fail", stage: "firewall set", ran: "journalctl -b -u docker.service -n 20 --no-pager -o cat",
 			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_FAIL_JOURNALCTL=1", "STUB_JOURNAL=never printed"},
 			want: "Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
 		},

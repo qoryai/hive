@@ -22,9 +22,9 @@
 # the lifetime leave the script: the URL in the arguments of qory run, the URL's host and
 # the address in /etc/hosts, and the lifetime in the arguments of shutdown. Each failure
 # prints one line to stderr; the line starts with its fix and contains no secret. When
-# docker.service fails to start, the last 20 lines of its journal go to stderr before
-# that line, each with the password replaced by [hidden], and without the lines that
-# contain qak_, qrk_ or qecr_ in any case.
+# docker.service fails to start, the last 20 lines of its journal from this boot go to
+# stderr before that line, each with the password replaced by [hidden], and without the
+# lines that contain qak_, qrk_ or qecr_ in any case.
 #
 # At each stage, the script prints one line to stderr:
 # "qory-machine-start: <UTC time> <stage>". It prints start data read, firewall set,
@@ -98,11 +98,11 @@ stage() {
 	printf '%s\n' "qory-machine-start: $time $1" >&2 2>/dev/null || true
 }
 
-# docker_log prints the last 20 lines of docker.service's journal to stderr. It
-# replaces each occurrence of the engine proxy password with [hidden], as a literal
-# text, and leaves out each line that contains qak_, qrk_ or qecr_ in any case, which
-# looks like an access key secret, a run key or a run code. Its failures are ignored,
-# and the tool check at the start leaves out journalctl.
+# docker_log prints the last 20 lines of docker.service's journal from this boot to
+# stderr. It replaces each occurrence of the engine proxy password with [hidden], as a
+# literal text, and leaves out each line that contains qak_, qrk_ or qecr_ in any case,
+# which looks like an access key secret, a run key or a run code. Its failures are
+# ignored, and the tool check at the start leaves out journalctl.
 docker_log() {
 	local line lower
 	while IFS= read -r line || [[ -n $line ]]; do
@@ -111,7 +111,7 @@ docker_log() {
 			continue
 		fi
 		printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true
-	done < <(journalctl -u docker.service -n 20 --no-pager -o cat 2>/dev/null || true)
+	done < <(journalctl -b -u docker.service -n 20 --no-pager -o cat 2>/dev/null || true)
 }
 
 for tool in base64 chmod chown curl head ip6tables iptables jq mkdir rm runuser sed shutdown systemctl systemd-notify tr; do
