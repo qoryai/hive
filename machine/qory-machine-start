@@ -356,6 +356,6 @@ status=0
 stage "qory run started"
 HOME=$home runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" || status=$?
 if ((status != 0)); then
-	printf '%s\n' "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status $status." >&2
+	printf '%s\n' "Read the lines of qory run above this line in the machine log for the cause. qory run exited with status $status." >&2
 	exit "$status"
 fi

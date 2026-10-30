@@ -27,6 +27,11 @@ The changes to Hive that no release contains yet, in the shape of
 - `qory-machine.service` sends standard error to the console as well as the journal
   (`StandardError=journal+console`). So the machine log, which is the vendor's console
   text, contains the start script's lines and the standard error of `qory run`.
+- When `qory run` exits with an error, the start script's last line points to the
+  machine log. Before, it read "Read the lines of qory run in the journal of
+  qory-machine.service for the cause", and that journal is gone once the machine is
+  deleted. After, it reads "Read the lines of qory run above this line in the machine
+  log for the cause".
 
 ### Fixed
 
