@@ -87,8 +87,10 @@ func (l *loop) claim(ctx context.Context) error {
 	}
 }
 
-// handle makes the machine of the claim c and sends dispatched. It returns an error
-// only when the journal cannot be written before or after the make.
+// handle makes the machine of the claim c and sends dispatched. When the make fails,
+// it releases the dispatch. When the release returns 204 or 409 lease_expired, it then
+// uploads the make's error as the dispatch's machine log. It returns an error only
+// when the journal cannot be written before or after the make.
 func (l *loop) handle(ctx context.Context, c Claim) error {
 	id := c.DispatchID
 	l.Log.Info("claimed a dispatch", slog.String("dispatch_id", id))
@@ -133,7 +135,12 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		kind := kindOf(err)
 		reason, wait, level := makeFailure(kind)
 		l.Log.Log(ctx, level, "making a machine failed", slog.String("dispatch_id", id), slog.String("kind", string(kind)), errorAttr(err, data))
-		l.releaseEntry(ctx, id, reason)
+		// Only 204 and 409 lease_expired show that no machine redeemed the run code.
+		// After any other answer a machine may exist, and its log needs the dispatch's
+		// one machine log.
+		if rerr := l.releaseEntry(ctx, id, reason); rerr == nil || errors.Is(rerr, ErrLeaseExpired) {
+			l.uploadMakeError(ctx, id, shown(err, data), data)
+		}
 		// An entry kept by 409 machine_exists is the watch's during the wait.
 		l.setBusy(id, false)
 		l.wait(ctx, wait)
@@ -154,6 +161,21 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 	}
 	l.dispatched(ctx, e)
 	return nil
+}
+
+// uploadMakeError uploads text, the error of a make that made no machine as [shown]
+// gives it, as the machine log of the dispatch id. The machine log is for instance
+// admins, and the release reason, which organisation members read, stays a fixed text.
+// The upload runs also after ctx ends, as the release before it does. A failed upload
+// is logged, with startData hidden from its error.
+func (l *loop) uploadMakeError(ctx context.Context, id, text string, startData []byte) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	if err := l.Apiary.MachineLog(ctx, id, text, false); err != nil {
+		l.Log.Warn("uploading the make's error as the machine log failed", slog.String("dispatch_id", id), errorAttr(err, startData))
+		return
+	}
+	l.Log.Info("uploaded the make's error as the machine log", slog.String("dispatch_id", id))
 }
 
 // dispatched sends dispatched for the entry e, which is made or dispatched. On 204, a

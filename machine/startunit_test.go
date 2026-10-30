@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -36,7 +37,7 @@ const (
 // network. The stub folder has a stub for each, and the test stops before it runs the
 // script if any of them resolves outside the stub folder.
 var dangerous = []string{
-	"chgrp", "chown", "curl", "docker", "halt", "ip", "ip6tables", "iptables", "nft",
+	"chgrp", "chown", "curl", "docker", "halt", "ip", "ip6tables", "iptables", "journalctl", "nft",
 	"poweroff", "qory", "reboot", "runuser", "shutdown", "su", "sudo", "systemctl",
 	"systemd-notify", "wget",
 }
@@ -50,8 +51,8 @@ var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed"
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
 // stdin. The runuser stub logs HOME, NOTIFY_SOCKET and the working directory, and
 // links the run code file to $STUB_KEEP, so the test can read it after the script
-// removes it; with $STUB_TERM set, it sends SIGTERM to the script. A STUB_FAIL_
-// variable makes one stub exit with an error.
+// removes it; with $STUB_TERM set, it sends SIGTERM to the script. The journalctl stub
+// prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one stub exit with an error.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
@@ -81,6 +82,10 @@ systemctl)
 	;;
 shutdown)
 	[[ -z ${STUB_FAIL_SHUTDOWN:-} ]] || exit 1
+	;;
+journalctl)
+	[[ -z ${STUB_FAIL_JOURNALCTL:-} ]] || exit 1
+	printf '%s\n' "${STUB_JOURNAL:-}"
 	;;
 systemd-notify | chown) ;;
 runuser)
@@ -229,11 +234,34 @@ func startData(code, url, address string, lifetime int) string {
 	return string(b)
 }
 
-// result is what one run of the script left behind.
+// stages are the stages that the script prints to stderr, in order.
+var stages = []string{"start data read", "firewall set", "Docker started", "run code written", "qory run started"}
+
+// stageLine is a stage line: the script's name, the time in UTC and the stage.
+var stageLine = regexp.MustCompile(`^qory-machine-start: ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z) (.+)$`)
+
+// result is what one run of the script left behind. stderr has the lines that are no
+// stage lines, and stages the stages of the stage lines, in order.
 type result struct {
 	status         int
 	stdout, stderr string
+	stages         []string
 	log            []string
+}
+
+// environ is the environment of a run of the script, with vars added.
+func (e *env) environ(vars ...string) []string {
+	return append([]string{
+		"PATH=" + e.path,
+		"QORY_MACHINE_ROOT=" + e.root,
+		"STUB_LOG=" + e.log,
+		"STUB_TOKEN=" + token,
+		"STUB_USERDATA=" + e.userData,
+		"STUB_KEEP=" + e.keep,
+		"NOTIFY_SOCKET=/run/systemd/notify",
+		// Local time is 5 hours ahead of UTC, so a stage line in local time fails.
+		"TZ=XXX-5",
+	}, vars...)
 }
 
 // run runs the script once and checks what every run must leave: no secret marker in
@@ -242,18 +270,11 @@ type result struct {
 func (e *env) run(t *testing.T, sh string, vars ...string) result {
 	t.Helper()
 	cmd := exec.Command(sh, "qory-machine-start")
-	cmd.Env = append([]string{
-		"PATH=" + e.path,
-		"QORY_MACHINE_ROOT=" + e.root,
-		"STUB_LOG=" + e.log,
-		"STUB_TOKEN=" + token,
-		"STUB_USERDATA=" + e.userData,
-		"STUB_KEEP=" + e.keep,
-		"NOTIFY_SOCKET=/run/systemd/notify",
-	}, vars...)
+	cmd.Env = e.environ(vars...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	r := result{}
+	before := time.Now().UTC().Truncate(time.Second)
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
@@ -261,7 +282,22 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 		}
 		r.status = exit.ExitCode()
 	}
-	r.stdout, r.stderr = stdout.String(), stderr.String()
+	after := time.Now().UTC()
+	r.stdout = stdout.String()
+	var rest strings.Builder
+	for _, line := range strings.SplitAfter(stderr.String(), "\n") {
+		m := stageLine.FindStringSubmatch(strings.TrimSuffix(line, "\n"))
+		if m == nil {
+			rest.WriteString(line)
+			continue
+		}
+		r.stages = append(r.stages, m[2])
+		at, err := time.Parse(time.RFC3339, m[1])
+		if err != nil || at.Before(before) || at.After(after) {
+			t.Errorf("the stage line %q has a time that is not the UTC time of the run, from %s to %s", line, before.Format(time.RFC3339), after.Format(time.RFC3339))
+		}
+	}
+	r.stderr = rest.String()
 	b, err := os.ReadFile(e.log)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
@@ -360,8 +396,9 @@ func TestStartUnitRunsQory(t *testing.T) {
 			}
 			r := e.run(t, sh)
 			if r.status != 0 || r.stdout != "" || r.stderr != "" {
-				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and no output", r.status, r.stdout, r.stderr)
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and no output but the stage lines", r.status, r.stdout, r.stderr)
 			}
+			equalStages(t, r.stages, stages)
 			curl := "curl --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
 			want := []string{
 				curl + "-X PUT -H X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token",
@@ -454,6 +491,31 @@ func TestStartUnitRunsQory(t *testing.T) {
 	}
 }
 
+// equalStages fails the test when the stages of the stage lines are not want.
+func equalStages(t *testing.T, got, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Errorf("the stage lines have the stages %q, want %q", got, want)
+	}
+}
+
+// TestStartUnitRunsWithStderrClosed runs the script with stderr closed. The stage
+// lines cannot be written, and the script still runs qory and exits with 0.
+func TestStartUnitRunsWithStderrClosed(t *testing.T) {
+	sh := bash(t)
+	e := newEnv(t, commands(t, sh))
+	cmd := exec.Command(sh, "-c", `exec "$0" qory-machine-start 2>&-`, sh)
+	cmd.Env = e.environ()
+	if out, err := cmd.Output(); err != nil || len(out) != 0 {
+		t.Fatalf("the script returned %v with stdout %q; want no error and no output", err, out)
+	}
+	log := strings.Split(strings.TrimSuffix(read(t, e.log), "\n"), "\n")
+	run := "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + gatewayURL
+	if !slices.Contains(log, run) || log[len(log)-1] != "systemctl poweroff" {
+		t.Errorf("the commands do not contain %q, or do not end with systemctl poweroff:\n%s", run, strings.Join(log, "\n"))
+	}
+}
+
 // readOnly replaces path with an empty folder of mode 0555. Appending to a folder fails
 // for every user; creating a file in it fails for every user except root, so a test
 // run by root is skipped unless path is the file that the script appends to.
@@ -517,6 +579,10 @@ func TestStartUnitFails(t *testing.T) {
 		orWant string
 		// setup changes the root folder before the run.
 		setup func(t *testing.T, root string)
+		// stage is the stage of the last stage line that the script prints before it
+		// stops, or "" when it stops before the first stage line. A case sets both ran
+		// and stage, or neither.
+		stage string
 	}{
 		{name: "not JSON", userData: `{"version": 1,`, want: json1},
 		{name: "empty", userData: ``, want: json1},
@@ -581,26 +647,49 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "no forager.yaml", forager: "-", want: "Write machine: aws-ec2 into " + foragerPath + ". The file does not exist or is not readable."},
 		{name: "token request fails", vars: []string{"STUB_FAIL_TOKEN=1"}, want: "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."},
 		{name: "user data request fails", vars: []string{"STUB_FAIL_USERDATA=1"}, want: "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."},
-		{name: "iptables fails", vars: []string{"STUB_FAIL_IPTABLES=1"}, ran: "iptables -w -t raw -I PREROUTING -d 169.254.169.254 -j DROP", want: "Check that iptables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to 169.254.169.254 failed."},
-		{name: "daemon.json is not an object", daemonJSON: `["not an object"]`, ran: "iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP", want: "Make {root}/etc/docker/daemon.json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."},
-		{name: "docker.service fails", vars: []string{"STUB_FAIL_DOCKER=1"}, ran: "systemctl start docker.service", want: "Read the journal of docker.service for the cause. Starting docker.service failed."},
-		{name: "SIGTERM", vars: []string{"STUB_TERM=1"}, status: 143, ran: "runuser-home {root}/home/qory", want: "No action needed. The script stopped on SIGTERM, and the machine powers off."},
-		{name: "ip6tables fails", vars: []string{"STUB_FAIL_IP6TABLES=1"}, ran: "ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP", want: "Check that ip6tables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to fd00:ec2::254 failed."},
-		{name: "shutdown fails", vars: []string{"STUB_FAIL_SHUTDOWN=1"}, ran: "shutdown -P +60", want: "Check that shutdown -P can schedule a power-off on this machine image. Scheduling the power-off in 60 minutes failed."},
-		{name: "/etc/hosts not writable", readOnly: "/etc/hosts", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/hosts. Appending the gateway's line failed."},
-		{name: "/etc/docker not writable", readOnly: "/etc/docker", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/docker. Writing {root}/etc/docker/daemon.json failed."},
-		{name: "/etc/qory not writable", readOnly: "/etc/qory", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/qory. Writing {root}/etc/qory/engine-proxy.json failed."},
-		{name: "/run/qory-machine not writable", readOnly: "/run/qory-machine", ran: "systemctl start docker.service", want: "Check that root can write {root}/run/qory-machine. Writing {root}/run/qory-machine/run-code failed."},
-		{name: "qory run fails", vars: []string{"STUB_QORY_EXIT=3"}, status: 3, ran: "runuser-home {root}/home/qory", want: "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status 3."},
-		{name: "/var/lib/qory-machine not writable", readOnly: "/var/lib/qory-machine", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine", want: "Check that root can write {root}/var/lib/qory-machine. Making {root}/var/lib/qory-machine/work failed."},
+		{name: "iptables fails", stage: "start data read", vars: []string{"STUB_FAIL_IPTABLES=1"}, ran: "iptables -w -t raw -I PREROUTING -d 169.254.169.254 -j DROP", want: "Check that iptables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to 169.254.169.254 failed."},
+		{name: "daemon.json is not an object", stage: "firewall set", daemonJSON: `["not an object"]`, ran: "iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP", want: "Make {root}/etc/docker/daemon.json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."},
+		// The journal's lines reach stderr with the password replaced and without the
+		// lines that look like a secret, before the failure line.
+		{
+			name: "docker.service fails", stage: "firewall set", ran: "journalctl -b -u docker.service -n 20 --no-pager -o cat",
+			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_JOURNAL=" + strings.Join([]string{
+				"Starting docker.service",
+				"proxy http://qory:" + password + "@127.0.0.1:3129 refused",
+				"a key qrk_TESTrunkey000000000000 in a line",
+				"an access key qak_TESTaccesskey0000000000 in a line",
+				"a run code QECR_TEST in a line",
+				password + " twice " + password,
+				"docker.service failed",
+			}, "\n")},
+			want: "Starting docker.service\n" +
+				"proxy http://qory:[hidden]@127.0.0.1:3129 refused\n" +
+				"[hidden] twice [hidden]\n" +
+				"docker.service failed\n" +
+				"Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
+		},
+		{
+			name: "docker.service and journalctl fail", stage: "firewall set", ran: "journalctl -b -u docker.service -n 20 --no-pager -o cat",
+			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_FAIL_JOURNALCTL=1", "STUB_JOURNAL=never printed"},
+			want: "Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
+		},
+		{name: "SIGTERM", stage: "qory run started", vars: []string{"STUB_TERM=1"}, status: 143, ran: "runuser-home {root}/home/qory", want: "No action needed. The script stopped on SIGTERM, and the machine powers off."},
+		{name: "ip6tables fails", stage: "start data read", vars: []string{"STUB_FAIL_IP6TABLES=1"}, ran: "ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP", want: "Check that ip6tables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to fd00:ec2::254 failed."},
+		{name: "shutdown fails", stage: "firewall set", vars: []string{"STUB_FAIL_SHUTDOWN=1"}, ran: "shutdown -P +60", want: "Check that shutdown -P can schedule a power-off on this machine image. Scheduling the power-off in 60 minutes failed."},
+		{name: "/etc/hosts not writable", stage: "firewall set", readOnly: "/etc/hosts", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/hosts. Appending the gateway's line failed."},
+		{name: "/etc/docker not writable", stage: "firewall set", readOnly: "/etc/docker", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/docker. Writing {root}/etc/docker/daemon.json failed."},
+		{name: "/etc/qory not writable", stage: "firewall set", readOnly: "/etc/qory", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/qory. Writing {root}/etc/qory/engine-proxy.json failed."},
+		{name: "/run/qory-machine not writable", stage: "Docker started", readOnly: "/run/qory-machine", ran: "systemctl start docker.service", want: "Check that root can write {root}/run/qory-machine. Writing {root}/run/qory-machine/run-code failed."},
+		{name: "qory run fails", stage: "qory run started", vars: []string{"STUB_QORY_EXIT=3"}, status: 3, ran: "runuser-home {root}/home/qory", want: "Read the lines of qory run above this line in the machine log for the cause. qory run exited with status 3."},
+		{name: "/var/lib/qory-machine not writable", stage: "run code written", readOnly: "/var/lib/qory-machine", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine", want: "Check that root can write {root}/var/lib/qory-machine. Making {root}/var/lib/qory-machine/work failed."},
 		// The script resolves the link and stops before it writes into /.
 		{
-			name: "working folder links to /", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			name: "working folder links to /", stage: "run code written", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
 			setup: func(t *testing.T, root string) { link(t, "/", root+"/var/lib/qory-machine/work") },
 			want:  "Make {root}/var/lib/qory-machine/work and {root}/home/qory two folders in the machine image, neither inside the other. With links resolved, they are / and {real}/home/qory.",
 		},
 		{
-			name: "working folder links into home", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			name: "working folder links into home", stage: "run code written", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
 			setup: func(t *testing.T, root string) {
 				if err := os.Mkdir(root+"/home/qory/work", 0o755); err != nil {
 					t.Fatal(err)
@@ -610,7 +699,7 @@ func TestStartUnitFails(t *testing.T) {
 			want: "Make {root}/var/lib/qory-machine/work and {root}/home/qory two folders in the machine image, neither inside the other. With links resolved, they are {real}/home/qory/work and {real}/home/qory.",
 		},
 		{
-			name: "home links into the working folder", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
+			name: "home links into the working folder", stage: "run code written", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine",
 			setup: func(t *testing.T, root string) {
 				work := root + "/var/lib/qory-machine/work"
 				if err := os.MkdirAll(work, 0o700); err != nil {
@@ -671,6 +760,10 @@ func TestStartUnitFails(t *testing.T) {
 			if r.stderr != want || r.stdout != "" {
 				t.Errorf("stdout %q, stderr %q; want no stdout and stderr\n%q", r.stdout, r.stderr, want)
 			}
+			if (c.ran == "") != (c.stage == "") {
+				t.Fatalf("the case sets ran %q and stage %q; set both or neither", c.ran, c.stage)
+			}
+			equalStages(t, r.stages, stages[:slices.Index(stages, c.stage)+1])
 			ran := strings.ReplaceAll(c.ran, "{root}", e.root)
 			if ran != "" && !slices.Contains(r.log, ran) {
 				t.Errorf("the commands do not contain %q:\n%s", ran, strings.Join(r.log, "\n"))
@@ -695,6 +788,7 @@ func TestStartUnitFiles(t *testing.T) {
 		"Type=notify",
 		"NotifyAccess=all",
 		"ExecStart=/usr/local/libexec/qory/qory-machine-start",
+		"StandardError=journal+console",
 		"TimeoutStartSec=120",
 		"SuccessAction=poweroff",
 		"FailureAction=poweroff",
@@ -702,6 +796,26 @@ func TestStartUnitFiles(t *testing.T) {
 	} {
 		if !slices.Contains(strings.Split(unit, "\n"), line) {
 			t.Errorf("qory-machine.service has no line %s", line)
+		}
+	}
+	// systemd reads SuccessAction and FailureAction only in [Unit], and ignores them in
+	// [Service].
+	sections := map[string][]string{}
+	section := ""
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = line
+			continue
+		}
+		sections[section] = append(sections[section], line)
+	}
+	for _, line := range []string{"SuccessAction=poweroff", "FailureAction=poweroff"} {
+		if !slices.Contains(sections["[Unit]"], line) {
+			t.Errorf("qory-machine.service has no line %s in [Unit]", line)
+		}
+		key := strings.SplitAfter(line, "=")[0]
+		if slices.ContainsFunc(sections["[Service]"], func(l string) bool { return strings.HasPrefix(l, key) }) {
+			t.Errorf("qory-machine.service sets %s in [Service], where systemd ignores it", key)
 		}
 	}
 	script := read(t, "qory-machine-start")
@@ -750,6 +864,7 @@ func TestStartUnitSecretLines(t *testing.T) {
 		`"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 		`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 		`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
+		`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
 		`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
 	}
 	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)

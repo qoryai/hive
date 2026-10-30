@@ -13,18 +13,22 @@ After=network-online.target
 # docker.service starts after this unit sends READY, so the Docker daemon reads the
 # engine proxy from /etc/docker/daemon.json when it first starts.
 Before=docker.service
+# The machine powers off also when the script is killed and its EXIT trap does not run.
+SuccessAction=poweroff
+FailureAction=poweroff
 
 [Service]
 Type=notify
 # systemd-notify, a child of the script, sends READY.
 NotifyAccess=all
 ExecStart=/usr/local/libexec/qory/qory-machine-start
+# Standard error goes to the console as well as the journal, so the vendor's console
+# text, which the provisioner uploads as the machine log, contains the script's stage
+# lines, its failure line and the standard error of qory run.
+StandardError=journal+console
 # Before READY, each of the two curl calls takes at most 6 tries of 5 s and 5 waits of
 # 1 s, 35 s, so 70 s in all; 120 s leaves 50 s for the other steps.
 TimeoutStartSec=120
-# The machine powers off also when the script is killed and its EXIT trap does not run.
-SuccessAction=poweroff
-FailureAction=poweroff
 
 [Install]
 WantedBy=multi-user.target

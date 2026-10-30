@@ -1,6 +1,7 @@
 package loop_test
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -70,10 +71,10 @@ func TestTheDefaultSizeIsStandard(t *testing.T) {
 	}
 }
 
-// TestAMakeFailureOfEachKind releases the dispatch with the kind's reason, removes the
-// entry and waits before the next claim: 60 s for limit and defect, 15 s for retry
-// and other. A defect is logged at the level error. No adapter text reaches the
-// release.
+// TestAMakeFailureOfEachKind releases the dispatch with the kind's reason, then
+// uploads the make's error as the machine log, removes the entry and waits before the
+// next claim: 60 s for limit and defect, 15 s for retry and other. A defect is logged
+// at the level error. No adapter text reaches the release.
 func TestAMakeFailureOfEachKind(t *testing.T) {
 	adapterError := func(k string) error {
 		return &adapter.Error{Command: "make", Kind: k, Message: "Fix the vendor account: adapter text"}
@@ -98,7 +99,8 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 			h.start()
 			h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 			h.clock.waitPending(t, c.wait, loop.WatchInterval)
-			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + c.reason})
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + c.reason, "machine-log " + dispatchA + " false"})
+			equal(t, "the machine logs", h.apiary.takeUploads(), []upload{{dispatchA, c.err.Error(), false}})
 			if strings.Contains(c.reason, "adapter text") {
 				t.Errorf("the reason %q contains the adapter's text", c.reason)
 			}
@@ -113,6 +115,111 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 			h.clock.Advance(time.Second)
 			h.idle()
 			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool + " standard"})
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// TestAMakeErrorWithASecretIsHidden uploads a fixed text as the machine log in place
+// of a make's error that contains the run code, a piece of the start data, a run key
+// or an access key secret.
+func TestAMakeErrorWithASecretIsHidden(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	// The start data of each claim of newClaim.
+	data := `{"version":1,"run_code":"` + runCode + `","gateway":{"url":"` + gatewayURL + `","address":"10.0.1.5"},"max_lifetime_minutes":60}`
+	// The piece comes from the end of the start data, so it contains no qecr_, which
+	// the check finds also without the start data.
+	b64 := base64.StdEncoding.EncodeToString([]byte(data))
+	piece := b64[len(b64)-24 : len(b64)-4]
+	for i, text := range []string{
+		"Fix it: " + runCode,
+		"Fix it: " + piece,
+		"Fix it: qrk_MARKERrunkey000000000000",
+		"Fix it: QAK_MARKERaccesskey0000000000",
+	} {
+		id := []string{dispatchA, dispatchB, dispatchC, dispatchD}[i]
+		if i > 0 {
+			h.clock.Advance(loop.ShortWait)
+		}
+		h.machines.mu.Lock()
+		h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: text}
+		h.machines.mu.Unlock()
+		h.send(claimResult{claim: newClaim(id), ok: true})
+		h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval-time.Duration(i)*loop.ShortWait)
+		if got := string(h.machines.lastStartData()); got != data {
+			t.Fatalf("the start data is %s, want %s", got, data)
+		}
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + id + " " + loop.ReasonRetry, "machine-log " + id + " false"})
+		uploads := h.apiary.takeUploads()
+		if len(uploads) != 1 || !strings.Contains(uploads[0].log, "so the provisioner does not show it") || strings.Contains(uploads[0].log, "MARKER") {
+			t.Errorf("the machine logs for %q are %+v, want the fixed text", text, uploads)
+		}
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAFailedUploadOfAMakeErrorIsLoggedOnce releases the dispatch with the kind's
+// reason, and logs the failed upload of the make's error once.
+func TestAFailedUploadOfAMakeErrorIsLoggedOnce(t *testing.T) {
+	h := newHarness(t)
+	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the quota"}
+	h.apiary.logErr = errors.New("409 machine_log_exists")
+	h.start()
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+	h.clock.waitPending(t, loop.LongWait, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + loop.ReasonLimit, "machine-log " + dispatchA + " false"})
+	equal(t, "the journal", h.entries(), nil)
+	lines := h.find("uploading the make's error as the machine log failed")
+	if len(lines) != 1 || lines[0]["level"] != "WARN" || lines[0]["dispatch_id"] != dispatchA || lines[0]["error"] != "409 machine_log_exists" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	if len(h.find("uploaded the make's error as the machine log")) != 0 || len(h.find("released a dispatch")) != 1 {
+		t.Error("the log has a line for an upload, or no line for the release")
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAMakeErrorIsUploadedOnlyWhenNoMachineExists releases the dispatch after a failed
+// make, and uploads the make's error only when the release returns 204 or 409
+// lease_expired. After 409 machine_exists, 410 gone or a failed release, a machine may
+// exist, and its log needs the dispatch's one machine log, so no upload follows.
+func TestAMakeErrorIsUploadedOnlyWhenNoMachineExists(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		releaseErr error
+		upload     bool
+	}{
+		{"204", nil, true},
+		{"409 lease_expired", fmt.Errorf("Qory Apiary answered: %w", loop.ErrLeaseExpired), true},
+		{"409 machine_exists", machineExists, false},
+		{"410 gone", fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone), false},
+		{"a failed release", errors.New("Qory Apiary answered 503"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later: the vendor's answer was lost"}
+			h.apiary.releaseErr = c.releaseErr
+			h.start()
+			h.send(claimResult{claim: newClaim(dispatchA), ok: true})
+			h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+			want := []string{"release " + dispatchA + " " + loop.ReasonRetry}
+			var uploads []upload
+			if c.upload {
+				want = append(want, "machine-log "+dispatchA+" false")
+				uploads = []upload{{dispatchA, "Try again later: the vendor's answer was lost (machine adapter command make, kind retry)", false}}
+			}
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), want)
+			equal(t, "the machine logs", h.apiary.takeUploads(), uploads)
+			if got := len(h.find("uploaded the make's error as the machine log")); got != len(uploads) {
+				t.Errorf("the log has %d lines for an upload of the make's error, want %d", got, len(uploads))
+			}
 			if err := h.stop(); err != nil {
 				t.Error(err)
 			}

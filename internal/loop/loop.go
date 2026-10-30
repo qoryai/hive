@@ -8,7 +8,9 @@
 // journal of live dispatches after a restart. Then the claim path and the watch run in
 // parallel until the context ends:
 //   - The claim path claims a dispatch while the journal has fewer entries than
-//     max_machines, records it, makes its machine and sends dispatched.
+//     max_machines, records it, makes its machine and sends dispatched. When the
+//     make fails, it releases the dispatch. When the release returns 204 or 409
+//     lease_expired, it then uploads the make's error as the dispatch's machine log.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
 //     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
@@ -70,7 +72,8 @@ const (
 	// ShortWait is the wait before the next claim after a make that failed with the
 	// kind retry or other, and after a claim that failed.
 	ShortWait = 15 * time.Second
-	// releaseTimeout bounds a release, which runs also after the context ends.
+	// releaseTimeout bounds a release, and the upload of a make's error after it.
+	// Both run also after the context ends.
 	releaseTimeout = 30 * time.Second
 )
 
@@ -118,8 +121,9 @@ type Apiary interface {
 	// Release gives the dispatch back, with a reason of 1 to 200 characters. Its error
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.
 	Release(ctx context.Context, dispatchID, reason string) error
-	// MachineLog uploads the machine's log of the dispatch. truncated is true when
-	// the log is the last part of a longer one.
+	// MachineLog uploads the machine's log of the dispatch, or the error of a make
+	// that made no machine. truncated is true when the log is the last part of a
+	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
 }
 
@@ -319,9 +323,10 @@ func (l *loop) remove(id string) {
 
 // release releases the dispatch with reason. It runs also after ctx ends, for a
 // claim whose make has not started. A failure is logged: a release has no retry. It
-// returns true when the release returned 409 machine_exists: a machine redeemed the
-// run code, so the dispatch is not released.
-func (l *loop) release(ctx context.Context, id, reason string) (exists bool) {
+// returns the error of [Apiary.Release], nil on 204. An error that wraps
+// [ErrMachineExists] means that a machine redeemed the run code, so the dispatch is
+// not released.
+func (l *loop) release(ctx context.Context, id, reason string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
 	err := l.Apiary.Release(ctx, id, reason)
@@ -330,20 +335,22 @@ func (l *loop) release(ctx context.Context, id, reason string) (exists bool) {
 		l.Log.Info("released a dispatch", slog.String("dispatch_id", id))
 	case errors.Is(err, ErrMachineExists):
 		l.Log.Warn("the release returned machine_exists: a machine redeemed the run code", slog.String("dispatch_id", id))
-		return true
 	default:
 		l.Log.Warn("releasing a dispatch failed", slog.String("dispatch_id", id), errorAttr(err, nil))
 	}
-	return false
+	return err
 }
 
-// releaseEntry releases the dispatch of a claimed entry and removes the entry. When
-// the release returns 409 machine_exists, the entry stays in the phase claimed, so
-// that the watch adopts the machine and no watch deletes it as a stray.
-func (l *loop) releaseEntry(ctx context.Context, id, reason string) {
-	if !l.release(ctx, id, reason) {
+// releaseEntry releases the dispatch of a claimed entry and removes the entry, and
+// returns the error of the release, as release returns it. When the release returns
+// 409 machine_exists, the entry stays in the phase claimed, so that the watch adopts
+// the machine and no watch deletes it as a stray.
+func (l *loop) releaseEntry(ctx context.Context, id, reason string) error {
+	err := l.release(ctx, id, reason)
+	if !errors.Is(err, ErrMachineExists) {
 		l.remove(id)
 	}
+	return err
 }
 
 // hiddenError replaces an error's text that contains what looks like a secret.
