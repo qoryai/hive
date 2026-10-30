@@ -89,8 +89,8 @@ func (l *loop) claim(ctx context.Context) error {
 
 // handle makes the machine of the claim c and sends dispatched. When the make fails,
 // it releases the dispatch and then uploads the make's error as the dispatch's machine
-// log, unless the release returned 409 machine_exists. It returns an error only when the journal cannot be written before or
-// after the make.
+// log, unless the release returned 409 machine_exists. It returns an error only when
+// the journal cannot be written before or after the make.
 func (l *loop) handle(ctx context.Context, c Claim) error {
 	id := c.DispatchID
 	l.Log.Info("claimed a dispatch", slog.String("dispatch_id", id))
