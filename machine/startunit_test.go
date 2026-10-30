@@ -49,9 +49,11 @@ var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed"
 // stub is the script behind every stub. It appends its name and arguments to
 // $STUB_LOG, one line per call. The curl stub returns $STUB_TOKEN for the token PUT and
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
-// stdin. The runuser stub logs HOME, NOTIFY_SOCKET and the working directory, and
-// links the run code file to $STUB_KEEP, so the test can read it after the script
-// removes it; with $STUB_TERM set, it sends SIGTERM to the script. The journalctl stub
+// stdin. The runuser stub logs HOME, NOTIFY_SOCKET, QORY_STATUS_FD and the working
+// directory, and links the run code file to $STUB_KEEP, so the test can read it after
+// the script removes it. With $STUB_QORY_OUTPUT set, it writes one line to the
+// descriptor in QORY_STATUS_FD and one line to stderr, as qory run does. With
+// $STUB_TERM set, it sends SIGTERM to the script. The journalctl stub
 // prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one stub exit with an error.
 const stub = `
 name=${0##*/}
@@ -92,6 +94,11 @@ runuser)
 	printf 'runuser-home %s\n' "$HOME" >>"$STUB_LOG"
 	printf 'runuser-notify-socket %s\n' "${NOTIFY_SOCKET-unset}" >>"$STUB_LOG"
 	printf 'runuser-pwd %s\n' "$PWD" >>"$STUB_LOG"
+	printf 'runuser-status-fd %s\n' "${QORY_STATUS_FD-unset}" >>"$STUB_LOG"
+	if [[ -n ${STUB_QORY_OUTPUT:-} ]]; then
+		printf '%s\n' "qory run: a status line" >&"$QORY_STATUS_FD"
+		printf '%s\n' "agent: a line of the agent's output" >&2
+	fi
 	ln "$7" "$STUB_KEEP" 2>/dev/null || true
 	[[ -z ${STUB_TERM:-} ]] || kill -TERM "$PPID"
 	exit "${STUB_QORY_EXIT:-0}"
@@ -394,9 +401,11 @@ func TestStartUnitRunsQory(t *testing.T) {
 				}
 				write(t, e.root+"/etc/docker/daemon.json", c.daemonJSON)
 			}
-			r := e.run(t, sh)
-			if r.status != 0 || r.stdout != "" || r.stderr != "" {
-				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and no output but the stage lines", r.status, r.stdout, r.stderr)
+			r := e.run(t, sh, "STUB_QORY_OUTPUT=1")
+			// qory run's status line reaches the script's stderr, and its stderr the
+			// script's stdout, which reaches the journal only.
+			if r.status != 0 || r.stdout != "agent: a line of the agent's output\n" || r.stderr != "qory run: a status line\n" {
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0, qory run's stderr line on stdout, and its status line and the stage lines on stderr", r.status, r.stdout, r.stderr)
 			}
 			equalStages(t, r.stages, stages)
 			curl := "curl --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
@@ -419,6 +428,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"runuser-home " + e.root + "/home/qory",
 				"runuser-notify-socket unset",
 				"runuser-pwd " + e.root + "/var/lib/qory-machine/work",
+				"runuser-status-fd 3",
 				"systemctl poweroff",
 			}
 			if !slices.Equal(r.log, want) {
@@ -583,6 +593,8 @@ func TestStartUnitFails(t *testing.T) {
 		// stops, or "" when it stops before the first stage line. A case sets both ran
 		// and stage, or neither.
 		stage string
+		// stdout is the script's stdout, which has qory run's stdout and stderr.
+		stdout string
 	}{
 		{name: "not JSON", userData: `{"version": 1,`, want: json1},
 		{name: "empty", userData: ``, want: json1},
@@ -680,7 +692,11 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "/etc/docker not writable", stage: "firewall set", readOnly: "/etc/docker", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/docker. Writing {root}/etc/docker/daemon.json failed."},
 		{name: "/etc/qory not writable", stage: "firewall set", readOnly: "/etc/qory", ran: "ip6tables -w -t raw -I OUTPUT -d fd00:ec2::254 -j DROP", want: "Check that root can write {root}/etc/qory. Writing {root}/etc/qory/engine-proxy.json failed."},
 		{name: "/run/qory-machine not writable", stage: "Docker started", readOnly: "/run/qory-machine", ran: "systemctl start docker.service", want: "Check that root can write {root}/run/qory-machine. Writing {root}/run/qory-machine/run-code failed."},
-		{name: "qory run fails", stage: "qory run started", vars: []string{"STUB_QORY_EXIT=3"}, status: 3, ran: "runuser-home {root}/home/qory", want: "Read the lines of qory run above this line in the machine log for the cause. qory run exited with status 3."},
+		{
+			name: "qory run fails", stage: "qory run started", vars: []string{"STUB_QORY_EXIT=3", "STUB_QORY_OUTPUT=1"}, status: 3, ran: "runuser-status-fd 3",
+			stdout: "agent: a line of the agent's output\n",
+			want:   "qory run: a status line\nRead the status lines of qory run above this line in the machine log for the cause. qory run exited with status 3.",
+		},
 		{name: "/var/lib/qory-machine not writable", stage: "run code written", readOnly: "/var/lib/qory-machine", ran: "chown qory {root}/run/qory-machine/run-code {root}/run/qory-machine", want: "Check that root can write {root}/var/lib/qory-machine. Making {root}/var/lib/qory-machine/work failed."},
 		// The script resolves the link and stops before it writes into /.
 		{
@@ -757,8 +773,8 @@ func TestStartUnitFails(t *testing.T) {
 			if c.orWant != "" && r.stderr == c.orWant+"\n" {
 				want = r.stderr
 			}
-			if r.stderr != want || r.stdout != "" {
-				t.Errorf("stdout %q, stderr %q; want no stdout and stderr\n%q", r.stdout, r.stderr, want)
+			if r.stderr != want || r.stdout != c.stdout {
+				t.Errorf("stdout %q, stderr %q; want stdout %q and stderr\n%q", r.stdout, r.stderr, c.stdout, want)
 			}
 			if (c.ran == "") != (c.stage == "") {
 				t.Fatalf("the case sets ran %q and stage %q; set both or neither", c.ran, c.stage)
