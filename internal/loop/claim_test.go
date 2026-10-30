@@ -130,7 +130,10 @@ func TestAMakeErrorWithASecretIsHidden(t *testing.T) {
 	h.start()
 	// The start data of each claim of newClaim.
 	data := `{"version":1,"run_code":"` + runCode + `","gateway":{"url":"` + gatewayURL + `","address":"10.0.1.5"},"max_lifetime_minutes":60}`
-	piece := base64.StdEncoding.EncodeToString([]byte(data))[20:40]
+	// The piece comes from the end of the start data, so it contains no qecr_, which
+	// the check finds also without the start data.
+	b64 := base64.StdEncoding.EncodeToString([]byte(data))
+	piece := b64[len(b64)-24 : len(b64)-4]
 	for i, text := range []string{
 		"Fix it: " + runCode,
 		"Fix it: " + piece,
