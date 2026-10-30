@@ -62,18 +62,19 @@ const hiddenLine = "[hidden: the line contained what looks like an access key se
 
 // MachineLog sends POST /v1/dispatches/<dispatchID>/machine-log,
 // machine-log.schema.json: the log of the machine the provisioner created for the
-// dispatch, from the machine's creation to its end. truncated is whether the caller cut
-// the start of log. Before it sends the log, the client replaces each line that
-// contains what looks like an access key secret, a run key or a run code with a fixed
-// text, each U+0000 with U+FFFD, and each run of bytes that is not UTF-8 with one
-// U+FFFD. It then keeps the last part of the log, from the start of a line when the
-// part has one and otherwise from the start of a character, such that the log is at
-// most [MaxLog] bytes and the body at most contracts.MaxRequest bytes as sent, and sets
-// truncated when it cut anything. So the log sent is valid UTF-8. Qory Apiary takes one
-// machine log per dispatch, before or after the dispatch ends. The answer is a signed
-// 204. A refusal is a [*Refusal]: [ErrForbidden], a dispatch that is unknown or of
-// another node pool; [ErrMachineLogExists], a dispatch that has a machine log;
-// [ErrNotFound]; or [ErrRateLimited].
+// dispatch, from the machine's creation to its end, or, when the provisioner created
+// no machine, the error text of its attempt to create one. truncated is whether the
+// caller cut the start of log. Before it sends the log, the client replaces each line
+// that contains what looks like an access key secret, a run key or a run code with a
+// fixed text, each U+0000 with U+FFFD, and each run of bytes that is not UTF-8 with
+// one U+FFFD. It then keeps the last part of the log, from the start of a line when
+// the part has one and otherwise from the start of a character, such that the log is
+// at most [MaxLog] bytes and the body at most contracts.MaxRequest bytes as sent, and
+// sets truncated when it cut anything. So the log sent is valid UTF-8. Qory Apiary
+// takes one machine log per dispatch, before or after the dispatch ends. The answer
+// is a signed 204. A refusal is a [*Refusal]: [ErrForbidden], a dispatch that is
+// unknown or of another node pool; [ErrMachineLogExists], a dispatch that has a
+// machine log; [ErrNotFound]; or [ErrRateLimited].
 func (c *Client) MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error {
 	what, err := ofDispatch("the machine log of ", dispatchID)
 	if err != nil {
