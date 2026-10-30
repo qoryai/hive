@@ -23,6 +23,12 @@
 # the address in /etc/hosts, and the lifetime in the arguments of shutdown. Each failure
 # prints one line to stderr; the line starts with its fix and contains no secret.
 #
+# At the end of each stage, the script prints one line to stderr:
+# "qory-machine-start: <UTC time> <stage>". The stages are start data read, firewall set,
+# Docker started, run code written and qory run started. The lines reach the console
+# (StandardError=journal+console), so the machine log shows how far the machine got. A
+# stage line contains no value of the start data.
+#
 # qory-machine.service needs systemd 246 or later. From that version, systemd-notify
 # waits until systemd has processed READY (a synchronous barrier) before it exits, so
 # systemd links READY to this unit under NotifyAccess=all.
@@ -72,6 +78,13 @@ trap 'stop SIGTERM 143' TERM
 fail() {
 	printf '%s\n' "$1" >&2
 	exit 1
+}
+
+# stage prints the stage line of $1, a fixed text, with the time in UTC.
+stage() {
+	local time
+	TZ=UTC0 printf -v time '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+	printf '%s\n' "qory-machine-start: $time $1" >&2
 }
 
 for tool in base64 chmod chown curl head ip6tables iptables jq mkdir rm runuser sed shutdown systemctl systemd-notify tr; do
@@ -239,6 +252,7 @@ gateway) fail "Set gateway in the start data to an object with url and address. 
 url) fail "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid." ;;
 address) fail "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address." ;;
 esac
+stage "start data read"
 
 # 2. Drop every packet whose destination is 169.254.169.254 or fd00:ec2::254 when it
 # reaches the raw table, before any nat rule: the OUTPUT rules match the packets that
@@ -252,6 +266,7 @@ for chain in PREROUTING OUTPUT; do
 	ip6tables -w -t raw -I "$chain" -d fd00:ec2::254 -j DROP 2>/dev/null ||
 		fail "Check that ip6tables can add rules to the raw table on this machine image. Adding the $chain rule that drops packets to fd00:ec2::254 failed."
 done
+stage "firewall set"
 
 # 3. The gateway's host name resolves to the address in the start data.
 printf '%s %s\n' "$address" "$url_host" 2>/dev/null >>"$hosts" ||
@@ -306,6 +321,7 @@ chown -R qory "$certs_dir" 2>/dev/null || fail "Add the user qory to the machine
 # systemctl start then waits until docker.service is up, before qory runs.
 systemd-notify --ready 2>/dev/null || fail "Run this script from qory-machine.service, which has Type=notify. Sending READY to systemd failed."
 systemctl start docker.service 2>/dev/null || fail "Read the journal of docker.service for the cause. Starting docker.service failed."
+stage "Docker started"
 # qory and its children inherit no NOTIFY_SOCKET.
 unset NOTIFY_SOCKET
 
@@ -315,6 +331,7 @@ printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root c
 unset run_code
 chmod 0600 "$run_code_file" 2>/dev/null || fail "Check that root can write $run_code_dir. Setting $run_code_file to mode 0600 failed."
 chown qory "$run_code_file" "$run_code_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $run_code_dir and $run_code_file to qory failed."
+stage "run code written"
 
 # 6. The working folder of qory run, which qory takes as the root of the work. qory run
 # exits with an error when the home of its harness, under $home/.cache, is inside that
@@ -333,6 +350,7 @@ cd -- "$work_dir" 2>/dev/null || fail "Check that root can read $work_dir. Chang
 
 # 7. The run. Its exit powers the machine off, through on_exit.
 status=0
+stage "qory run started"
 HOME=$home runuser -u qory -- qory run --run-code-file "$run_code_file" --gateway "$url" || status=$?
 if ((status != 0)); then
 	printf '%s\n' "Read the lines of qory run in the journal of qory-machine.service for the cause. qory run exited with status $status." >&2
