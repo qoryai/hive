@@ -245,13 +245,9 @@ type result struct {
 	log            []string
 }
 
-// run runs the script once and checks what every run must leave: no secret marker in
-// stdout, stderr or the stubs' arguments, no token marker in stdout or stderr, no run
-// code file, and systemctl poweroff as the last command.
-func (e *env) run(t *testing.T, sh string, vars ...string) result {
-	t.Helper()
-	cmd := exec.Command(sh, "qory-machine-start")
-	cmd.Env = append([]string{
+// environ is the environment of a run of the script, with vars added.
+func (e *env) environ(vars ...string) []string {
+	return append([]string{
 		"PATH=" + e.path,
 		"QORY_MACHINE_ROOT=" + e.root,
 		"STUB_LOG=" + e.log,
@@ -262,6 +258,15 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 		// Local time is 5 hours ahead of UTC, so a stage line in local time fails.
 		"TZ=XXX-5",
 	}, vars...)
+}
+
+// run runs the script once and checks what every run must leave: no secret marker in
+// stdout, stderr or the stubs' arguments, no token marker in stdout or stderr, no run
+// code file, and systemctl poweroff as the last command.
+func (e *env) run(t *testing.T, sh string, vars ...string) result {
+	t.Helper()
+	cmd := exec.Command(sh, "qory-machine-start")
+	cmd.Env = e.environ(vars...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	r := result{}
@@ -490,6 +495,23 @@ func equalStages(t *testing.T, got, want []string) {
 	}
 }
 
+// TestStartUnitRunsWithStderrClosed runs the script with stderr closed. The stage
+// lines cannot be written, and the script still runs qory and exits with 0.
+func TestStartUnitRunsWithStderrClosed(t *testing.T) {
+	sh := bash(t)
+	e := newEnv(t, commands(t, sh))
+	cmd := exec.Command(sh, "-c", `exec "$0" qory-machine-start 2>&-`, sh)
+	cmd.Env = e.environ()
+	if out, err := cmd.Output(); err != nil || len(out) != 0 {
+		t.Fatalf("the script returned %v with stdout %q; want no error and no output", err, out)
+	}
+	log := strings.Split(strings.TrimSuffix(read(t, e.log), "\n"), "\n")
+	run := "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + gatewayURL
+	if !slices.Contains(log, run) || log[len(log)-1] != "systemctl poweroff" {
+		t.Errorf("the commands do not contain %q, or do not end with systemctl poweroff:\n%s", run, strings.Join(log, "\n"))
+	}
+}
+
 // readOnly replaces path with an empty folder of mode 0555. Appending to a folder fails
 // for every user; creating a file in it fails for every user except root, so a test
 // run by root is skipped unless path is the file that the script appends to.
@@ -553,8 +575,9 @@ func TestStartUnitFails(t *testing.T) {
 		orWant string
 		// setup changes the root folder before the run.
 		setup func(t *testing.T, root string)
-		// stage is the last stage line that the script prints before it stops. With
-		// ran empty, the script stops before the first stage.
+		// stage is the stage of the last stage line that the script prints before it
+		// stops, or "" when it stops before the first stage line. A case sets both ran
+		// and stage, or neither.
 		stage string
 	}{
 		{name: "not JSON", userData: `{"version": 1,`, want: json1},

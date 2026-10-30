@@ -23,11 +23,13 @@
 # the address in /etc/hosts, and the lifetime in the arguments of shutdown. Each failure
 # prints one line to stderr; the line starts with its fix and contains no secret.
 #
-# At the end of each stage, the script prints one line to stderr:
-# "qory-machine-start: <UTC time> <stage>". The stages are start data read, firewall set,
-# Docker started, run code written and qory run started. The lines reach the console
+# At each stage, the script prints one line to stderr:
+# "qory-machine-start: <UTC time> <stage>". It prints start data read, firewall set,
+# Docker started and run code written as each of those stages ends, and qory run started
+# just before it runs qory run. The lines reach the console
 # (StandardError=journal+console), so the machine log shows how far the machine got. A
-# stage line contains no value of the start data.
+# stage line contains no value of the start data. A stage line that cannot be written
+# does not stop the script.
 #
 # qory-machine.service needs systemd 246 or later. From that version, systemd-notify
 # waits until systemd has processed READY (a synchronous barrier) before it exits, so
@@ -80,11 +82,12 @@ fail() {
 	exit 1
 }
 
-# stage prints the stage line of $1, a fixed text, with the time in UTC.
+# stage prints the stage line of $1, a fixed text, with the time in UTC. A failed
+# write is ignored.
 stage() {
-	local time
-	TZ=UTC0 printf -v time '%(%Y-%m-%dT%H:%M:%SZ)T' -1
-	printf '%s\n' "qory-machine-start: $time $1" >&2
+	local time=
+	TZ=UTC0 printf -v time '%(%Y-%m-%dT%H:%M:%SZ)T' -1 2>/dev/null || true
+	printf '%s\n' "qory-machine-start: $time $1" >&2 2>/dev/null || true
 }
 
 for tool in base64 chmod chown curl head ip6tables iptables jq mkdir rm runuser sed shutdown systemctl systemd-notify tr; do
