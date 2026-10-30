@@ -37,7 +37,7 @@ const (
 // network. The stub folder has a stub for each, and the test stops before it runs the
 // script if any of them resolves outside the stub folder.
 var dangerous = []string{
-	"chgrp", "chown", "curl", "docker", "halt", "ip", "ip6tables", "iptables", "nft",
+	"chgrp", "chown", "curl", "docker", "halt", "ip", "ip6tables", "iptables", "journalctl", "nft",
 	"poweroff", "qory", "reboot", "runuser", "shutdown", "su", "sudo", "systemctl",
 	"systemd-notify", "wget",
 }
@@ -51,8 +51,8 @@ var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed"
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
 // stdin. The runuser stub logs HOME, NOTIFY_SOCKET and the working directory, and
 // links the run code file to $STUB_KEEP, so the test can read it after the script
-// removes it; with $STUB_TERM set, it sends SIGTERM to the script. A STUB_FAIL_
-// variable makes one stub exit with an error.
+// removes it; with $STUB_TERM set, it sends SIGTERM to the script. The journalctl stub
+// prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one stub exit with an error.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
@@ -82,6 +82,10 @@ systemctl)
 	;;
 shutdown)
 	[[ -z ${STUB_FAIL_SHUTDOWN:-} ]] || exit 1
+	;;
+journalctl)
+	[[ -z ${STUB_FAIL_JOURNALCTL:-} ]] || exit 1
+	printf '%s\n' "${STUB_JOURNAL:-}"
 	;;
 systemd-notify | chown) ;;
 runuser)
@@ -645,7 +649,29 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "user data request fails", vars: []string{"STUB_FAIL_USERDATA=1"}, want: "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."},
 		{name: "iptables fails", stage: "start data read", vars: []string{"STUB_FAIL_IPTABLES=1"}, ran: "iptables -w -t raw -I PREROUTING -d 169.254.169.254 -j DROP", want: "Check that iptables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to 169.254.169.254 failed."},
 		{name: "daemon.json is not an object", stage: "firewall set", daemonJSON: `["not an object"]`, ran: "iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP", want: "Make {root}/etc/docker/daemon.json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."},
-		{name: "docker.service fails", stage: "firewall set", vars: []string{"STUB_FAIL_DOCKER=1"}, ran: "systemctl start docker.service", want: "Read the journal of docker.service for the cause. Starting docker.service failed."},
+		// The journal's lines reach stderr with the password replaced and without the
+		// lines that look like a secret, before the failure line.
+		{
+			name: "docker.service fails", stage: "firewall set", ran: "journalctl -u docker.service -n 20 --no-pager -o cat",
+			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_JOURNAL=" + strings.Join([]string{
+				"Starting docker.service",
+				"proxy http://qory:" + password + "@127.0.0.1:3129 refused",
+				"a key qrk_TESTrunkey000000000000 in a line",
+				"a run code QECR_TEST in a line",
+				password + " twice " + password,
+				"docker.service failed",
+			}, "\n")},
+			want: "Starting docker.service\n" +
+				"proxy http://qory:[hidden]@127.0.0.1:3129 refused\n" +
+				"[hidden] twice [hidden]\n" +
+				"docker.service failed\n" +
+				"Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
+		},
+		{
+			name: "docker.service and journalctl fail", stage: "firewall set", ran: "journalctl -u docker.service -n 20 --no-pager -o cat",
+			vars: []string{"STUB_FAIL_DOCKER=1", "STUB_FAIL_JOURNALCTL=1", "STUB_JOURNAL=never printed"},
+			want: "Read the lines of docker.service above this line in the machine log for the cause. Starting docker.service failed.",
+		},
 		{name: "SIGTERM", stage: "qory run started", vars: []string{"STUB_TERM=1"}, status: 143, ran: "runuser-home {root}/home/qory", want: "No action needed. The script stopped on SIGTERM, and the machine powers off."},
 		{name: "ip6tables fails", stage: "start data read", vars: []string{"STUB_FAIL_IP6TABLES=1"}, ran: "ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP", want: "Check that ip6tables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to fd00:ec2::254 failed."},
 		{name: "shutdown fails", stage: "firewall set", vars: []string{"STUB_FAIL_SHUTDOWN=1"}, ran: "shutdown -P +60", want: "Check that shutdown -P can schedule a power-off on this machine image. Scheduling the power-off in 60 minutes failed."},
@@ -837,6 +863,7 @@ func TestStartUnitSecretLines(t *testing.T) {
 		`"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 		`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 		`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
+		`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
 		`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
 	}
 	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)
