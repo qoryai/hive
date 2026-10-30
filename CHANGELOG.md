@@ -37,12 +37,12 @@ The changes to Hive that no release contains yet, in the shape of
   deleted. After, it reads "Read the status lines of qory run above this line in the
   machine log for the cause".
 - When `docker.service` fails to start, the start script prints the last 20 lines of
-  its journal from this boot before its failure line, so the machine log contains them.
-  In those lines, the engine proxy password is replaced by `[hidden]`, and a line that
-  contains `qak_`, `qrk_` or `qecr_` is left out. Before, the failure line read "Read
-  the journal of docker.service for the cause", and that journal is gone once the
-  machine is deleted. After, it reads "Read the lines of docker.service above this line in the
-  machine log for the cause".
+  its journal from this boot before its failure line, so the machine log contains
+  them. In those lines, the engine proxy password is replaced by `[hidden]`, and a line
+  that contains `qak_`, `qrk_` or `qecr_` is left out. Before, the failure line read
+  "Read the journal of docker.service for the cause", and that journal is gone once the
+  machine is deleted. After, it reads "Read the lines of docker.service above this line
+  in the machine log for the cause".
 
 ### Fixed
 
