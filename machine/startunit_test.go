@@ -695,6 +695,7 @@ func TestStartUnitFiles(t *testing.T) {
 		"Type=notify",
 		"NotifyAccess=all",
 		"ExecStart=/usr/local/libexec/qory/qory-machine-start",
+		"StandardError=journal+console",
 		"TimeoutStartSec=120",
 		"SuccessAction=poweroff",
 		"FailureAction=poweroff",
