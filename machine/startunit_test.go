@@ -748,6 +748,26 @@ func TestStartUnitFiles(t *testing.T) {
 			t.Errorf("qory-machine.service has no line %s", line)
 		}
 	}
+	// systemd reads SuccessAction and FailureAction only in [Unit], and ignores them in
+	// [Service].
+	sections := map[string][]string{}
+	section := ""
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = line
+			continue
+		}
+		sections[section] = append(sections[section], line)
+	}
+	for _, line := range []string{"SuccessAction=poweroff", "FailureAction=poweroff"} {
+		if !slices.Contains(sections["[Unit]"], line) {
+			t.Errorf("qory-machine.service has no line %s in [Unit]", line)
+		}
+		key := strings.SplitAfter(line, "=")[0]
+		if slices.ContainsFunc(sections["[Service]"], func(l string) bool { return strings.HasPrefix(l, key) }) {
+			t.Errorf("qory-machine.service sets %s in [Service], where systemd ignores it", key)
+		}
+	}
 	script := read(t, "qory-machine-start")
 	if !strings.HasPrefix(script, "#!/bin/bash\n") || !strings.Contains(script, "\nset -euo pipefail\n") {
 		t.Error("qory-machine-start does not start with #!/bin/bash and set -euo pipefail")
