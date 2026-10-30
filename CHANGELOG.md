@@ -25,31 +25,34 @@ The changes to Hive that no release contains yet, in the shape of
 ### Changed
 
 - `qory-machine.service` sends standard error to the console as well as the journal
-  (`StandardError=journal+console`). So the machine log, which is the vendor's console
-  text, contains the start script's lines and the status lines of `qory run`.
+  (`StandardError=journal+console`). The start script sets `QORY_STATUS_FD=3` for qory
+  run, with descriptor 3 on that standard error, and sends qory run's stdout and stderr
+  to the journal only. So the machine log, which is the vendor's console text, contains
+  the start script's lines and qory run's status and error lines, and the output of the
+  agent, the setup and the prebuild stays in the journal. Before, the start script's
+  lines and all of qory run's output reached the journal only.
 - When `qory run` exits with an error, the start script's last line points to the
   machine log. Before, it read "Read the lines of qory run in the journal of
   qory-machine.service for the cause", and that journal is gone once the machine is
-  deleted. After, it reads "Read the lines of qory run above this line in the machine
-  log for the cause".
-- When `docker.service` fails to start, the start script prints the last 20 lines of
-  its journal from this boot before its failure line, so the machine log contains them. In those
-  lines, the engine proxy password is replaced by `[hidden]`, and a line that contains
-  `qak_`, `qrk_` or `qecr_` is left out. Before, the failure line read "Read the journal
-  of docker.service for the cause", and that journal is gone once the machine is
-  deleted. After, it reads "Read the lines of docker.service above this line in the
+  deleted. After, it reads "Read the status lines of qory run above this line in the
   machine log for the cause".
-- The console, and with it the machine log, gets only qory run's status and error
-  lines. The start script sets `QORY_STATUS_FD=3` for qory run, with descriptor 3 on
-  the console and the journal, and sends qory run's stdout and stderr to the journal
-  only. Before, the standard error of qory run, with the output of the agent, the setup
-  and the prebuild, reached the console and the machine log. After, that output stays
-  in the journal. The failure line after qory run reads "Read the status lines of qory
-  run above this line in the machine log for the cause", where it read "Read the lines
-  of qory run above this line in the machine log for the cause".
+- When `docker.service` fails to start, the start script prints the last 20 lines of
+  its journal from this boot before its failure line, so the machine log contains them.
+  In those lines, the engine proxy password is replaced by `[hidden]`, and a line that
+  contains `qak_`, `qrk_` or `qecr_` is left out. Before, the failure line read "Read
+  the journal of docker.service for the cause", and that journal is gone once the
+  machine is deleted. After, it reads "Read the lines of docker.service above this line in the
+  machine log for the cause".
 
 ### Fixed
 
 - `qory-machine.service` sets `SuccessAction=poweroff` and `FailureAction=poweroff` in
   `[Unit]`. In `[Service]`, systemd ignores both, so a machine whose start script was
   killed before its exit handler ran did not power off when the script ended.
+
+### Upgrading
+
+- Build the machine image with a qory that writes its status and error lines to the
+  descriptor in `QORY_STATUS_FD`. With an earlier qory, the console and the machine log
+  contain no line of qory run, and qory run's errors are only in the machine's journal,
+  which is deleted with the machine.
