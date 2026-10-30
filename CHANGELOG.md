@@ -31,8 +31,8 @@ The changes to Hive that no release contains yet, in the shape of
   the start script's lines and qory run's status and error lines, and the output of the
   agent, the setup and the prebuild stays in the journal. Before, the start script's
   lines and all of qory run's output reached the journal only.
-- When `qory run` exits with an error, the start script's last line points to the
-  machine log. Before, it read "Read the lines of qory run in the journal of
+- The line that the start script prints when `qory run` exits with an error points to
+  the machine log. Before, it read "Read the lines of qory run in the journal of
   qory-machine.service for the cause", and that journal is gone once the machine is
   deleted. After, it reads "Read the status lines of qory run above this line in the
   machine log for the cause".
