@@ -35,6 +35,7 @@ func TestRecover(t *testing.T) {
 		{journal.PhaseMade, machine, []journal.Action{keep, resume, resume, resume, deleting}},
 		{journal.PhaseDispatched, machine, []journal.Action{keep, resume, resume, resume, deleting}},
 		{journal.PhaseDeleting, machine, []journal.Action{keep, keep, keep, keep, keep}},
+		{journal.PhaseEnded, machine, []journal.Action{keep, keep, keep, keep, keep}},
 	} {
 		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: lifetime}
 		for i, l := range lookups {

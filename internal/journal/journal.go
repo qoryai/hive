@@ -44,8 +44,9 @@ const (
 // The phases of a dispatch, in order. In claimed, no make has returned, so a machine
 // may exist without a machine id in the journal: a restart looks the machine up in
 // the adapter's list by its key, the dispatch id. From made on, the entry has the
-// machine id that the adapter's make returned. An entry can enter deleting from any
-// phase, with the machine id that the adapter's list returned when the entry had none.
+// machine id that the adapter's make returned. An entry can enter deleting or ended
+// from any phase, with the machine id that the adapter's list returned when the entry
+// had none.
 const (
 	// PhaseClaimed is a claimed dispatch for which no make has returned.
 	PhaseClaimed = "claimed"
@@ -57,6 +58,9 @@ const (
 	// PhaseDeleting is a dispatch whose machine is being deleted. The entry stays until
 	// the adapter's delete returns gone.
 	PhaseDeleting = "deleting"
+	// PhaseEnded is a dispatch whose machine the adapter's delete returned as gone,
+	// while the post of gone to Qory Apiary is pending. The entry gets no more deletes.
+	PhaseEnded = "ended"
 )
 
 // secretPrefixes are the starts of an access key secret, a run key, a run code and an
@@ -64,7 +68,7 @@ const (
 var secretPrefixes = []string{"qak_", "qrk_", "qecr_", "qecp_"}
 
 // phases is every phase, in order.
-var phases = []string{PhaseClaimed, PhaseMade, PhaseDispatched, PhaseDeleting}
+var phases = []string{PhaseClaimed, PhaseMade, PhaseDispatched, PhaseDeleting, PhaseEnded}
 
 var (
 	// dispatchIDShape is dp_ and 16 lower-case Crockford base32 characters.
@@ -81,7 +85,7 @@ func IsDispatchID(s string) bool { return dispatchIDShape.MatchString(s) }
 
 // Entry is one live dispatch. MachineID is empty in [PhaseClaimed], is the machine id
 // that the adapter's make returned in [PhaseMade] and [PhaseDispatched], and is the id
-// of the machine being deleted in [PhaseDeleting]. The journal treats a machine id as
+// of the machine being deleted in [PhaseDeleting] and [PhaseEnded]. The journal treats a machine id as
 // opaque. MaxLifetimeMinutes is the machine's lifetime from the claim
 // answer, [MinLifetime] to [MaxLifetime], in every phase. An entry has no field for a
 // secret or for inputs.
@@ -106,7 +110,7 @@ func (e Entry) check() string {
 	case !dispatchIDShape.MatchString(e.DispatchID):
 		return "the dispatch id is not dp_ and 16 Crockford base32 characters"
 	case !slices.Contains(phases, e.Phase):
-		return "the phase is not claimed, made, dispatched or deleting"
+		return "the phase is not claimed, made, dispatched, deleting or ended"
 	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.MachineID, p) }):
 		return "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
@@ -116,7 +120,7 @@ func (e Entry) check() string {
 	case e.Phase == PhaseClaimed:
 		return ""
 	case e.MachineID == "":
-		return "the phase made, dispatched or deleting has no machine id"
+		return "the phase made, dispatched, deleting or ended has no machine id"
 	case !machineIDShape.MatchString(e.MachineID):
 		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
 	case e.MachineID == noMachine:

@@ -39,8 +39,8 @@ type Action struct {
 
 // Recover returns what to do with the entry e after a restart, given the lookup l of
 // its machine by its key:
-//   - deleting: resume with the entry's machine id, whatever the lookup returned. The
-//     watch deletes the machine until the adapter's delete returns gone.
+//   - ended or deleting: resume with the entry's machine id, whatever the lookup
+//     returned. The watch acts on the entry.
 //   - claimed, with no machine found: release with [ReasonRestarted]. A release
 //     exists only before a machine exists.
 //   - made or dispatched, with no machine found: resume with the entry's machine id.
@@ -52,7 +52,7 @@ type Action struct {
 //     found. For claimed, the make succeeded before the restart.
 func Recover(e Entry, l Lookup) Action {
 	switch {
-	case e.Phase == PhaseDeleting:
+	case e.Phase == PhaseEnded || e.Phase == PhaseDeleting:
 		return Action{Kind: Resume, MachineID: e.MachineID}
 	case !l.Found && e.Phase == PhaseClaimed:
 		return Action{Kind: Release, Reason: ReasonRestarted}
