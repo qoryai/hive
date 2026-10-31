@@ -121,7 +121,7 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 }
 
 // TestTheFakeRefusesEachInvalidRequestFixture posts each of the contract's invalid
-// request fixtures of dispatched, release and machine-log to its route: each gets the
+// request fixtures of dispatched, release, machine-log and machine-end to its route: each gets the
 // signed 400 invalid_request, before the fake looks up the dispatch.
 func TestTheFakeRefusesEachInvalidRequestFixture(t *testing.T) {
 	s := provisionertest.New(t)
@@ -129,6 +129,7 @@ func TestTheFakeRefusesEachInvalidRequestFixture(t *testing.T) {
 		"dispatched":  "fixtures/invalid/dispatched-*.json",
 		"release":     "fixtures/invalid/release-*.json",
 		"machine-log": "fixtures/invalid/machine-log-*.json",
+		"machine-end": "fixtures/invalid/machine-end-*.json",
 	} {
 		names, err := fs.Glob(contracts.ProvisionerFS, glob)
 		if err != nil || len(names) < 2 {

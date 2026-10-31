@@ -1,5 +1,6 @@
 // Package provisionertest is a fake Qory Apiary for the provisioner's tests: an
-// httptest server of provisioner/v1: claim, dispatched, release and machine-log.
+// httptest server of provisioner/v1: claim, dispatched, release, machine-log and
+// machine-end.
 //
 // It checks every request as Qory Apiary does, in the contract's order: a body over a
 // mebibyte gets an unsigned 413, a POST of another content type an unsigned 415, a
@@ -82,6 +83,7 @@ const (
 	RouteDispatched Route = "dispatched"
 	RouteRelease    Route = "release"
 	RouteMachineLog Route = "machine-log"
+	RouteMachineEnd Route = "machine-end"
 	// RouteUnknown is any other path, which gets a signed 404 not_found once its
 	// signature verifies.
 	RouteUnknown Route = "unknown"
@@ -176,6 +178,8 @@ type Dispatch struct {
 	// Release is the release that ended it, if one did, and MachineLog its machine log.
 	Release    *contracts.Release
 	MachineLog *contracts.MachineLog
+	// MachineEnds is the states of the machine ends that got the 204, in order.
+	MachineEnds []string
 }
 
 // Server is the fake Qory Apiary. Set its fields before the first request.
@@ -370,7 +374,7 @@ func (s *Server) now() time.Time {
 }
 
 // dispatchPathShape is the path of a request about one dispatch.
-var dispatchPathShape = regexp.MustCompile(`^/v1/dispatches/([^/]+)/(dispatched|release|machine-log)$`)
+var dispatchPathShape = regexp.MustCompile(`^/v1/dispatches/([^/]+)/(dispatched|release|machine-log|machine-end)$`)
 
 // filled is w with every empty member filled in, as listed under [Work].
 func filled(w Work) Work {
@@ -599,6 +603,7 @@ var schemaOf = map[Route]func() (*jsonschema.Schema, error){
 	RouteDispatched: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("dispatched.schema.json") }),
 	RouteRelease:    sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("release.schema.json") }),
 	RouteMachineLog: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("machine-log.schema.json") }),
+	RouteMachineEnd: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("machine-end.schema.json") }),
 }
 
 // validBody reports whether body is one JSON document with no member twice, with its
@@ -659,6 +664,12 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 		var ml contracts.MachineLog
 		_ = json.Unmarshal(body, &ml)
 		d.MachineLog = &ml
+		return answer{status: http.StatusNoContent}
+	}
+	if route == RouteMachineEnd {
+		var me contracts.MachineEnd
+		_ = json.Unmarshal(body, &me)
+		d.MachineEnds = append(d.MachineEnds, me.State)
 		return answer{status: http.StatusNoContent}
 	}
 	if d.State == StateClaimed && !d.Redeemed && !s.now().Before(d.LeaseUntil) {
