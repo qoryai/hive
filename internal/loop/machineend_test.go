@@ -534,7 +534,8 @@ func TestAnEndedEntryLeavesOnASigned403(t *testing.T) {
 
 // TestAFailedRemovalAfterGoneMovesTheEntryToEnded keeps an accepted gone as done when
 // the journal cannot drop the entry. The entry gets no delete, no dispatched and no
-// second post, so no later failure of a post reaches the limit. Each watch tries the removal again, also past the limit.
+// second post, so no later failure of a post reaches the limit. Each watch tries the
+// removal again, also past the limit.
 func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	h := newHarness(t)
 	failing := &setFailure{}
