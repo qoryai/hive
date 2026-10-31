@@ -757,8 +757,9 @@ func TestAStateThatAgainMatchesTheLastEndsItsCount(t *testing.T) {
 	}
 }
 
-// TestAnAcceptedPostEndsTheCount fails delete_failed once and then gets it accepted. A
-// failure of the same state 24 hours later counts anew.
+// TestAnAcceptedPostEndsTheCount fails delete_failed once and then gets it accepted.
+// The next post, 24 hours later, is an accepted deleting, so no matching state ends the
+// count in between. A failure of delete_failed after it counts anew.
 func TestAnAcceptedPostEndsTheCount(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
@@ -767,7 +768,6 @@ func TestAnAcceptedPostEndsTheCount(t *testing.T) {
 	stoppedMachine(h)
 	h.tick()
 	h.apiary.setEnd("delete_failed", nil)
-	h.tick()
 	h.tick()
 	h.clock.Advance(loop.MachineEndLimit)
 	h.clock.waitPending(t, loop.WatchInterval)
@@ -782,18 +782,21 @@ func TestAnAcceptedPostEndsTheCount(t *testing.T) {
 	}
 }
 
-// TestARemovalEndsTheCount fails delete_failed once, and the entry leaves at gone. A
-// machine with the same key 24 hours later gets a new entry, whose failure counts anew.
+// TestARemovalEndsTheCount fails delete_failed once, then gone, and the entry leaves at
+// the limit with no post done. A machine with the same key after that gets a new entry,
+// whose failure counts anew.
 func TestARemovalEndsTheCount(t *testing.T) {
 	h := newHarness(t)
 	h.machines.deleteErr = []error{deleteFailure}
 	h.apiary.setEnd("delete_failed", endFailed)
+	h.apiary.setEnd("gone", endFailed)
 	stoppedMachine(h)
 	h.tick()
 	h.tick()
-	equal(t, "the journal", h.entries(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	h.clock.Advance(loop.MachineEndLimit)
 	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "the journal", h.entries(), nil)
 	h.machines.add("i-again", dispatchA, contracts.MachineRunning, epoch)
 	expectFailingDeleteFailed(h)
 	if err := h.stop(); err != nil {
