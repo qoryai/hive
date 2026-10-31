@@ -203,7 +203,14 @@ func (a *fakeApiary) MachineEnd(_ context.Context, dispatchID, state string) err
 	return a.endErr[state]
 }
 
-// setEnd sets the error of each later machine-end with the state.
+func (a *fakeApiary) MachineEndOnce(_ context.Context, dispatchID, state string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "machine-end-once "+dispatchID+" "+state)
+	return a.endErr[state]
+}
+
+// setEnd sets the error of each later machine-end with the state, in either form.
 func (a *fakeApiary) setEnd(state string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -263,6 +270,10 @@ type fakeMachines struct {
 	deleteErr []error
 	logText   string
 	startData []byte
+	// lingering makes delete answer deleting while the list has the machine, as a
+	// machine does that the vendor is still shutting down. Otherwise delete takes the
+	// machine out of the list and answers gone.
+	lingering bool
 	// makeStarted, when set, receives a value as make starts, and make then waits
 	// for makeGate.
 	makeStarted chan struct{}
@@ -331,12 +342,15 @@ func (m *fakeMachines) Delete(_ context.Context, id string) (contracts.MachinesD
 			return contracts.MachinesDeleteAnswer{}, err
 		}
 	}
-	for i := range m.machines {
-		if m.machines[i].ID == id {
-			m.machines[i].State = contracts.MachineDeleting
-		}
+	i := slices.IndexFunc(m.machines, func(x contracts.Machine) bool { return x.ID == id })
+	if i >= 0 && m.lingering {
+		m.machines[i].State = contracts.MachineDeleting
+		return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
 	}
-	return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
+	if i >= 0 {
+		m.machines = slices.Delete(m.machines, i, i+1)
+	}
+	return contracts.MachinesDeleteAnswer{State: contracts.MachineGone}, nil
 }
 
 // add adds a machine to the adapter's list.
@@ -371,6 +385,13 @@ func (m *fakeMachines) takeCalls() []string {
 	out := slices.DeleteFunc(m.calls, func(c string) bool { return strings.HasPrefix(c, "list ") })
 	m.calls = nil
 	return out
+}
+
+// setLingering sets whether delete leaves the machine in the list.
+func (m *fakeMachines) setLingering(lingering bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lingering = lingering
 }
 
 // lastStartData is the start data of the last make.
@@ -592,6 +613,49 @@ func newClaim(id string) loop.Claim {
 
 // machineID is the id of the nth machine that the fake adapter makes.
 func machineID(n int) string { return fmt.Sprintf("i-0123456789abcd%03d", n) }
+
+// setFailure is a journal whose Set returns an error while fail is set, and whose
+// Remove keeps the entry and returns an error while failRemove is set.
+type setFailure struct {
+	loop.Journal
+	mu         sync.Mutex
+	fail       bool
+	failRemove bool
+}
+
+// setFail sets whether Set fails.
+func (j *setFailure) setFail(fail bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.fail = fail
+}
+
+// setFailRemove sets whether Remove fails.
+func (j *setFailure) setFailRemove(fail bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.failRemove = fail
+}
+
+func (j *setFailure) Set(e journal.Entry) error {
+	j.mu.Lock()
+	fail := j.fail
+	j.mu.Unlock()
+	if fail {
+		return errors.New("check the state folder: writing the journal of live dispatches failed; the journal is as it was: input/output error")
+	}
+	return j.Journal.Set(e)
+}
+
+func (j *setFailure) Remove(id string) error {
+	j.mu.Lock()
+	fail := j.failRemove
+	j.mu.Unlock()
+	if fail {
+		return errors.New("check the state folder: writing the journal of live dispatches failed; the journal is as it was: input/output error")
+	}
+	return j.Journal.Remove(id)
+}
 
 // syncFailure is a journal whose next Remove removes the entry and then returns the
 // error of a failed sync of the folder, as journal.Journal returns it.

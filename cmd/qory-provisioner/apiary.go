@@ -71,6 +71,12 @@ func (a apiary) MachineEnd(_ context.Context, dispatchID, _ string) error {
 	return errors.New("the client has no machine-end request yet: " + dispatchID)
 }
 
+// MachineEndOnce returns an error until stage 2 of this work replaces it with the
+// client's machine-end request with one try.
+func (a apiary) MachineEndOnce(ctx context.Context, dispatchID, state string) error {
+	return a.MachineEnd(ctx, dispatchID, state)
+}
+
 // sentinels pairs each refusal of the client that the loop acts on with the loop's
 // sentinel for it.
 var sentinels = []struct{ client, loop error }{

@@ -57,12 +57,12 @@ func kindOf(err error) string {
 }
 
 // claim is the claim path. It claims one dispatch at a time, while the journal has
-// fewer entries than MaxMachines, until ctx ends. It returns an error only when the
+// fewer machines than MaxMachines, until ctx ends. It returns an error only when the
 // journal cannot be written before or after a make.
 func (l *loop) claim(ctx context.Context) error {
 	defer l.Log.Info("stopped claiming")
 	for {
-		for len(l.Journal.List()) >= l.MaxMachines {
+		for l.machines() >= l.MaxMachines {
 			select {
 			case <-ctx.Done():
 				return nil
@@ -85,6 +85,18 @@ func (l *loop) claim(ctx context.Context) error {
 			l.wait(ctx, ShortWait)
 		}
 	}
+}
+
+// machines is the number of journal entries that count toward MaxMachines: all but the
+// ended ones, whose machine is gone.
+func (l *loop) machines() int {
+	n := 0
+	for _, e := range l.Journal.List() {
+		if e.Phase != journal.PhaseEnded {
+			n++
+		}
+	}
+	return n
 }
 
 // handle makes the machine of the claim c and sends dispatched. When the make fails,
@@ -195,10 +207,10 @@ func (l *loop) dispatched(ctx context.Context, e journal.Entry) {
 	case err == nil:
 	case errors.Is(err, ErrGone):
 		l.Log.Info("the dispatch ended", attrs...)
-		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
+		l.cleanUp(ctx, e)
 	case errors.Is(err, ErrLeaseExpired):
 		l.Log.Warn("the lease of the dispatch expired before dispatched", attrs...)
-		l.cleanUp(ctx, e.DispatchID, e.MachineID, true)
+		l.cleanUp(ctx, e)
 	default:
 		l.Log.Warn("sending dispatched failed", append(attrs, errorAttr(err, nil))...)
 	}

@@ -16,9 +16,10 @@ import (
 //     the machine counts as logged. When the write fails, the entry stays as it is
 //     for the watch.
 //   - Resume: a claimed entry becomes made with the machine id found. Each made
-//     entry then gets dispatched. A dispatched or deleting entry stays for the watch.
-//     An entry whose machine is not listed stays too, and the watch deletes its
-//     machine once [ListGrace] has passed since the start.
+//     entry then gets dispatched. A dispatched, deleting or ended entry stays for the
+//     watch.
+//     An entry whose machine is not listed stays too, and the watch cleans it up
+//     once [ListGrace] has passed since the start.
 //
 // It returns an error when the list fails or a resumed entry cannot be written.
 func (l *loop) recoverJournal(ctx context.Context) error {

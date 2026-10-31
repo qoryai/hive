@@ -74,6 +74,7 @@ func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"dispatched " + dispatchA + " i-a",
 		"machine-log " + dispatchA + " false",
+		"machine-end " + dispatchA + " gone",
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "log i-a", "delete i-a"})
 	equal(t, "the journal", h.entries(), nil)
