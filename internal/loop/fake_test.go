@@ -151,8 +151,10 @@ type fakeApiary struct {
 	releaseErr error
 	logErr     error
 	uploads    []upload
-	// endErr is the error of each later machine-end, by state.
-	endErr map[string]error
+	// endErr is the error of each later machine-end, by state, and endTries the number
+	// of tries.
+	endErr   map[string]error
+	endTries int
 }
 
 func newApiary() *fakeApiary {
@@ -200,17 +202,20 @@ func (a *fakeApiary) MachineEnd(_ context.Context, dispatchID, state string) err
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, "machine-end "+dispatchID+" "+state)
+	a.endTries++
 	return a.endErr[state]
 }
 
-func (a *fakeApiary) MachineEndOnce(_ context.Context, dispatchID, state string) error {
+// takeEndTries returns the number of machine-end tries since the last takeEndTries.
+func (a *fakeApiary) takeEndTries() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.calls = append(a.calls, "machine-end-once "+dispatchID+" "+state)
-	return a.endErr[state]
+	n := a.endTries
+	a.endTries = 0
+	return n
 }
 
-// setEnd sets the error of each later machine-end with the state, in either form.
+// setEnd sets the error of each later machine-end with the state.
 func (a *fakeApiary) setEnd(state string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -614,13 +619,22 @@ func newClaim(id string) loop.Claim {
 // machineID is the id of the nth machine that the fake adapter makes.
 func machineID(n int) string { return fmt.Sprintf("i-0123456789abcd%03d", n) }
 
-// setFailure is a journal whose Set returns an error while fail is set, and whose
-// Remove keeps the entry and returns an error while failRemove is set.
+// setFailure is a journal whose Set returns an error while fail is set, whose Set writes
+// the entry and then returns the error of a failed sync of the folder while failSync is
+// set, and whose Remove keeps the entry and returns an error while failRemove is set.
 type setFailure struct {
 	loop.Journal
 	mu         sync.Mutex
 	fail       bool
+	failSync   bool
 	failRemove bool
+}
+
+// setFailSync sets whether Set fails after it wrote the entry.
+func (j *setFailure) setFailSync(fail bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.failSync = fail
 }
 
 // setFail sets whether Set fails.
@@ -639,12 +653,18 @@ func (j *setFailure) setFailRemove(fail bool) {
 
 func (j *setFailure) Set(e journal.Entry) error {
 	j.mu.Lock()
-	fail := j.fail
+	fail, failSync := j.fail, j.failSync
 	j.mu.Unlock()
 	if fail {
 		return errors.New("check the state folder: writing the journal of live dispatches failed; the journal is as it was: input/output error")
 	}
-	return j.Journal.Set(e)
+	if err := j.Journal.Set(e); err != nil {
+		return err
+	}
+	if failSync {
+		return errors.New("check the state folder: the journal of live dispatches is written, but syncing its folder failed: input/output error")
+	}
+	return nil
 }
 
 func (j *setFailure) Remove(id string) error {

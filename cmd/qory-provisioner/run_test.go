@@ -353,8 +353,8 @@ func TestToLoopEnd(t *testing.T) {
 	}
 }
 
-// TestApiaryMachineEnd sends a machine end through the wrapper and the fake Qory Apiary,
-// in both forms. A signed 403 and a signed 200 match the loop's sentinels, and an
+// TestApiaryMachineEnd sends a machine end through the wrapper and the fake Qory Apiary.
+// A signed 403 and a signed 200 match the loop's sentinels, and an
 // unsigned 404 matches neither.
 func TestApiaryMachineEnd(t *testing.T) {
 	srv := provisionertest.New(t)
@@ -368,7 +368,7 @@ func TestApiaryMachineEnd(t *testing.T) {
 	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndDeleting); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone); err != nil {
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); err != nil {
 		t.Fatal(err)
 	}
 	if d, _ := srv.Dispatch(c.DispatchID); !slices.Equal(d.MachineEnds, []string{contracts.MachineEndDeleting, contracts.MachineEndGone}) {
@@ -378,11 +378,11 @@ func TestApiaryMachineEnd(t *testing.T) {
 		t.Errorf("an unknown dispatch: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 200, Body: `{}`})
-	if err := a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
 		t.Errorf("a signed 200: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 404, Unsigned: true})
-	err = a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone)
+	err = a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone)
 	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndDone) {
 		t.Errorf("an unsigned 404: %v, want a failure the loop retries", err)
 	}

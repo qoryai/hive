@@ -90,29 +90,20 @@ func (c *Client) MachineLog(ctx context.Context, dispatchID, log string, truncat
 // MachineEnd sends POST /v1/dispatches/<dispatchID>/machine-end,
 // machine-end.schema.json: the result of deleting the machine the provisioner created
 // for the dispatch. state is [contracts.MachineEndDeleting], [contracts.MachineEndGone]
-// or [contracts.MachineEndDeleteFailed]. Qory Apiary takes it any number of times,
-// before or after the dispatch ends. The answer is a signed 204. A refusal is a
+// or [contracts.MachineEndDeleteFailed]. The request has one try and no retries, so a
+// Qory Apiary with no such route costs one request. Qory Apiary takes it any number of
+// times, before or after the dispatch ends. The answer is a signed 204. A refusal is a
 // [*Refusal]: [ErrForbidden], a dispatch that is unknown or of another node pool;
 // [ErrUnavailable]; [ErrNotFound]; or [ErrRateLimited]. A signed 400, 403 or 404 also
 // matches [ErrMachineEndStopped]. A machine end is never refused 410 gone or 409
 // lease_expired.
 func (c *Client) MachineEnd(ctx context.Context, dispatchID, state string) error {
-	return c.machineEnd(ctx, dispatchID, state, false)
-}
-
-// MachineEndOnce is [Client.MachineEnd] with one try and no retries.
-func (c *Client) MachineEndOnce(ctx context.Context, dispatchID, state string) error {
-	return c.machineEnd(ctx, dispatchID, state, true)
-}
-
-// machineEnd sends a machine end, with one try when once is true.
-func (c *Client) machineEnd(ctx context.Context, dispatchID, state string, once bool) error {
 	what, err := ofDispatch("the machine end of ", dispatchID)
 	if err != nil {
 		return err
 	}
 	return c.sendToDispatch(ctx, request{
-		what: what, kind: kindMachineEnd, path: routeDispatches + dispatchID + "/machine-end", schema: "machine-end.schema.json", limit: MaxAnswer, timeout: RequestTimeout, once: once,
+		what: what, kind: kindMachineEnd, path: routeDispatches + dispatchID + "/machine-end", schema: "machine-end.schema.json", limit: MaxAnswer, timeout: RequestTimeout, once: true,
 		body: func(t string) any { return contracts.MachineEnd{Version: 1, Time: t, State: state} },
 	})
 }

@@ -65,14 +65,9 @@ func (a apiary) MachineLog(ctx context.Context, dispatchID, log string, truncate
 	return toLoop(a.client.MachineLog(ctx, dispatchID, log, truncated))
 }
 
-// MachineEnd sends how the removal of the dispatch's machine went.
+// MachineEnd sends how the removal of the dispatch's machine went, with one try.
 func (a apiary) MachineEnd(ctx context.Context, dispatchID, state string) error {
 	return toLoopEnd(a.client.MachineEnd(ctx, dispatchID, state))
-}
-
-// MachineEndOnce is [apiary.MachineEnd] with one try and no retries.
-func (a apiary) MachineEndOnce(ctx context.Context, dispatchID, state string) error {
-	return toLoopEnd(a.client.MachineEndOnce(ctx, dispatchID, state))
 }
 
 // sentinels pairs each refusal of the client that the loop acts on with the loop's

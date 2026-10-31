@@ -25,10 +25,10 @@
 // it. When the delete returns gone, the loop sends gone and removes the journal entry.
 // Otherwise the entry moves to the phase deleting, in which it still counts toward
 // max_machines, and each watch cleans up the machine again. A log read that failed
-// runs again only until a delete is accepted. When the post of gone must be retried,
-// the entry moves to the phase ended, which frees its place in max_machines. Each
-// watch sends gone again with one try, for at most [GoneLimit], and stops at the first
-// failure of that watch.
+// runs again only until a delete is accepted. When the post of gone fails, the entry
+// moves to the phase ended, which frees its place in max_machines, and each watch sends
+// gone again. Each post of machine-end is one try, the first failure pauses the posts
+// until the next watch, and a post that keeps failing stops at [MachineEndLimit].
 //
 // When the context ends, the claim path stops claiming. A claim that has no make yet
 // is released, and a make in flight finishes and its machine is recorded. The loop
@@ -71,11 +71,13 @@ const (
 	// counts from the make that returned the machine, or from the start of [Run] for
 	// an entry that the journal had at the start.
 	ListGrace = 5 * time.Minute
-	// GoneLimit is the time during which the watch keeps sending machine-end gone for
-	// an ended entry. It counts from the first gone of the entry, or from the start of
-	// [Run] for an entry that the journal had at the start. After it, the entry leaves
-	// the journal, so a Qory Apiary with no machine-end route cannot fill the journal.
-	GoneLimit = 24 * time.Hour
+	// MachineEndLimit is the time during which the loop keeps sending one failing
+	// machine-end. For gone, it counts from the first gone of an ended entry. For
+	// deleting and delete_failed, it counts from the first failure of that state. An
+	// entry that the journal had at the start counts from the start of [Run], and a
+	// restart starts each count again. After it, the state is dropped and an ended entry
+	// leaves the journal, as the contract allows for a call that keeps failing.
+	MachineEndLimit = 24 * time.Hour
 	// LongWait is the wait before the next claim after a make that failed with the
 	// kind limit or defect, after the start data of a claim could not be built, and
 	// after a claim for another pool than the provisioner's.
@@ -127,7 +129,7 @@ type Claim struct {
 }
 
 // Apiary is the provisioner's client of Qory Apiary: the five requests of the
-// provisioner contract that the loop sends, one of them in two forms.
+// provisioner contract that the loop sends.
 type Apiary interface {
 	// Claim claims a request for one machine. It returns false and no error when no
 	// work could be claimed within the claim's wait.
@@ -142,12 +144,10 @@ type Apiary interface {
 	// that made no machine. truncated is true when the log is the last part of a
 	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
-	// MachineEnd sends how the removal of the dispatch's machine went: deleting, gone or
-	// delete_failed. Its error wraps [ErrMachineEndDone] or [ErrMachineEndStopped] for
-	// those answers.
+	// MachineEnd sends how the removal of the dispatch's machine went, with one try and
+	// no retries: deleting, gone or delete_failed. Its error wraps [ErrMachineEndDone] or
+	// [ErrMachineEndStopped] for those answers.
 	MachineEnd(ctx context.Context, dispatchID, state string) error
-	// MachineEndOnce is [Apiary.MachineEnd] with one try and no retries.
-	MachineEndOnce(ctx context.Context, dispatchID, state string) error
 }
 
 // Journal is the journal of live dispatches, as [journal.Journal] keeps it.
@@ -224,14 +224,15 @@ type Config struct {
 // when the journal cannot be written before a make or after it.
 func Run(ctx context.Context, cfg Config) error {
 	l := &loop{
-		Config:  cfg,
-		busy:    map[string]bool{},
-		logged:  map[string]bool{},
-		sentEnd: map[string]string{},
-		freed:   make(chan struct{}, 1),
-		made:    map[string]time.Time{},
-		claimed: map[string]time.Time{},
-		gone:    map[string]time.Time{},
+		Config:    cfg,
+		busy:      map[string]bool{},
+		logged:    map[string]bool{},
+		sentEnd:   map[string]string{},
+		failedEnd: map[string]endFailure{},
+		freed:     make(chan struct{}, 1),
+		made:      map[string]time.Time{},
+		claimed:   map[string]time.Time{},
+		gone:      map[string]time.Time{},
 	}
 	if l.Clock == nil {
 		l.Clock = systemClock{}
@@ -253,6 +254,12 @@ func Run(ctx context.Context, cfg Config) error {
 	return err
 }
 
+// endFailure is one machine-end state that keeps failing, and when it first failed.
+type endFailure struct {
+	state string
+	at    time.Time
+}
+
 // loop is one run of the loop.
 type loop struct {
 	Config
@@ -267,6 +274,12 @@ type loop struct {
 	// out once per change, or [machineEndStopped]. A restart starts with no record and
 	// sends the state once more.
 	sentEnd map[string]string
+	// failedEnd is the deleting or delete_failed that each entry has not got done, with
+	// the time of its first failure.
+	failedEnd map[string]endFailure
+	// endsPaused is true after a failed machine-end, until the next watch starts. The
+	// claim path reads and sets it too.
+	endsPaused bool
 	// freed receives a value when an entry leaves the journal or moves to the phase
 	// ended.
 	freed chan struct{}
@@ -287,7 +300,7 @@ func (l *loop) madeAt(id string) time.Time { return l.timeOf(l.made, id) }
 // entry that the journal had at the start.
 func (l *loop) claimedAt(id string) time.Time { return l.timeOf(l.claimed, id) }
 
-// goneAt is the time from which the [GoneLimit] of the dispatch id counts.
+// goneAt is the time from which the [MachineEndLimit] of an ended entry counts.
 func (l *loop) goneAt(id string) time.Time { return l.timeOf(l.gone, id) }
 
 // timeOf is the time of the dispatch id in times, or the start.
@@ -353,6 +366,7 @@ func (l *loop) remove(id string) bool {
 	delete(l.claimed, id)
 	delete(l.gone, id)
 	delete(l.sentEnd, id)
+	delete(l.failedEnd, id)
 	l.mu.Unlock()
 	l.free()
 	return true

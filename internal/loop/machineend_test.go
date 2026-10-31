@@ -3,6 +3,7 @@ package loop_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -488,9 +489,8 @@ func TestAFailedGoneFreesTheSlot(t *testing.T) {
 	}
 }
 
-// TestAnEndedEntryGetsOneTryAndNoDelete sends gone with the client's tries right after
-// the delete, then with one try at each watch, with no delete, until the post is
-// accepted.
+// TestAnEndedEntryGetsOneTryAndNoDelete sends gone right after the delete, then once at
+// each watch, with no delete, until the post is accepted.
 func TestAnEndedEntryGetsOneTryAndNoDelete(t *testing.T) {
 	h := newHarness(t)
 	h.apiary.setEnd("gone", endFailed)
@@ -499,12 +499,12 @@ func TestAnEndedEntryGetsOneTryAndNoDelete(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "machine-end " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-a", "delete i-a"})
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	h.apiary.setEnd("gone", nil)
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
@@ -519,7 +519,7 @@ func TestAnEndedEntryLeavesOnASigned403(t *testing.T) {
 	h.apiary.setEnd("gone", endStopped)
 	h.start()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -541,7 +541,7 @@ func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
@@ -598,6 +598,221 @@ func TestAFailedWriteOfEndedKeepsTheEntry(t *testing.T) {
 	}
 }
 
+// deletingMachines adds a listed machine for each deleting entry of dispatchA to
+// dispatchC, with a live machine for dispatchD, starts h, and takes the calls.
+func deletingMachines(h *harness) {
+	h.t.Helper()
+	h.machines.lingering = true
+	h.setEntries(deleting(dispatchA, "i-a"), deleting(dispatchB, "i-b"), deleting(dispatchC, "i-c"), dispatched(dispatchD, "i-d"))
+	h.machines.add("i-a", dispatchA, contracts.MachineDeleting, epoch)
+	h.machines.add("i-b", dispatchB, contracts.MachineDeleting, epoch)
+	h.machines.add("i-c", dispatchC, contracts.MachineDeleting, epoch)
+	h.machines.add("i-d", dispatchD, contracts.MachineRunning, epoch)
+	h.start()
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+}
+
+// withoutLogs is calls with no machine-log.
+func withoutLogs(calls []string) []string {
+	return slices.DeleteFunc(calls, func(c string) bool { return strings.HasPrefix(c, "machine-log ") })
+}
+
+// TestOneFailedPostPerWatch fails the post of deleting. Each watch tries one post, sends
+// each delete, and sends dispatched for the live machine. The pause ends with the watch.
+func TestOneFailedPostPerWatch(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("deleting", endFailed)
+	deletingMachines(h)
+	for range 2 {
+		h.tick()
+		equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{
+			"machine-end " + dispatchA + " deleting",
+			"dispatched " + dispatchD + " i-d",
+		})
+		if n := h.apiary.takeEndTries(); n != 1 {
+			t.Errorf("%d tries in one watch", n)
+		}
+		calls := h.machines.takeCalls()
+		for _, want := range []string{"delete i-a", "delete i-b", "delete i-c"} {
+			if !slices.Contains(calls, want) {
+				t.Errorf("the adapter's calls are %q, with no %q", calls, want)
+			}
+		}
+	}
+	h.apiary.setEnd("deleting", nil)
+	h.tick()
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{
+		"machine-end " + dispatchA + " deleting",
+		"machine-end " + dispatchB + " deleting",
+		"machine-end " + dispatchC + " deleting",
+		"dispatched " + dispatchD + " i-d",
+	})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestGoneWhilePausedEntersEnded sends no post for gone after a failed post in the same
+// watch, and the entry moves to the phase ended, which frees its slot.
+func TestGoneWhilePausedEntersEnded(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("deleting", endFailed)
+	h.setEntries(deleting(dispatchA, "i-a"), deleting(dispatchB, "i-b"))
+	h.machines.add("i-a", dispatchA, contracts.MachineDeleting, epoch)
+	h.machines.lingering = true
+	h.start()
+	h.apiary.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchA + " deleting"})
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a"), ended(dispatchB, "i-b")})
+	h.apiary.setEnd("deleting", nil)
+	h.tick()
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchA + " deleting", "machine-end " + dispatchB + " gone"})
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a")})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestThePauseCoversTheClaimPath cleans up a machine in the claim path while posts are
+// paused: no post, and the entry enters the phase ended for the next watch.
+func TestThePauseCoversTheClaimPath(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("deleting", endFailed)
+	h.setEntries(deleting(dispatchA, "i-a"))
+	h.machines.add("i-a", dispatchA, contracts.MachineDeleting, epoch)
+	h.machines.lingering = true
+	h.start()
+	h.tick()
+	h.apiary.takeCalls()
+	h.machines.setLingering(false)
+	h.apiary.setDispatched(dispatchB, loop.ErrGone)
+	h.claim(newClaim(dispatchB))
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a"), ended(dispatchB, machineID(1))})
+	if calls := h.apiary.takeCalls(); slices.Contains(calls, "machine-end "+dispatchB+" gone") {
+		t.Errorf("Qory Apiary's calls are %q", calls)
+	}
+	h.apiary.setEnd("deleting", nil)
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestADroppedStateIsFollowedByTheNextOnes keeps a failing delete_failed for 24 hours
+// from its first failure, logs one error, and sends it no more. The later deleting and
+// gone go out as usual.
+func TestADroppedStateIsFollowedByTheNextOnes(t *testing.T) {
+	const msg = "stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it"
+	h := newHarness(t)
+	h.machines.lingering = true
+	h.machines.deleteErr = []error{deleteFailure, deleteFailure, deleteFailure, deleteFailure}
+	h.apiary.setEnd("delete_failed", endFailed)
+	stoppedMachine(h)
+	h.tick()
+	h.clock.Advance(loop.MachineEndLimit - loop.WatchInterval)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchA + " delete_failed", "machine-end " + dispatchA + " delete_failed"})
+	if len(h.find(msg)) != 0 {
+		t.Error("the state was dropped before the limit")
+	}
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " delete_failed"})
+	lines := h.find(msg)
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["state"] != "delete_failed" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	if len(h.find(msg)) != 1 {
+		t.Error("the error is logged twice")
+	}
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " deleting"})
+	h.machines.drop("i-a")
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestASkippedStateIsDroppedAtTheLimit drops the state of each entry at the limit, also
+// of the entries that the pause skipped, so that no post repeats after it.
+func TestASkippedStateIsDroppedAtTheLimit(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("deleting", endFailed)
+	deletingMachines(h)
+	h.tick()
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	if n := len(h.find("stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it")); n != 3 {
+		t.Errorf("the log has %d lines for 3 dropped states", n)
+	}
+	h.apiary.takeCalls()
+	h.tick()
+	// The live machine ran past its lifetime in those 24 hours, so only its state is new.
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchD + " deleting"})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAFailedSyncStillEndsTheEntry fails the sync of the folder after the write of the
+// phase ended. The claim path wakes, and the limit counts from the first gone, not from
+// the start.
+func TestAFailedSyncStillEndsTheEntry(t *testing.T) {
+	h := newHarness(t)
+	h.config.MaxMachines = 1
+	h.apiary.setEnd("gone", endFailed)
+	failing := &setFailure{}
+	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
+	stoppedMachine(h)
+	failing.setFailSync(true)
+	h.tick()
+	failing.setFailSync(false)
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	h.idle()
+	h.clock.Advance(loop.MachineEndLimit - loop.WatchInterval)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAFailedRemovalPastTheLimitLogsNoFalseLine accepts gone past the limit while the
+// removal fails. The log has the failed removal and no line that Qory Apiary shows no
+// removal, and the next watch removes the entry.
+func TestAFailedRemovalPastTheLimitLogsNoFalseLine(t *testing.T) {
+	h := newHarness(t)
+	failing := &setFailure{}
+	failing.setFailRemove(true)
+	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
+	h.setEntries(ended(dispatchA, "i-a"))
+	h.start()
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	if len(h.find("removing a dispatch from the journal failed")) != 1 {
+		t.Error("the log has no line for the failed removal")
+	}
+	if n := len(h.find("stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine")); n != 0 {
+		t.Errorf("the log has %d false lines", n)
+	}
+	failing.setFailRemove(false)
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestAWatchStopsPostingAtTheFirstFailure sends gone for the first of two ended entries
 // only, and live machines get dispatched in that watch. Once posts work, both leave.
 func TestAWatchStopsPostingAtTheFirstFailure(t *testing.T) {
@@ -608,15 +823,15 @@ func TestAWatchStopsPostingAtTheFirstFailure(t *testing.T) {
 	h.start()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-		"machine-end-once " + dispatchA + " gone",
+		"machine-end " + dispatchA + " gone",
 		"dispatched " + dispatchC + " i-c",
 	})
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a"), ended(dispatchB, "i-b"), dispatched(dispatchC, "i-c")})
 	h.apiary.setEnd("gone", nil)
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-		"machine-end-once " + dispatchA + " gone",
-		"machine-end-once " + dispatchB + " gone",
+		"machine-end " + dispatchA + " gone",
+		"machine-end " + dispatchB + " gone",
 		"dispatched " + dispatchC + " i-c",
 	})
 	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchC, "i-c")})
@@ -633,7 +848,7 @@ func TestAnEndedEntryLeavesAtTheLimit(t *testing.T) {
 	stoppedMachine(h)
 	h.tick()
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
-	h.clock.Advance(loop.GoneLimit - loop.WatchInterval)
+	h.clock.Advance(loop.MachineEndLimit - loop.WatchInterval)
 	h.clock.waitPending(t, loop.WatchInterval)
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	h.tick()
@@ -654,9 +869,9 @@ func TestASkippedEndedEntryLeavesAtTheLimit(t *testing.T) {
 	h.setEntries(ended(dispatchA, "i-a"), ended(dispatchB, "i-b"))
 	h.apiary.setEnd("gone", endFailed)
 	h.start()
-	h.clock.Advance(loop.GoneLimit)
+	h.clock.Advance(loop.MachineEndLimit)
 	h.clock.waitPending(t, loop.WatchInterval)
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -670,7 +885,7 @@ func TestRestartKeepsAnEndedEntry(t *testing.T) {
 	h.apiary.setEnd("gone", endFailed)
 	stoppedMachine(h)
 	h.tick()
-	h.clock.Advance(loop.GoneLimit - 2*loop.WatchInterval)
+	h.clock.Advance(loop.MachineEndLimit - 2*loop.WatchInterval)
 	h.clock.waitPending(t, loop.WatchInterval)
 	if err := h.stop(); err != nil {
 		t.Fatal(err)
@@ -686,14 +901,14 @@ func TestRestartKeepsAnEndedEntry(t *testing.T) {
 	if n := len(h.find("resumed a dispatch")); n != 2 {
 		t.Errorf("the log has %d lines for the resumed entries", n)
 	}
-	h.clock.Advance(loop.GoneLimit - loop.WatchInterval)
+	h.clock.Advance(loop.MachineEndLimit - loop.WatchInterval)
 	h.clock.waitPending(t, loop.WatchInterval)
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	h.tick()
 	equal(t, "the journal", h.entries(), nil)
 	calls := h.apiary.takeCalls()
 	for _, c := range calls {
-		if c != "machine-end-once "+dispatchA+" gone" {
+		if c != "machine-end "+dispatchA+" gone" {
 			t.Errorf("Qory Apiary's calls are %q", strings.Join(calls, ", "))
 		}
 	}

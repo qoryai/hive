@@ -30,10 +30,8 @@ func (l *loop) watch(ctx context.Context) {
 // journal before the list, except the dispatches of the claim path:
 //   - A deleting entry is cleaned up again, until the adapter's delete returns gone.
 //     It gets no dispatched, and its lifetime does not count.
-//   - An ended entry gets gone again with one try, until the post is done or
-//     [GoneLimit] has passed. After the first failure, the watch sends gone for no
-//     other ended entry, so a Qory Apiary with no machine-end route costs one post per
-//     watch and delays no dispatched. An ended entry gets no delete and no dispatched.
+//   - An ended entry gets gone again, until the post is done or [MachineEndLimit] has
+//     passed. It gets no delete and no dispatched.
 //   - A claimed entry stays after a release that returned 409 machine_exists, or
 //     after a release when Journal.Remove failed before the entry left the journal.
 //     When the list has a machine with its key, the entry adopts the machine: it
@@ -48,7 +46,12 @@ func (l *loop) watch(ctx context.Context) {
 // Then the watch cleans up each listed machine whose key had no journal entry, neither
 // before the list nor after it: a make that starts during the list has a claimed
 // entry after it.
+//
+// Each machine-end is one try. After the first failure, the watch sends no more
+// machine-end, and its deletes and dispatched go on. So a Qory Apiary with no
+// machine-end route costs one failed post per watch.
 func (l *loop) watchOnce(ctx context.Context) {
+	l.setEndsPaused(false)
 	before := l.Journal.List()
 	list, err := l.Machines.List(ctx, l.PoolID)
 	if err != nil {
@@ -56,7 +59,6 @@ func (l *loop) watchOnce(ctx context.Context) {
 		return
 	}
 	byKey := machinesByKey(list.Machines)
-	sendGone := true
 	for _, e := range before {
 		if ctx.Err() != nil {
 			return
@@ -69,7 +71,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 			l.cleanUp(ctx, e)
 			continue
 		case journal.PhaseEnded:
-			sendGone = l.watchEnded(ctx, e, sendGone)
+			l.watchEnded(ctx, e)
 			continue
 		}
 		m, found := byKey[e.DispatchID]
@@ -185,8 +187,8 @@ func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
 
 // cleanUp reads the log of the entry's machine, uploads it, deletes the machine and
 // sends machine-end. Each step runs after a failure of the step before it. When the
-// delete returns gone, cleanUp sends gone and removes the entry. When that post must be
-// retried, the entry moves to the phase ended. When the delete returns deleting or
+// delete returns gone, cleanUp sends gone and removes the entry. When that post fails
+// or is paused, the entry moves to the phase ended. When the delete returns deleting or
 // fails, the entry moves to the phase deleting, cleanUp sends that state, and the next
 // watch calls cleanUp again. After a failed write of the journal, the entry stays as it
 // is and the next watch acts on it again.
@@ -198,33 +200,29 @@ func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 	case err != nil:
 		end = contracts.MachineEndDeleteFailed
 	case state == contracts.MachineGone:
-		if !l.sendMachineEnd(ctx, l.Apiary.MachineEnd, e.DispatchID, contracts.MachineEndGone, attrs) || !l.removeEnded(e) {
+		if !l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs) || !l.removeEnded(e) {
 			l.setEnded(e, attrs)
 		}
 		return
 	}
 	if l.setDeleting(e, attrs) {
-		l.sendMachineEnd(ctx, l.Apiary.MachineEnd, e.DispatchID, end, attrs)
+		l.sendMachineEnd(ctx, e.DispatchID, end, attrs)
 	}
 }
 
-// watchEnded acts on the ended entry e. When send is true, it sends gone with one try
-// and removes the entry once the post is done. An entry that stays and has reached
-// [GoneLimit] is removed with no gone done. It returns false after a failed post, and
-// send otherwise.
-func (l *loop) watchEnded(ctx context.Context, e journal.Entry, send bool) bool {
+// watchEnded acts on the ended entry e. It sends gone and removes the entry once the
+// post is done. After a failed removal, the entry stays, and the next watch acts on it
+// again. An entry whose post is not done and that has reached [MachineEndLimit] is
+// removed.
+func (l *loop) watchEnded(ctx context.Context, e journal.Entry) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
-	if send {
-		send = l.sendMachineEnd(ctx, l.Apiary.MachineEndOnce, e.DispatchID, contracts.MachineEndGone, attrs)
-		if send && l.removeEnded(e) {
-			return true
-		}
-	}
-	if l.Clock.Now().Sub(l.goneAt(e.DispatchID)) >= GoneLimit {
+	switch {
+	case l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs):
+		l.removeEnded(e)
+	case l.Clock.Now().Sub(l.goneAt(e.DispatchID)) >= MachineEndLimit:
 		l.Log.Error("stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine", attrs...)
 		l.removeEnded(e)
 	}
-	return send
 }
 
 // removeEnded removes the entry e, whose cleanup is over, and returns whether it left
@@ -298,30 +296,38 @@ func (l *loop) setDeleting(e journal.Entry, attrs []any) bool {
 }
 
 // setEnded writes the entry e in the phase ended, which frees its place in
-// MaxMachines, and starts its [GoneLimit]. A failed write is logged, and the entry stays
-// as it is.
+// MaxMachines, and starts its [MachineEndLimit]. A failed write is logged. When the entry
+// is still as it was, it stays so. A write can fail after the journal changed, as when
+// syncing the folder fails, and then the entry counts as ended.
 func (l *loop) setEnded(e journal.Entry, attrs []any) {
 	e.Phase = journal.PhaseEnded
 	if err := l.Journal.Set(e); err != nil {
 		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
-		return
+		if !l.inJournal(e) {
+			return
+		}
 	}
 	l.setTime(l.gone, e.DispatchID)
 	l.free()
 }
 
-// sendMachineEnd posts state for the dispatch with post and returns whether the post is
-// done. It sends gone every time, and any other state only when it differs from the
-// last one done for the dispatch. A dispatch whose posts stopped gets none. A post is
-// done on 204, [ErrMachineEndDone] and [ErrMachineEndStopped]. After any other failure,
-// the next watch sends the state again.
-func (l *loop) sendMachineEnd(ctx context.Context, post func(context.Context, string, string) error, dispatchID, state string, attrs []any) bool {
+// sendMachineEnd sends state for the dispatch, with one try, and returns whether the
+// post is done. It sends gone every time, and any other state only when it differs from
+// the last one done for the dispatch. A dispatch whose posts stopped gets none. A post
+// is done on 204, [ErrMachineEndDone] and [ErrMachineEndStopped]. Any other failure
+// pauses machine-end until the next watch starts. While they are paused, a post is not
+// sent and counts as failed. The next watch sends the state again.
+func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, attrs []any) bool {
 	last := l.lastMachineEnd(dispatchID)
 	if last == machineEndStopped || (state != contracts.MachineEndGone && last == state) {
 		return true
 	}
 	attrs = append(attrs, slog.String("state", state))
-	err := post(ctx, dispatchID, state)
+	if l.endsArePaused() {
+		l.machineEndFailed(dispatchID, state, attrs)
+		return false
+	}
+	err := l.Apiary.MachineEnd(ctx, dispatchID, state)
 	record := state
 	switch {
 	case err == nil:
@@ -333,12 +339,55 @@ func (l *loop) sendMachineEnd(ctx context.Context, post func(context.Context, st
 		l.Log.Warn("sending machine-end failed, and a later try cannot change the answer", append(attrs, errorAttr(err, nil))...)
 	default:
 		l.Log.Warn("sending machine-end failed", append(attrs, errorAttr(err, nil))...)
+		l.setEndsPaused(true)
+		l.machineEndFailed(dispatchID, state, attrs)
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sentEnd[dispatchID] = record
+	delete(l.failedEnd, dispatchID)
 	return true
+}
+
+// machineEndFailed counts a post of state that failed or was not sent. A deleting or
+// delete_failed that has failed for [MachineEndLimit] since its first failure is logged
+// once and counts as done, so it is dropped and a later state goes out as usual. The
+// limit of gone is in [loop.watchEnded].
+func (l *loop) machineEndFailed(dispatchID, state string, attrs []any) {
+	if state == contracts.MachineEndGone {
+		return
+	}
+	now := l.Clock.Now()
+	l.mu.Lock()
+	f, ok := l.failedEnd[dispatchID]
+	if !ok || f.state != state {
+		l.failedEnd[dispatchID] = endFailure{state, now}
+		l.mu.Unlock()
+		return
+	}
+	if now.Sub(f.at) < MachineEndLimit {
+		l.mu.Unlock()
+		return
+	}
+	delete(l.failedEnd, dispatchID)
+	l.sentEnd[dispatchID] = state
+	l.mu.Unlock()
+	l.Log.Error("stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it", attrs...)
+}
+
+// setEndsPaused sets whether machine-end is paused until the next watch starts.
+func (l *loop) setEndsPaused(paused bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.endsPaused = paused
+}
+
+// endsArePaused is whether machine-end is paused.
+func (l *loop) endsArePaused() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.endsPaused
 }
 
 // lastMachineEnd is the record of the dispatch in sentEnd, or "".

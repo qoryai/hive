@@ -596,14 +596,13 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 			srv, c, _, _ := setup(t)
 			cl := claimed(t, srv, c, provisionertest.Work{})
 			cl.RunCode.Clear()
-			// A try with a signed server error is sent again.
-			srv.Script(route, slices.Repeat([]provisionertest.Reply{{Status: code.status, Code: code.code}}, triesOf(code.status))...)
+			srv.Script(route, slices.Repeat([]provisionertest.Reply{{Status: code.status, Code: code.code}}, triesOf(route, code.status))...)
 			err := send(c, route, cl)
 			if want := slices.Contains(code.on, route); errors.Is(err, code.err) != want {
 				t.Errorf("%s to %s: %v, matches %v, want %v", code.code, route, err, !want, want)
 			}
 			unsigned := provisionertest.Reply{Status: code.status, Code: code.code, Unsigned: true}
-			srv.Script(route, unsigned, unsigned, unsigned, unsigned, unsigned)
+			srv.Script(route, slices.Repeat([]provisionertest.Reply{unsigned}, triesOf(route, 500))...)
 			if err := send(c, route, cl); errors.Is(err, code.err) || !errors.Is(err, provisioner.ErrUnsigned) {
 				t.Errorf("an unsigned %s to %s: %v", code.code, route, err)
 			}
@@ -611,12 +610,14 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 	}
 }
 
-// triesOf is the tries of a request whose answer is a signed status.
-func triesOf(status int) int {
-	if status >= 500 {
-		return 5
+// triesOf is the tries of route's request whose every answer is status. A machine end
+// has one try. Any other request sends a try with a server error or with no valid
+// signature again; pass 500 for the latter.
+func triesOf(route provisionertest.Route, status int) int {
+	if route == "machine-end" || status < 500 {
+		return 1
 	}
-	return 1
+	return 5
 }
 
 // send sends route's request for the claimed dispatch.
@@ -687,7 +688,7 @@ func TestASignedRefusalStopsTheMachineEnds(t *testing.T) {
 		got := claimed(t, srv, cl, provisionertest.Work{})
 		got.RunCode.Clear()
 		srv.Script("machine-end", c.reply)
-		err := cl.MachineEndOnce(context.Background(), got.DispatchID, contracts.MachineEndGone)
+		err := cl.MachineEnd(context.Background(), got.DispatchID, contracts.MachineEndGone)
 		if err == nil || errors.Is(err, provisioner.ErrMachineEndStopped) != c.want {
 			t.Errorf("%d %s, unsigned %t: %v, want a match %t", c.reply.Status, c.reply.Code, c.reply.Unsigned, err, c.want)
 		}
@@ -698,9 +699,9 @@ func TestASignedRefusalStopsTheMachineEnds(t *testing.T) {
 	}
 }
 
-// TestAMachineEndOnceHasOneTry sends one request for each failure that MachineEnd sends
-// again, and MachineEnd sends five.
-func TestAMachineEndOnceHasOneTry(t *testing.T) {
+// TestAMachineEndHasOneTry sends one request for each failure that another request
+// sends again.
+func TestAMachineEndHasOneTry(t *testing.T) {
 	for _, rep := range []provisionertest.Reply{
 		{Status: 404, Code: "not_found", Unsigned: true},
 		{Status: 401, Unsigned: true},
@@ -710,28 +711,18 @@ func TestAMachineEndOnceHasOneTry(t *testing.T) {
 		srv, c, _, _ := setup(t)
 		cl := claimed(t, srv, c, provisionertest.Work{})
 		cl.RunCode.Clear()
-		count := func() int {
-			n := 0
-			for _, call := range srv.Calls() {
-				if call.Route == "machine-end" {
-					n++
-				}
-			}
-			return n
-		}
 		srv.Script("machine-end", rep)
-		if err := c.MachineEndOnce(context.Background(), cl.DispatchID, contracts.MachineEndGone); err == nil {
-			t.Errorf("%+v: no error", rep)
-		}
-		if n := count(); n != 1 {
-			t.Errorf("%+v: %d tries with MachineEndOnce", rep, n)
-		}
-		srv.Script("machine-end", slices.Repeat([]provisionertest.Reply{rep}, 5)...)
 		if err := c.MachineEnd(context.Background(), cl.DispatchID, contracts.MachineEndGone); err == nil {
 			t.Errorf("%+v: no error", rep)
 		}
-		if n := count(); n != 6 {
-			t.Errorf("%+v: %d tries in all", rep, n)
+		n := 0
+		for _, call := range srv.Calls() {
+			if call.Route == "machine-end" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%+v: %d tries", rep, n)
 		}
 	}
 }

@@ -39,10 +39,15 @@ The changes to Hive that no release contains yet, in the shape of
   adapter returns gone. Before, the entry left when the adapter accepted the delete. So
   with `max_machines` of 1, the next run waits at least one more watch of 60 seconds,
   and a delete that keeps failing holds its place while the provisioner retries it.
-- When the post of `gone` fails, the machine's entry stays in the phase `ended`, which
-  does not count toward `max_machines`. Each watch sends `gone` again with one try, and
-  stops at the first failure of that watch. After 24 hours the provisioner logs an error
-  and removes the entry, and Qory Apiary then shows no removal of that machine.
+- Each `machine-end` post has one try. After the first failed post in a watch, that
+  watch sends no more `machine-end`, and its deletes and `dispatched` go on. So a Qory
+  Apiary with no `machine-end` route costs one failed post per watch.
+- When the post of `gone` fails or waits for the next watch, the machine's entry stays
+  in the phase `ended`, which does not count toward `max_machines`. Each watch sends
+  `gone` again. After 24 hours the provisioner logs an error and removes the entry, and
+  Qory Apiary then shows no removal of that machine.
+- A post of `deleting` or `delete_failed` that keeps failing stops 24 hours after its
+  first failure. The provisioner logs an error, and a later state goes out as usual.
 - A machine that is deleting, or that is still not listed 5 minutes after its make, gets
   a delete, and `gone` is posted for it. Before, the provisioner removed its entry with
   no delete.
