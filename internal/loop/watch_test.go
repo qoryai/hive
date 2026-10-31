@@ -20,6 +20,11 @@ func dispatched(id, machine string) journal.Entry {
 	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: lifetime}
 }
 
+// deleting is the entry of the dispatch id in the phase deleting, with the machine id.
+func deleting(id, machine string) journal.Entry {
+	return journal.Entry{DispatchID: id, Phase: journal.PhaseDeleting, MachineID: machine, MaxLifetimeMinutes: lifetime}
+}
+
 // TestTheWatchSendsDispatchedAgain sends dispatched for each dispatched machine at
 // each watch, and changes nothing else.
 func TestTheWatchSendsDispatchedAgain(t *testing.T) {

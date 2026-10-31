@@ -12,7 +12,7 @@ import (
 // the machine by its key, the dispatch id.
 func TestRecover(t *testing.T) {
 	release := journal.Action{Kind: journal.Release, Reason: journal.ReasonRestarted}
-	drop := journal.Action{Kind: journal.Drop}
+	deleting := journal.Action{Kind: journal.Deleting, MachineID: oddID}
 	resume := journal.Action{Kind: journal.Resume, MachineID: oddID}
 	// keep resumes with the entry's machine id, when the list has no machine.
 	keep := journal.Action{Kind: journal.Resume, MachineID: machine}
@@ -31,9 +31,10 @@ func TestRecover(t *testing.T) {
 		phase, machine string
 		want           []journal.Action
 	}{
-		{journal.PhaseClaimed, "", []journal.Action{release, resume, resume, resume, drop}},
-		{journal.PhaseMade, machine, []journal.Action{keep, resume, resume, resume, drop}},
-		{journal.PhaseDispatched, machine, []journal.Action{keep, resume, resume, resume, drop}},
+		{journal.PhaseClaimed, "", []journal.Action{release, resume, resume, resume, deleting}},
+		{journal.PhaseMade, machine, []journal.Action{keep, resume, resume, resume, deleting}},
+		{journal.PhaseDispatched, machine, []journal.Action{keep, resume, resume, resume, deleting}},
+		{journal.PhaseDeleting, machine, []journal.Action{keep, keep, keep, keep, keep}},
 	} {
 		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: lifetime}
 		for i, l := range lookups {

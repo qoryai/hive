@@ -173,9 +173,7 @@ func (l *loop) cleanUp(ctx context.Context, dispatchID, machineID string, entry 
 		return
 	}
 	l.Log.Info("deleted a machine", append(attrs, slog.String("state", string(deleted.State)))...)
-	l.mu.Lock()
-	delete(l.logged, machineID)
-	l.mu.Unlock()
+	l.setLogged(machineID, false)
 	if entry {
 		l.remove(dispatchID)
 	}
@@ -190,15 +188,24 @@ func (l *loop) uploadLog(ctx context.Context, dispatchID, machineID string, attr
 		l.Log.Warn("reading a machine's log failed", append(attrs, errorAttr(err, nil))...)
 		return
 	}
-	l.mu.Lock()
-	l.logged[machineID] = true
-	l.mu.Unlock()
+	l.setLogged(machineID, true)
 	err = l.Apiary.MachineLog(ctx, dispatchID, got.Log, len(got.Log) >= adapterio.MaxLog)
 	if err != nil {
 		l.Log.Warn("uploading a machine's log failed", append(attrs, errorAttr(err, nil))...)
 		return
 	}
 	l.Log.Info("uploaded a machine's log", attrs...)
+}
+
+// setLogged marks the machine id as logged, or no longer.
+func (l *loop) setLogged(machineID string, logged bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if logged {
+		l.logged[machineID] = true
+	} else {
+		delete(l.logged, machineID)
+	}
 }
 
 // wasLogged is whether the log of the machine id is uploaded in a cleanup whose delete
