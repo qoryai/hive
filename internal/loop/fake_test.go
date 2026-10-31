@@ -392,6 +392,13 @@ func (m *fakeMachines) takeCalls() []string {
 	return out
 }
 
+// setDeleteErr sets the errors of the next deletes.
+func (m *fakeMachines) setDeleteErr(errs ...error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteErr = errs
+}
+
 // setLingering sets whether delete leaves the machine in the list.
 func (m *fakeMachines) setLingering(lingering bool) {
 	m.mu.Lock()

@@ -312,14 +312,18 @@ func (l *loop) setEnded(e journal.Entry, attrs []any) {
 }
 
 // sendMachineEnd sends state for the dispatch, with one try, and returns whether the
-// post is done. It sends gone every time, and any other state only when it differs from
-// the last one done for the dispatch. A dispatch whose posts stopped gets none. A post
-// is done on 204, [ErrMachineEndDone] and [ErrMachineEndStopped]. Any other failure
-// pauses machine-end until the next watch starts. While they are paused, a post is not
-// sent and counts as failed. The next watch sends the state again.
+// post is done. It sends a state only when it differs from the last one done for the
+// dispatch. A dispatch whose posts stopped gets none. A post that is not sent for those
+// reasons ends the count of any failing state. A post is done on 204,
+// [ErrMachineEndDone] and [ErrMachineEndStopped]. Any other failure pauses machine-end
+// until the next watch starts. While they are paused, a post is not sent and counts as
+// failed. The next watch sends the state again.
 func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, attrs []any) bool {
 	last := l.lastMachineEnd(dispatchID)
-	if last == machineEndStopped || (state != contracts.MachineEndGone && last == state) {
+	if last == machineEndStopped || last == state {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		delete(l.failedEnd, dispatchID)
 		return true
 	}
 	attrs = append(attrs, slog.String("state", state))

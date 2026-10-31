@@ -22,6 +22,12 @@ var (
 	endStopped = fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrMachineEndStopped)
 )
 
+// The log lines at [loop.MachineEndLimit].
+const (
+	goneLimitLine  = "stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine"
+	stateLimitLine = "stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it"
+)
+
 // deleteFailure is a delete that the vendor throttled.
 var deleteFailure = &adapter.Error{Command: "delete", Kind: contracts.FailureRetry, Message: "Try again later: the vendor throttled the call"}
 
@@ -526,9 +532,10 @@ func TestAnEndedEntryLeavesOnASigned403(t *testing.T) {
 	}
 }
 
-// TestAFailedRemovalAfterGoneMovesTheEntryToEnded keeps no entry able to reach a
-// delete or a dispatched when the journal cannot drop it, and the next watch posts
-// gone and removes it.
+// TestAFailedRemovalAfterGoneMovesTheEntryToEnded keeps an accepted gone as done when
+// the journal cannot drop the entry. The entry gets no delete, no dispatched and no
+// second post, so no later failure of a post can log that Qory Apiary shows no removal.
+// Each watch tries the removal again, also past the limit.
 func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	h := newHarness(t)
 	failing := &setFailure{}
@@ -537,12 +544,21 @@ func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	stoppedMachine(h)
 	h.tick()
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
-	failing.setFailRemove(false)
-	h.apiary.takeCalls()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "machine-end " + dispatchA + " gone"})
 	h.machines.takeCalls()
+	h.apiary.setEnd("gone", endFailed)
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	if n := len(h.find(goneLimitLine)); n != 0 {
+		t.Errorf("the log has %d false lines", n)
+	}
+	failing.setFailRemove(false)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -701,11 +717,121 @@ func TestThePauseCoversTheClaimPath(t *testing.T) {
 	}
 }
 
+// expectFailingDeleteFailed runs two watches with failing deletes and a failing post of
+// delete_failed, and checks that no limit applies to it: each watch tries the post.
+func expectFailingDeleteFailed(h *harness) {
+	h.t.Helper()
+	h.machines.setDeleteErr(deleteFailure, deleteFailure)
+	h.apiary.setEnd("delete_failed", endFailed)
+	h.apiary.takeCalls()
+	for range 2 {
+		h.tick()
+		equal(h.t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchA + " delete_failed"})
+	}
+	if n := len(h.find(stateLimitLine)); n != 0 {
+		h.t.Errorf("the log has %d lines for a state that failed just now", n)
+	}
+}
+
+// TestAStateThatAgainMatchesTheLastEndsItsCount fails delete_failed once after an
+// accepted deleting. The next accepted delete leaves deleting as the last state, so no
+// post goes out, and the failure's count ends. A failure 24 hours later counts anew.
+func TestAStateThatAgainMatchesTheLastEndsItsCount(t *testing.T) {
+	h := newHarness(t)
+	h.machines.lingering = true
+	h.machines.deleteErr = []error{nil, deleteFailure}
+	h.apiary.setEnd("delete_failed", endFailed)
+	stoppedMachine(h)
+	h.tick()
+	h.tick()
+	h.tick()
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{
+		"machine-end " + dispatchA + " deleting",
+		"machine-end " + dispatchA + " delete_failed",
+	})
+	expectFailingDeleteFailed(h)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAnAcceptedPostEndsTheCount fails delete_failed once and then gets it accepted. A
+// failure of the same state 24 hours later counts anew.
+func TestAnAcceptedPostEndsTheCount(t *testing.T) {
+	h := newHarness(t)
+	h.machines.lingering = true
+	h.machines.deleteErr = []error{deleteFailure, deleteFailure}
+	h.apiary.setEnd("delete_failed", endFailed)
+	stoppedMachine(h)
+	h.tick()
+	h.apiary.setEnd("delete_failed", nil)
+	h.tick()
+	h.tick()
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{
+		"machine-end " + dispatchA + " delete_failed",
+		"machine-end " + dispatchA + " delete_failed",
+		"machine-end " + dispatchA + " deleting",
+	})
+	expectFailingDeleteFailed(h)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestARemovalEndsTheCount fails delete_failed once, and the entry leaves at gone. A
+// machine with the same key 24 hours later gets a new entry, whose failure counts anew.
+func TestARemovalEndsTheCount(t *testing.T) {
+	h := newHarness(t)
+	h.machines.deleteErr = []error{deleteFailure}
+	h.apiary.setEnd("delete_failed", endFailed)
+	stoppedMachine(h)
+	h.tick()
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
+	h.clock.Advance(loop.MachineEndLimit)
+	h.clock.waitPending(t, loop.WatchInterval)
+	h.machines.add("i-again", dispatchA, contracts.MachineRunning, epoch)
+	expectFailingDeleteFailed(h)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAChangeOfStateStartsTheCount fails delete_failed for 24 hours less one watch, then
+// deleting. The count of deleting starts at its first failure, so the state is not
+// dropped, and each watch keeps trying it.
+func TestAChangeOfStateStartsTheCount(t *testing.T) {
+	h := newHarness(t)
+	h.machines.lingering = true
+	h.machines.deleteErr = []error{deleteFailure, deleteFailure}
+	h.apiary.setEnd("delete_failed", endFailed)
+	h.apiary.setEnd("deleting", endFailed)
+	stoppedMachine(h)
+	h.tick()
+	h.clock.Advance(loop.MachineEndLimit - loop.WatchInterval)
+	h.clock.waitPending(t, loop.WatchInterval)
+	h.apiary.takeCalls()
+	for range 2 {
+		h.tick()
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " deleting"})
+	}
+	if n := len(h.find(stateLimitLine)); n != 0 {
+		t.Errorf("the log has %d lines for a state that failed just now", n)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestADroppedStateIsFollowedByTheNextOnes keeps a failing delete_failed for 24 hours
 // from its first failure, logs one error, and sends it no more. The later deleting and
 // gone go out as usual.
 func TestADroppedStateIsFollowedByTheNextOnes(t *testing.T) {
-	const msg = "stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it"
+	const msg = stateLimitLine
 	h := newHarness(t)
 	h.machines.lingering = true
 	h.machines.deleteErr = []error{deleteFailure, deleteFailure, deleteFailure, deleteFailure}
@@ -749,7 +875,7 @@ func TestASkippedStateIsDroppedAtTheLimit(t *testing.T) {
 	h.tick()
 	h.clock.Advance(loop.MachineEndLimit)
 	h.clock.waitPending(t, loop.WatchInterval)
-	if n := len(h.find("stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it")); n != 3 {
+	if n := len(h.find(stateLimitLine)); n != 3 {
 		t.Errorf("the log has %d lines for 3 dropped states", n)
 	}
 	h.apiary.takeCalls()
@@ -802,7 +928,7 @@ func TestAFailedRemovalPastTheLimitLogsNoFalseLine(t *testing.T) {
 	if len(h.find("removing a dispatch from the journal failed")) != 1 {
 		t.Error("the log has no line for the failed removal")
 	}
-	if n := len(h.find("stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine")); n != 0 {
+	if n := len(h.find(goneLimitLine)); n != 0 {
 		t.Errorf("the log has %d false lines", n)
 	}
 	failing.setFailRemove(false)
@@ -853,7 +979,7 @@ func TestAnEndedEntryLeavesAtTheLimit(t *testing.T) {
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	h.tick()
 	equal(t, "the journal", h.entries(), nil)
-	lines := h.find("stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine")
+	lines := h.find(goneLimitLine)
 	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["dispatch_id"] != dispatchA {
 		t.Errorf("the log lines are %v", lines)
 	}

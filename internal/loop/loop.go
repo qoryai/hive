@@ -74,8 +74,8 @@ const (
 	// MachineEndLimit is the time during which the loop keeps sending one failing
 	// machine-end. For gone, it counts from the first gone of an ended entry. For
 	// deleting and delete_failed, it counts from the first failure of that state. An
-	// entry that the journal had at the start counts from the start of [Run], and a
-	// restart starts each count again. After it, the state is dropped and an ended entry
+	// ended entry that the journal had at the start counts from the start of [Run], and
+	// a restart starts each count again. After it, the state is dropped and an ended entry
 	// leaves the journal, as the contract allows for a call that keeps failing.
 	MachineEndLimit = 24 * time.Hour
 	// LongWait is the wait before the next claim after a make that failed with the
