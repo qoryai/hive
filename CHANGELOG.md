@@ -11,7 +11,8 @@ The changes to Hive that no release contains yet, in the shape of
   `POST /v1/dispatches/<id>/machine-end`. After each delete it sends `deleting` or
   `gone`, and `delete_failed` when the delete fails. It sends `deleting` or
   `delete_failed` once per change, and `gone` once the machine adapter reports that the
-  machine no longer exists.
+  machine no longer exists. After a signed 400, 403 or 404, the provisioner sends no
+  more `machine-end` for that dispatch, and its deletes go on.
 - The provisioner keeps checking a machine after its delete. Every 60 seconds it sends
   the delete again, also after a failed delete, until the machine adapter returns gone.
 - The journal of live dispatches has two more phases: `deleting`, for a machine whose

@@ -13,11 +13,12 @@ import (
 	"github.com/qoryai/integrations/contracts"
 )
 
-// The errors of a post of machine-end: one that a later try can change, and one that it
-// cannot, as the client returns for a signed 403.
+// The errors of a post of machine-end: one that a later try can change, one that the
+// client returns for a signed answer that breaks the contract, and one for a signed 403.
 var (
-	endFailed = errors.New("no answer from Qory Apiary")
-	endDone   = fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrMachineEndDone)
+	endFailed  = errors.New("no answer from Qory Apiary")
+	endDone    = fmt.Errorf("Qory Apiary's answer breaks the contract: %w", loop.ErrMachineEndDone)
+	endStopped = fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrMachineEndStopped)
 )
 
 // deleteFailure is a delete that the vendor throttled.
@@ -171,9 +172,9 @@ func TestAFailedPostIsRetried(t *testing.T) {
 	}
 }
 
-// TestAnAnswerThatEndsTheTriesCountsAsDone posts deleting once when the answer is a
-// signed 403, logs it once, and still removes the entry when gone gets the same answer.
-func TestAnAnswerThatEndsTheTriesCountsAsDone(t *testing.T) {
+// TestAnUnusableAnswerCountsAsDone posts deleting once when the answer breaks the
+// contract, logs it once, and still removes the entry when gone gets the same answer.
+func TestAnUnusableAnswerCountsAsDone(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
 	h.apiary.setEnd("deleting", endDone)
@@ -187,8 +188,50 @@ func TestAnAnswerThatEndsTheTriesCountsAsDone(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)
 	if n := len(h.find("sending machine-end failed, and a later try cannot change the answer")); n != 2 {
-		t.Errorf("the log has %d lines for the two refused posts", n)
+		t.Errorf("the log has %d lines for the two unusable answers", n)
 	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestASigned403StopsThePosts sends no more machine-end after a signed 403, while the
+// deletes go on. Gone from the adapter then removes the entry with no post.
+func TestASigned403StopsThePosts(t *testing.T) {
+	h := newHarness(t)
+	h.machines.lingering = true
+	h.machines.deleteErr = []error{nil, deleteFailure}
+	h.apiary.setEnd("deleting", endStopped)
+	stoppedMachine(h)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "machine-end " + dispatchA + " deleting"})
+	h.machines.takeCalls()
+	// A failed delete changes the state, and the dispatch gets no post for it.
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete i-a"})
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a")})
+	h.machines.drop("i-a")
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete i-a"})
+	equal(t, "the journal", h.entries(), nil)
+	if n := len(h.find("sending machine-end failed, and the dispatch gets no more machine-end")); n != 1 {
+		t.Errorf("the log has %d lines for the stop", n)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStopOnGoneRemovesTheEntry removes the entry when the post of gone gets a signed
+// 403, right after the delete.
+func TestAStopOnGoneRemovesTheEntry(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("gone", endStopped)
+	stoppedMachine(h)
+	h.tick()
+	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
@@ -469,11 +512,11 @@ func TestAnEndedEntryGetsOneTryAndNoDelete(t *testing.T) {
 	}
 }
 
-// TestAnEndedEntryLeavesOnAnAnswerThatEndsTheTries removes the entry on a signed 403.
-func TestAnEndedEntryLeavesOnAnAnswerThatEndsTheTries(t *testing.T) {
+// TestAnEndedEntryLeavesOnASigned403 removes the entry.
+func TestAnEndedEntryLeavesOnASigned403(t *testing.T) {
 	h := newHarness(t)
 	h.setEntries(ended(dispatchA, "i-a"))
-	h.apiary.setEnd("gone", endDone)
+	h.apiary.setEnd("gone", endStopped)
 	h.start()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
@@ -500,6 +543,27 @@ func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end-once " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStoppedDispatchGetsNoPostInThePhaseEnded posts nothing for an entry that stays in
+// the journal after a stop, when its removal fails, and removes it at the next watch.
+func TestAStoppedDispatchGetsNoPostInThePhaseEnded(t *testing.T) {
+	h := newHarness(t)
+	failing := &setFailure{}
+	failing.setFailRemove(true)
+	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
+	h.apiary.setEnd("gone", endStopped)
+	stoppedMachine(h)
+	h.tick()
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	failing.setFailRemove(false)
+	h.apiary.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)

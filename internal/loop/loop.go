@@ -99,10 +99,12 @@ var (
 	// ErrMachineExists is 409 machine_exists: a release came after dispatched, or after
 	// the machine redeemed its run code.
 	ErrMachineExists = errors.New("409 machine_exists")
-	// ErrMachineEndDone is an answer to machine-end that a later try cannot change: a
-	// signed 400, 403 or 404, or a signed answer that breaks the contract. The post
-	// counts as done.
+	// ErrMachineEndDone is a signed answer to machine-end that breaks the contract. The
+	// post counts as done.
 	ErrMachineEndDone = errors.New("machine-end is done")
+	// ErrMachineEndStopped is a signed 400, 403 or 404 to machine-end. The post counts as
+	// done, the dispatch gets no more machine-end, and its deletes go on.
+	ErrMachineEndStopped = errors.New("machine-end is stopped for the dispatch")
 )
 
 // Claim is a claim answer: a request for one machine.
@@ -141,8 +143,8 @@ type Apiary interface {
 	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
 	// MachineEnd sends how the removal of the dispatch's machine went: deleting, gone or
-	// delete_failed. Its error wraps [ErrMachineEndDone] for an answer that a later try
-	// cannot change.
+	// delete_failed. Its error wraps [ErrMachineEndDone] or [ErrMachineEndStopped] for
+	// those answers.
 	MachineEnd(ctx context.Context, dispatchID, state string) error
 	// MachineEndOnce is [Apiary.MachineEnd] with one try and no retries.
 	MachineEndOnce(ctx context.Context, dispatchID, state string) error
@@ -262,8 +264,8 @@ type loop struct {
 	// read. An id leaves when its entry leaves the journal.
 	logged map[string]bool
 	// sentEnd is the last machine-end state done for each entry, so that a state goes
-	// out once per change. A restart starts with no record and sends the state once
-	// more.
+	// out once per change, or [machineEndStopped]. A restart starts with no record and
+	// sends the state once more.
 	sentEnd map[string]string
 	// freed receives a value when an entry leaves the journal or moves to the phase
 	// ended.

@@ -21,6 +21,7 @@ import (
 	"github.com/qoryai/hive/internal/provisioner"
 	"github.com/qoryai/hive/internal/provisioner/provisionertest"
 	"github.com/qoryai/hive/internal/state"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The markers of the secrets. No log line, error, argument, file outside the state
@@ -326,6 +327,64 @@ func TestToLoop(t *testing.T) {
 	}
 	if toLoop(nil) != nil {
 		t.Error("nil did not stay nil")
+	}
+}
+
+// TestToLoopEnd checks that a machine end's errors match the loop's sentinels and keep
+// their text. An unsigned answer and every other failure stay as they are, so the loop
+// sends the post again.
+func TestToLoopEnd(t *testing.T) {
+	for _, c := range []struct{ client, loop error }{
+		{provisioner.ErrMachineEndStopped, loop.ErrMachineEndStopped},
+		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndDone},
+	} {
+		err := fmt.Errorf("the machine end of dp_0123456789abcdef: %w", c.client)
+		if got := toLoopEnd(err); !errors.Is(got, c.loop) || !errors.Is(got, c.client) || got.Error() != err.Error() {
+			t.Errorf("%v: got %q, want it to match %v and %v with the same text", c.client, got, c.loop, c.client)
+		}
+	}
+	for _, err := range []error{provisioner.ErrUnsigned, provisioner.ErrUnreachable, provisioner.ErrRateLimited, provisioner.ErrUnavailable, provisioner.ErrGone, context.Canceled} {
+		if got := toLoopEnd(err); got != err {
+			t.Errorf("%v: got %v, want it as it is", err, got)
+		}
+	}
+	if toLoopEnd(nil) != nil {
+		t.Error("nil did not stay nil")
+	}
+}
+
+// TestApiaryMachineEnd sends a machine end through the wrapper and the fake Qory Apiary,
+// in both forms. A signed 403 and a signed 200 match the loop's sentinels, and an
+// unsigned 404 matches neither.
+func TestApiaryMachineEnd(t *testing.T) {
+	srv := provisionertest.New(t)
+	a := apiary{client: srv.Client()}
+	ctx := context.Background()
+	srv.Offer(provisionertest.Work{})
+	c, ok, err := a.Claim(ctx)
+	if !ok || err != nil {
+		t.Fatalf("claim: %v, %v", ok, err)
+	}
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndDeleting); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := srv.Dispatch(c.DispatchID); !slices.Equal(d.MachineEnds, []string{contracts.MachineEndDeleting, contracts.MachineEndGone}) {
+		t.Errorf("the machine ends are %q", d.MachineEnds)
+	}
+	if err := a.MachineEnd(ctx, "dp_0123456789abcdef", contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndStopped) {
+		t.Errorf("an unknown dispatch: %v", err)
+	}
+	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 200, Body: `{}`})
+	if err := a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
+		t.Errorf("a signed 200: %v", err)
+	}
+	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 404, Unsigned: true})
+	err = a.MachineEndOnce(ctx, c.DispatchID, contracts.MachineEndGone)
+	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndDone) {
+		t.Errorf("an unsigned 404: %v, want a failure the loop retries", err)
 	}
 }
 

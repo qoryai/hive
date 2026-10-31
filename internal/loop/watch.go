@@ -11,12 +11,9 @@ import (
 	"github.com/qoryai/integrations/contracts"
 )
 
-// The states of machine-end.
-const (
-	machineEndDeleting     = "deleting"
-	machineEndGone         = "gone"
-	machineEndDeleteFailed = "delete_failed"
-)
+// machineEndStopped is the record of a dispatch that gets no more machine-end. It is
+// not a state of the contract.
+const machineEndStopped = "stopped"
 
 // watch runs one watch every [WatchInterval] until ctx ends.
 func (l *loop) watch(ctx context.Context) {
@@ -196,18 +193,18 @@ func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
 func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
 	state, err := l.deleteMachine(ctx, e.DispatchID, e.MachineID, attrs)
-	end := machineEndDeleting
+	end := contracts.MachineEndDeleting
 	switch {
 	case err != nil:
-		end = machineEndDeleteFailed
+		end = contracts.MachineEndDeleteFailed
 	case state == contracts.MachineGone:
-		if !l.sendMachineEnd(ctx, e.DispatchID, machineEndGone, attrs) || !l.removeEnded(e) {
+		if !l.sendMachineEnd(ctx, l.Apiary.MachineEnd, e.DispatchID, contracts.MachineEndGone, attrs) || !l.removeEnded(e) {
 			l.setEnded(e, attrs)
 		}
 		return
 	}
 	if l.setDeleting(e, attrs) {
-		l.sendMachineEnd(ctx, e.DispatchID, end, attrs)
+		l.sendMachineEnd(ctx, l.Apiary.MachineEnd, e.DispatchID, end, attrs)
 	}
 }
 
@@ -218,8 +215,7 @@ func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 func (l *loop) watchEnded(ctx context.Context, e journal.Entry, send bool) bool {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
 	if send {
-		err := l.Apiary.MachineEndOnce(ctx, e.DispatchID, machineEndGone)
-		send = l.machineEndDone(e.DispatchID, machineEndGone, err, attrs)
+		send = l.sendMachineEnd(ctx, l.Apiary.MachineEndOnce, e.DispatchID, contracts.MachineEndGone, attrs)
 		if send && l.removeEnded(e) {
 			return true
 		}
@@ -314,24 +310,25 @@ func (l *loop) setEnded(e journal.Entry, attrs []any) {
 	l.free()
 }
 
-// sendMachineEnd sends state for the dispatch and returns whether the post is done. It
-// sends gone every time, and any other state only when it differs from the last one
-// done for the dispatch.
-func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, attrs []any) bool {
-	if state != machineEndGone && l.lastMachineEnd(dispatchID) == state {
+// sendMachineEnd posts state for the dispatch with post and returns whether the post is
+// done. It sends gone every time, and any other state only when it differs from the
+// last one done for the dispatch. A dispatch whose posts stopped gets none. A post is
+// done on 204, [ErrMachineEndDone] and [ErrMachineEndStopped]. After any other failure,
+// the next watch sends the state again.
+func (l *loop) sendMachineEnd(ctx context.Context, post func(context.Context, string, string) error, dispatchID, state string, attrs []any) bool {
+	last := l.lastMachineEnd(dispatchID)
+	if last == machineEndStopped || (state != contracts.MachineEndGone && last == state) {
 		return true
 	}
-	return l.machineEndDone(dispatchID, state, l.Apiary.MachineEnd(ctx, dispatchID, state), attrs)
-}
-
-// machineEndDone logs the result err of a post of state and returns whether the post is
-// done: on 204 and on [ErrMachineEndDone]. After any other failure, the next watch
-// sends the state again.
-func (l *loop) machineEndDone(dispatchID, state string, err error, attrs []any) bool {
 	attrs = append(attrs, slog.String("state", state))
+	err := post(ctx, dispatchID, state)
+	record := state
 	switch {
 	case err == nil:
 		l.Log.Info("sent machine-end", attrs...)
+	case errors.Is(err, ErrMachineEndStopped):
+		l.Log.Warn("sending machine-end failed, and the dispatch gets no more machine-end", append(attrs, errorAttr(err, nil))...)
+		record = machineEndStopped
 	case errors.Is(err, ErrMachineEndDone):
 		l.Log.Warn("sending machine-end failed, and a later try cannot change the answer", append(attrs, errorAttr(err, nil))...)
 	default:
@@ -340,11 +337,11 @@ func (l *loop) machineEndDone(dispatchID, state string, err error, attrs []any) 
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.sentEnd[dispatchID] = state
+	l.sentEnd[dispatchID] = record
 	return true
 }
 
-// lastMachineEnd is the last state done for the dispatch since the start of Run, or "".
+// lastMachineEnd is the record of the dispatch in sentEnd, or "".
 func (l *loop) lastMachineEnd(dispatchID string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
