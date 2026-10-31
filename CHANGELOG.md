@@ -7,6 +7,16 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Added
 
+- The provisioner tells Qory Apiary how each machine's removal went, with the signed
+  `POST /v1/dispatches/<id>/machine-end`. After each delete it sends `deleting` or
+  `gone`, and `delete_failed` when the delete fails. It sends `deleting` or
+  `delete_failed` once per change, and `gone` once the machine adapter reports that the
+  machine no longer exists.
+- The provisioner keeps checking a machine after its delete. Every 60 seconds it sends
+  the delete again, also after a failed delete, until the machine adapter returns gone.
+- The journal of live dispatches has two more phases: `deleting`, for a machine whose
+  delete has not returned gone, and `ended`, for a machine that is gone while the post
+  of `gone` is pending.
 - The machine's start script, `qory-machine-start`, prints one line to standard error at
   each stage, with the time in UTC, such as
   `qory-machine-start: 2026-10-30T14:02:13Z Docker started`. It prints start data read,
@@ -24,6 +34,19 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
+- A dispatch keeps its journal entry, and its place in `max_machines`, until the machine
+  adapter returns gone. Before, the entry left when the adapter accepted the delete. So
+  with `max_machines` of 1, the next run waits at least one more watch of 60 seconds,
+  and a delete that keeps failing holds its place while the provisioner retries it.
+- When the post of `gone` fails, the machine's entry stays in the phase `ended`, which
+  does not count toward `max_machines`. Each watch sends `gone` again with one try, and
+  stops at the first failure of that watch. After 24 hours the provisioner logs an error
+  and removes the entry, and Qory Apiary then shows no removal of that machine.
+- A machine that is deleting, or that is still not listed 5 minutes after its make, gets
+  a delete, and `gone` is posted for it. Before, the provisioner removed its entry with
+  no delete.
+- A listed machine with no journal entry and a key in the shape of a dispatch id gets a
+  journal entry, and `machine-end` as any other machine does.
 - `qory-machine.service` sends standard error to the console as well as the journal
   (`StandardError=journal+console`). The start script sets `QORY_STATUS_FD=3` for qory
   run, with descriptor 3 on that standard error, and sends qory run's stdout and stderr
