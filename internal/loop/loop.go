@@ -88,6 +88,10 @@ var (
 	// ErrMachineExists is 409 machine_exists: a release came after dispatched, or after
 	// the machine redeemed its run code.
 	ErrMachineExists = errors.New("409 machine_exists")
+	// ErrMachineEndDone is an answer to machine-end that a later try cannot change: a
+	// signed 400, 403 or 404, or a signed answer that breaks the contract. The post
+	// counts as done.
+	ErrMachineEndDone = errors.New("machine-end is done")
 )
 
 // Claim is a claim answer: a request for one machine.
@@ -109,7 +113,7 @@ type Claim struct {
 	MaxLifetimeMinutes int
 }
 
-// Apiary is the provisioner's client of Qory Apiary: the four requests of the
+// Apiary is the provisioner's client of Qory Apiary: the five requests of the
 // provisioner contract that the loop sends.
 type Apiary interface {
 	// Claim claims a request for one machine. It returns false and no error when no
@@ -125,6 +129,10 @@ type Apiary interface {
 	// that made no machine. truncated is true when the log is the last part of a
 	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
+	// MachineEnd sends how the removal of the dispatch's machine went: deleting, gone or
+	// delete_failed. Its error wraps [ErrMachineEndDone] for an answer that a later try
+	// cannot change.
+	MachineEnd(ctx context.Context, dispatchID, state string) error
 }
 
 // Journal is the journal of live dispatches, as [journal.Journal] keeps it.

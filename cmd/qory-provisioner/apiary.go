@@ -65,6 +65,12 @@ func (a apiary) MachineLog(ctx context.Context, dispatchID, log string, truncate
 	return toLoop(a.client.MachineLog(ctx, dispatchID, log, truncated))
 }
 
+// MachineEnd returns an error until stage 2 of this work replaces it with the client's
+// machine-end request, so the loop retries each post.
+func (a apiary) MachineEnd(_ context.Context, dispatchID, _ string) error {
+	return errors.New("the client has no machine-end request yet: " + dispatchID)
+}
+
 // sentinels pairs each refusal of the client that the loop acts on with the loop's
 // sentinel for it.
 var sentinels = []struct{ client, loop error }{

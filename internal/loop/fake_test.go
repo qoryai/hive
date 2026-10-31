@@ -151,10 +151,12 @@ type fakeApiary struct {
 	releaseErr error
 	logErr     error
 	uploads    []upload
+	// endErr is the error of each later machine-end, by state.
+	endErr map[string]error
 }
 
 func newApiary() *fakeApiary {
-	return &fakeApiary{claims: make(chan claimResult), dispatched: map[string]error{}}
+	return &fakeApiary{claims: make(chan claimResult), dispatched: map[string]error{}, endErr: map[string]error{}}
 }
 
 func (a *fakeApiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
@@ -192,6 +194,20 @@ func (a *fakeApiary) MachineLog(_ context.Context, dispatchID, log string, trunc
 	a.calls = append(a.calls, fmt.Sprintf("machine-log %s %t", dispatchID, truncated))
 	a.uploads = append(a.uploads, upload{dispatchID, log, truncated})
 	return a.logErr
+}
+
+func (a *fakeApiary) MachineEnd(_ context.Context, dispatchID, state string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "machine-end "+dispatchID+" "+state)
+	return a.endErr[state]
+}
+
+// setEnd sets the error of each later machine-end with the state.
+func (a *fakeApiary) setEnd(state string, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.endErr[state] = err
 }
 
 // setDispatched sets the error of each later dispatched of the dispatch.
