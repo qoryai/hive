@@ -220,7 +220,7 @@ func (l *loop) watchEnded(ctx context.Context, e journal.Entry) {
 	case l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs):
 		l.removeEnded(e)
 	case l.Clock.Now().Sub(l.goneAt(e.DispatchID)) >= MachineEndLimit:
-		l.Log.Error("stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine", attrs...)
+		l.Log.Error("stopped sending machine-end gone after 24 hours", attrs...)
 		l.removeEnded(e)
 	}
 }
@@ -377,7 +377,7 @@ func (l *loop) machineEndFailed(dispatchID, state string, attrs []any) {
 	delete(l.failedEnd, dispatchID)
 	l.sentEnd[dispatchID] = state
 	l.mu.Unlock()
-	l.Log.Error("stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it", attrs...)
+	l.Log.Error("stopped sending this machine-end state after 24 hours", attrs...)
 }
 
 // setEndsPaused sets whether machine-end is paused until the next watch starts.

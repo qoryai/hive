@@ -24,8 +24,8 @@ var (
 
 // The log lines at [loop.MachineEndLimit].
 const (
-	goneLimitLine  = "stopped sending machine-end gone after 24 hours, so Qory Apiary shows no removal of this machine"
-	stateLimitLine = "stopped sending this machine-end state after 24 hours, so Qory Apiary does not show it"
+	goneLimitLine  = "stopped sending machine-end gone after 24 hours"
+	stateLimitLine = "stopped sending this machine-end state after 24 hours"
 )
 
 // deleteFailure is a delete that the vendor throttled.
@@ -534,8 +534,7 @@ func TestAnEndedEntryLeavesOnASigned403(t *testing.T) {
 
 // TestAFailedRemovalAfterGoneMovesTheEntryToEnded keeps an accepted gone as done when
 // the journal cannot drop the entry. The entry gets no delete, no dispatched and no
-// second post, so no later failure of a post can log that Qory Apiary shows no removal.
-// Each watch tries the removal again, also past the limit.
+// second post, so no later failure of a post reaches the limit. Each watch tries the removal again, also past the limit.
 func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	h := newHarness(t)
 	failing := &setFailure{}
@@ -554,7 +553,7 @@ func TestAFailedRemovalAfterGoneMovesTheEntryToEnded(t *testing.T) {
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
 	if n := len(h.find(goneLimitLine)); n != 0 {
-		t.Errorf("the log has %d false lines", n)
+		t.Errorf("the log has %d lines for the limit", n)
 	}
 	failing.setFailRemove(false)
 	h.tick()
@@ -850,7 +849,7 @@ func TestADroppedStateIsFollowedByTheNextOnes(t *testing.T) {
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " delete_failed"})
 	lines := h.find(msg)
-	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["state"] != "delete_failed" {
+	if len(lines) != 1 || lines[0]["level"] != "ERROR" || lines[0]["state"] != "delete_failed" || lines[0]["dispatch_id"] != dispatchA {
 		t.Errorf("the log lines are %v", lines)
 	}
 	h.tick()
@@ -915,10 +914,10 @@ func TestAFailedSyncStillEndsTheEntry(t *testing.T) {
 	}
 }
 
-// TestAFailedRemovalPastTheLimitLogsNoFalseLine accepts gone past the limit while the
-// removal fails. The log has the failed removal and no line that Qory Apiary shows no
-// removal, and the next watch removes the entry.
-func TestAFailedRemovalPastTheLimitLogsNoFalseLine(t *testing.T) {
+// TestAFailedRemovalPastTheLimitLogsNoLimitLine accepts gone past the limit while the
+// removal fails. The log has the failed removal and no line for the limit, and the next
+// watch removes the entry.
+func TestAFailedRemovalPastTheLimitLogsNoLimitLine(t *testing.T) {
 	h := newHarness(t)
 	failing := &setFailure{}
 	failing.setFailRemove(true)
@@ -932,7 +931,7 @@ func TestAFailedRemovalPastTheLimitLogsNoFalseLine(t *testing.T) {
 		t.Error("the log has no line for the failed removal")
 	}
 	if n := len(h.find(goneLimitLine)); n != 0 {
-		t.Errorf("the log has %d false lines", n)
+		t.Errorf("the log has %d lines for the limit", n)
 	}
 	failing.setFailRemove(false)
 	h.tick()

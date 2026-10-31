@@ -44,8 +44,7 @@ The changes to Hive that no release contains yet, in the shape of
   Apiary with no `machine-end` route costs one failed post per watch.
 - When the post of `gone` fails or waits for the next watch, the machine's entry stays
   in the phase `ended`, which does not count toward `max_machines`. Each watch sends
-  `gone` again. After 24 hours the provisioner logs an error and removes the entry, and
-  Qory Apiary then shows no removal of that machine.
+  `gone` again. After 24 hours the provisioner logs an error and removes the entry.
 - A post of `deleting` or `delete_failed` that keeps failing stops 24 hours after its
   first failure. The provisioner logs an error, and a later state goes out as usual.
 - A machine that is deleting, or that is still not listed 5 minutes after its make, gets
