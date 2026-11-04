@@ -326,9 +326,9 @@ write the file. Each writer follows this rule:
 - Finish before `qory-machine.service` starts. A systemd unit sets
   `Before=qory-machine.service`.
 
-The start unit fails on a folder that is a link or that another user owns, on a
-symbolic link, on a file that is not a regular file, and on a file that root does not
-own. When the file is missing or empty, it prints "Install the start-data unit for this
-machine's vendor. /run/qory-machine-start/start-data does not exist or is empty." It
-deletes the file after the read. A failed start-data unit for EC2 powers the machine
-off.
+The start unit fails when the folder path is a link, is not a folder, or is a folder
+that another user owns. It fails on a symbolic link, on a file that is not a regular
+file, and on a file that root does not own. When the file is missing or empty, it prints
+"Install the start-data unit for this machine's vendor.
+/run/qory-machine-start/start-data does not exist or is empty." It deletes the file
+after the read. A failed start-data unit for EC2 powers the machine off.

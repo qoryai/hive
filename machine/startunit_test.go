@@ -650,6 +650,28 @@ func otherOwnerFolder(t *testing.T, dir string) {
 	}
 }
 
+// linkStays fails the test unless path is a link to target and target does not exist.
+func linkStays(t *testing.T, target, path string) {
+	t.Helper()
+	if got, err := os.Readlink(path); err != nil || got != target {
+		t.Errorf("%s links to %q (%v), want a link to %s", path, got, err, target)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s exists after the run: %v", target, err)
+	}
+}
+
+// fileStays fails the test unless path is a file with content.
+func fileStays(t *testing.T, path, content string) {
+	t.Helper()
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("%s is not a regular file after the run: %v", path, err)
+	}
+	if got := read(t, path); got != content {
+		t.Errorf("%s contains %q, want %q", path, got, content)
+	}
+}
+
 // linkFolder replaces the start data folder under root with a link to the folder
 // root/elsewhere, which contains a start data file and a temporary file .start-data.x.
 func linkFolder(t *testing.T, root string) {
@@ -816,6 +838,17 @@ func TestStartUnitFails(t *testing.T) {
 				}
 				write(t, dir, "not a folder")
 			},
+		},
+		{
+			name: "a link to nothing at the start data folder", want: folder,
+			setup: func(t *testing.T, root string) {
+				dir := filepath.Dir(root + handOff)
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+				link(t, root+"/none", dir)
+			},
+			check: func(t *testing.T, root string) { linkStays(t, root+"/none", filepath.Dir(root+handOff)) },
 		},
 		{name: "another user's folder", want: folder, setup: func(t *testing.T, root string) { otherOwnerFolder(t, filepath.Dir(root+handOff)) }},
 		{
@@ -1262,6 +1295,8 @@ func TestDataUnitFails(t *testing.T) {
 		setup func(t *testing.T, root, dir string)
 		// left are the names in the start data folder after the run.
 		left []string
+		// notFolder is set when the start data folder path is no folder after the run.
+		notFolder bool
 		// check checks the root folder after the run.
 		check func(t *testing.T, root string)
 	}{
@@ -1300,6 +1335,26 @@ func TestDataUnitFails(t *testing.T) {
 		{
 			name: "a link to nothing at start-data", status: 1, want: exists + "\n", left: []string{"start-data"},
 			setup: func(t *testing.T, root, dir string) { link(t, root+"/none", dir+"/start-data") },
+		},
+		{
+			name: "a file at start-data", status: 1, want: exists + "\n", left: []string{"start-data"},
+			setup: func(t *testing.T, _, dir string) {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				write(t, dir+"/start-data", "earlier data")
+			},
+			check: func(t *testing.T, root string) { fileStays(t, root+handOff, "earlier data") },
+		},
+		{
+			name: "a file at the start data folder", status: 1, want: folder + "\n", notFolder: true,
+			setup: func(t *testing.T, _, dir string) { write(t, dir, "not a folder") },
+			check: func(t *testing.T, root string) { fileStays(t, filepath.Dir(root+handOff), "not a folder") },
+		},
+		{
+			name: "a link to nothing at the start data folder", status: 1, want: folder + "\n",
+			setup: func(t *testing.T, root, dir string) { link(t, root+"/none", dir) },
+			check: func(t *testing.T, root string) { linkStays(t, root+"/none", filepath.Dir(root+handOff)) },
 		},
 		// The script writes nothing in the folder that the link points to, and leaves its
 		// mode.
@@ -1350,8 +1405,10 @@ func TestDataUnitFails(t *testing.T) {
 			if r.status != c.status || r.stdout != "" || r.stderr != want {
 				t.Errorf("status %d, stdout %q, stderr %q; want %d, no stdout, and stderr %q", r.status, r.stdout, r.stderr, c.status, want)
 			}
-			if got := entries(t, dir); !slices.Equal(got, c.left) {
-				t.Errorf("the start data folder contains %q after a failure, want %q", got, c.left)
+			if !c.notFolder {
+				if got := entries(t, dir); !slices.Equal(got, c.left) {
+					t.Errorf("the start data folder contains %q after a failure, want %q", got, c.left)
+				}
 			}
 			if c.check != nil {
 				c.check(t, e.root)
