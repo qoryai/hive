@@ -16,7 +16,7 @@ import (
 // released and removed; a claimed entry with a machine becomes made with the
 // machine's id and keeps the claim's lifetime, and gets dispatched; a made entry gets
 // dispatched, also when its machine is not listed; an entry whose machine is deleting
-// is removed; a dispatched entry with a machine stays for the watch.
+// moves to the phase deleting; a dispatched entry with a machine stays for the watch.
 func TestRestartRecovery(t *testing.T) {
 	h := newHarness(t)
 	h.config.MaxMachines = 6
@@ -45,14 +45,15 @@ func TestRestartRecovery(t *testing.T) {
 	want := []journal.Entry{
 		dispatched(dispatchB, "i-b"),
 		dispatched(dispatchC, "i-c"),
+		deleting(dispatchD, "i-d"),
 		dispatched(dispatchE, "i-e"),
 		dispatched(dispatchF, "i-f"),
 	}
 	equal(t, "the journal", h.entries(), want)
 	h.openJournal()
 	equal(t, "the journal read again", h.entries(), want)
-	if n := len(h.find("dropped a dispatch whose machine is deleting")); n != 1 {
-		t.Errorf("the log has %d lines for dropped entries", n)
+	if n := len(h.find("the machine of a recovered dispatch is deleting")); n != 1 {
+		t.Errorf("the log has %d lines for entries that moved to the phase deleting", n)
 	}
 	if n := len(h.find("resumed a dispatch")); n != 4 {
 		t.Errorf("the log has %d lines for resumed entries", n)
@@ -73,6 +74,7 @@ func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"dispatched " + dispatchA + " i-a",
 		"machine-log " + dispatchA + " false",
+		"machine-end " + dispatchA + " gone",
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "log i-a", "delete i-a"})
 	equal(t, "the journal", h.entries(), nil)

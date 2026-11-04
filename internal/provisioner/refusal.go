@@ -12,8 +12,8 @@ import (
 // The results of a request the provisioner branches on, each matched with errors.Is
 // against the error a method returns. A signed refusal matches only for a request whose
 // schema lists it, with its status and its code: claim.schema.json,
-// dispatched.schema.json, release.schema.json and machine-log.schema.json of
-// provisioner/v1.
+// dispatched.schema.json, release.schema.json, machine-log.schema.json and
+// machine-end.schema.json of provisioner/v1.
 var (
 	// ErrForbidden is the signed 403 forbidden: a request outside the access key's
 	// rights, or a dispatch that is unknown or of another node pool.
@@ -41,6 +41,12 @@ var (
 	// ErrRateLimited is the signed 429 rate_limited; [Refusal.RetryAfter] is the wait
 	// its Retry-After sets. An unsigned 429 is [ErrUnsigned].
 	ErrRateLimited = errors.New("429 rate_limited")
+	// ErrUnavailable is a machine end's signed 503 unavailable: Qory Apiary cannot store
+	// the call at that moment.
+	ErrUnavailable = errors.New("503 unavailable")
+	// ErrMachineEndStopped is a machine end's signed 400, 403 or 404, whatever the
+	// answer's code. The provisioner sends no more machine end for the dispatch.
+	ErrMachineEndStopped = errors.New("a signed 400, 403 or 404 to a machine end")
 	// ErrUnsigned is an answer within its bound with no valid signature under the pin,
 	// after every try: a 401, which is always unsigned and does not mean the access key
 	// is revoked, a 413, 415 or 400 that Qory Apiary returns before it checks the
@@ -71,6 +77,7 @@ var codeOf = map[error]struct {
 	ErrMachineLogExists: {http.StatusConflict, "machine_log_exists"},
 	ErrNoGateway:        {http.StatusConflict, "no_gateway"},
 	ErrRateLimited:      {http.StatusTooManyRequests, "rate_limited"},
+	ErrUnavailable:      {http.StatusServiceUnavailable, "unavailable"},
 }
 
 // kind is the request a refusal is to.
@@ -81,17 +88,20 @@ const (
 	kindDispatched
 	kindRelease
 	kindMachineLog
+	kindMachineEnd
 )
 
 // refusalsOf are the signed refusals of each request: first those its schema lists, in
 // the order the schema states, then the 404 of a route Qory Apiary does not serve and
 // the 429 any request may get, refusal.schema.json. [Refusal.Is] matches by membership
-// alone, not by place. A machine log is never refused 410 gone or 409 lease_expired.
+// alone, not by place. A machine log and a machine end are never refused 410 gone or
+// 409 lease_expired.
 var refusalsOf = map[kind][]error{
 	kindClaim:      {ErrForbidden, ErrNoGateway, ErrNotFound, ErrRateLimited},
 	kindDispatched: {ErrForbidden, ErrGone, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
 	kindRelease:    {ErrForbidden, ErrGone, ErrMachineExists, ErrLeaseExpired, ErrNotFound, ErrRateLimited},
 	kindMachineLog: {ErrForbidden, ErrMachineLogExists, ErrNotFound, ErrRateLimited},
+	kindMachineEnd: {ErrForbidden, ErrUnavailable, ErrNotFound, ErrRateLimited},
 }
 
 // Refusal is an answer other than the one a request is for: its status, whether its
@@ -163,14 +173,18 @@ func (r *Refusal) fix() string {
 }
 
 // Is reports whether the refusal is target: [ErrTooLarge] for an answer over its bound,
-// [ErrUnsigned] for one within it with no valid signature, or a signed refusal that the
-// request's schema lists, with its status and its code.
+// [ErrUnsigned] for one within it with no valid signature, [ErrMachineEndStopped] for a
+// machine end's signed 400, 403 or 404, or a signed refusal that the request's schema
+// lists, with its status and its code.
 func (r *Refusal) Is(target error) bool {
 	switch target {
 	case ErrTooLarge:
 		return r.TooLarge
 	case ErrUnsigned:
 		return !r.Signed && !r.TooLarge
+	case ErrMachineEndStopped:
+		stops := r.Status == http.StatusBadRequest || r.Status == http.StatusForbidden || r.Status == http.StatusNotFound
+		return r.kind == kindMachineEnd && r.Signed && stops
 	}
 	c, ok := codeOf[target]
 	return ok && r.Signed && r.Status == c.status && r.Code == c.code && slices.Contains(refusalsOf[r.kind], target)

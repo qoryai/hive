@@ -20,6 +20,11 @@ func dispatched(id, machine string) journal.Entry {
 	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: lifetime}
 }
 
+// deleting is the entry of the dispatch id in the phase deleting, with the machine id.
+func deleting(id, machine string) journal.Entry {
+	return journal.Entry{DispatchID: id, Phase: journal.PhaseDeleting, MachineID: machine, MaxLifetimeMinutes: lifetime}
+}
+
 // TestTheWatchSendsDispatchedAgain sends dispatched for each dispatched machine at
 // each watch, and changes nothing else.
 func TestTheWatchSendsDispatchedAgain(t *testing.T) {
@@ -57,6 +62,7 @@ func TestA410OnTheRepeatCleansUp(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"dispatched " + dispatchA + " " + machineID(1),
 		"machine-log " + dispatchA + " false",
+		"machine-end " + dispatchA + " gone",
 		"dispatched " + dispatchB + " " + machineID(2),
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
@@ -79,7 +85,7 @@ func TestAStoppedMachineIsCleanedUp(t *testing.T) {
 	h.machines.takeCalls()
 	h.machines.setState(machineID(1), contracts.MachineStopped)
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false", "machine-end " + dispatchA + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("the machine stopped")
@@ -91,9 +97,9 @@ func TestAStoppedMachineIsCleanedUp(t *testing.T) {
 	}
 }
 
-// TestAnEntryWhoseMachineIsDeletingIsRemoved removes the entry at once, and sends
-// nothing and deletes nothing.
-func TestAnEntryWhoseMachineIsDeletingIsRemoved(t *testing.T) {
+// TestAnEntryWhoseMachineIsDeletingIsCleanedUp sends delete with no read of the log,
+// and removes the entry once delete returns gone.
+func TestAnEntryWhoseMachineIsDeletingIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.setEntries(dispatched(dispatchA, "i-a"))
 	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
@@ -101,8 +107,8 @@ func TestAnEntryWhoseMachineIsDeletingIsRemoved(t *testing.T) {
 	h.machines.setState("i-a", contracts.MachineDeleting)
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete i-a"})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("the machine is deleting")
 	if len(lines) != 1 || lines[0]["state"] != "deleting" {
@@ -138,11 +144,11 @@ func TestANotListedMachineIsKeptInsideTheGrace(t *testing.T) {
 	}
 }
 
-// TestANotListedMachineIsRemovedAfterTheGrace removes the entry at the first watch
-// more than 5 minutes after the make, and after the start for an entry that the
-// journal had at the start. It sends nothing for the removed entries and deletes
-// nothing.
-func TestANotListedMachineIsRemovedAfterTheGrace(t *testing.T) {
+// TestANotListedMachineIsCleanedUpAfterTheGrace sends delete at the first watch more
+// than 5 minutes after the make, and after the start for an entry that the journal
+// had at the start, with no read of the log. Delete returns gone for an id that the
+// vendor does not know, so the entries leave.
+func TestANotListedMachineIsCleanedUpAfterTheGrace(t *testing.T) {
 	h := newHarness(t)
 	h.setEntries(dispatched(dispatchB, "i-b"))
 	h.start()
@@ -155,8 +161,8 @@ func TestANotListedMachineIsRemovedAfterTheGrace(t *testing.T) {
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchB + " gone", "machine-end " + dispatchA + " gone"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete i-b", "delete " + machineID(1)})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("the machine is still not listed 5 minutes after its make")
 	if len(lines) != 2 || lines[0]["dispatch_id"] != dispatchB || lines[1]["dispatch_id"] != dispatchA {
@@ -212,6 +218,7 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"machine-log " + dispatchA + " false",
+		"machine-end " + dispatchA + " gone",
 		"dispatched " + dispatchB + " i-b",
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-a", "delete i-a"})
@@ -226,7 +233,8 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 }
 
 // TestAStrayIsCleanedUp cleans up a listed machine whose key has no journal entry,
-// with its key as the dispatch id, and leaves a stray that is deleting as it is.
+// with its key as the dispatch id, and leaves a stray that is deleting as it is, with
+// no entry and no machine-end.
 func TestAStrayIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "stray log"
@@ -235,14 +243,14 @@ func TestAStrayIsCleanedUp(t *testing.T) {
 	h.machines.add("i-d", dispatchD, contracts.MachineDeleting, epoch)
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-s", "delete i-s"})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("found a machine with no journal entry")
 	if len(lines) != 1 || lines[0]["dispatch_id"] != dispatchC || lines[0]["machine_id"] != "i-s" || lines[0]["state"] != "running" {
 		t.Errorf("the log lines are %v", lines)
 	}
-	// The stray is deleting now, so the next watch leaves it.
+	// The other stray is deleting, so the next watch leaves it too.
 	h.tick()
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	if err := h.stop(); err != nil {
@@ -275,8 +283,8 @@ func TestAMachineInFlightIsNotAStray(t *testing.T) {
 	}
 }
 
-// TestAFailedDeleteIsTriedAgain keeps the entry after a failed delete. The next watch
-// deletes the machine again, without a second upload of its log.
+// TestAFailedDeleteIsTriedAgain moves the entry to the phase deleting after a failed
+// delete. The next watch deletes the machine again, without a second upload of its log.
 func TestAFailedDeleteIsTriedAgain(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "log"
@@ -288,14 +296,18 @@ func TestAFailedDeleteIsTriedAgain(t *testing.T) {
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, machineID(1))})
 	lines := h.find("deleting a machine failed")
 	if len(lines) != 1 || !strings.HasPrefix(lines[0]["error"].(string), "Try again later") {
 		t.Errorf("the log lines are %v", lines)
 	}
 	h.tick()
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete " + machineID(1)})
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchA + " false"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
+		"machine-log " + dispatchA + " false",
+		"machine-end " + dispatchA + " delete_failed",
+		"machine-end " + dispatchA + " gone",
+	})
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -543,6 +555,9 @@ func TestAKeptClaimedEntryIsRemovedAfterItsLifetime(t *testing.T) {
 		t.Error("the log has no line for the removal")
 	}
 	equal(t, "the adapter's calls", slices.DeleteFunc(h.machines.takeCalls(), func(c string) bool { return c == "check" || strings.HasPrefix(c, "make ") }), nil)
+	if calls := h.apiary.takeCalls(); slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "machine-end ") }) {
+		t.Errorf("Qory Apiary's calls are %q, with a machine-end for a machine with no id", calls)
+	}
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}

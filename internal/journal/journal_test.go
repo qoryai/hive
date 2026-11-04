@@ -76,6 +76,8 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 		{journal.PhaseDispatched, oddID, 15, dispatchA + " dispatched " + oddID + " 15"},
 		{journal.PhaseMade, longID, 1470, dispatchA + " made " + longID + " 1470"},
 		{journal.PhaseMade, "a", 999, dispatchA + " made a 999"},
+		{journal.PhaseDeleting, oddID, journal.MinLifetime, dispatchA + " deleting " + oddID + " 15"},
+		{journal.PhaseEnded, oddID, journal.MinLifetime, dispatchA + " ended " + oddID + " 15"},
 	} {
 		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: c.lifetime}
 		if err := j.Set(e); err != nil {
@@ -96,6 +98,22 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 		}
 		if got := j.List(); !slices.Equal(got, []journal.Entry{e}) {
 			t.Errorf("%s: the journal lists %v, want %v", c.phase, got, e)
+		}
+	}
+}
+
+// TestIsDispatchID accepts dp_ and 16 Crockford base32 characters and nothing else.
+func TestIsDispatchID(t *testing.T) {
+	for id, want := range map[string]bool{
+		dispatchA:              true,
+		"":                     false,
+		"i-0123456789abcdef":   false,
+		"dp_0123456789abcde":   false,
+		"dp_0123456789ABCDEF":  false,
+		"dp_0123456789abcdefg": false,
+	} {
+		if got := journal.IsDispatchID(id); got != want {
+			t.Errorf("IsDispatchID(%q) is %t", id, got)
 		}
 	}
 }
@@ -215,12 +233,14 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		{"a dispatch id with an i", func(e *journal.Entry) { e.DispatchID = "dp_0123456789abcdei" }, dispatchShape},
 		{"a dispatch id in upper case", func(e *journal.Entry) { e.DispatchID = "dp_0123456789ABCDEF" }, dispatchShape},
 		{"a short dispatch id", func(e *journal.Entry) { e.DispatchID = "dp_0123" }, dispatchShape},
-		{"an unknown phase", func(e *journal.Entry) { e.Phase = "started" }, "the phase is not claimed, made or dispatched"},
-		{"an old phase", func(e *journal.Entry) { e.Phase = "handed_over" }, "the phase is not claimed, made or dispatched"},
+		{"an unknown phase", func(e *journal.Entry) { e.Phase = "started" }, "the phase is not claimed, made, dispatched, deleting or ended"},
+		{"an old phase", func(e *journal.Entry) { e.Phase = "handed_over" }, "the phase is not claimed, made, dispatched, deleting or ended"},
 		{"claimed with a machine id", func(e *journal.Entry) { e.MachineID = machine }, "the machine id is set in the phase claimed"},
 		{"claimed with -", func(e *journal.Entry) { e.MachineID = "-" }, "the machine id is set in the phase claimed"},
-		{"made with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseMade }, "the phase made or dispatched has no machine id"},
-		{"dispatched with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseDispatched }, "the phase made or dispatched has no machine id"},
+		{"made with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseMade }, "the phase made, dispatched, deleting or ended has no machine id"},
+		{"dispatched with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseDispatched }, "the phase made, dispatched, deleting or ended has no machine id"},
+		{"deleting with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseDeleting }, "the phase made, dispatched, deleting or ended has no machine id"},
+		{"ended with no machine id", func(e *journal.Entry) { e.Phase = journal.PhaseEnded }, "the phase made, dispatched, deleting or ended has no machine id"},
 		{"made with -", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, "-" }, "the machine id is -, which the journal writes for no machine id"},
 		{"a machine id of 129", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, longID+"z" }, machineShape},
 		{"a machine id with a space", func(e *journal.Entry) { e.Phase, e.MachineID = journal.PhaseMade, "m 1" }, machineShape},
@@ -296,10 +316,12 @@ func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
 		{name: "a carriage return after a lifetime", content: other + "\r\n", line: 1, cause: lifetimeText},
 		{name: "a carriage return after a machine id", content: dispatchB + " made " + machine + "\r 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
 		{name: "an empty line", content: entry + "\n\n", line: 2, cause: fields},
-		{name: "an unknown phase", content: dispatchA + " running - 60\n", line: 1, cause: "the phase is not claimed, made or dispatched"},
+		{name: "an unknown phase", content: dispatchA + " running - 60\n", line: 1, cause: "the phase is not claimed, made, dispatched, deleting or ended"},
 		{name: "a dispatch id out of shape", content: "dp_0 claimed - 60\n", line: 1, cause: "the dispatch id is not dp_ and 16 Crockford base32 characters"},
-		{name: "made with -", content: dispatchA + " made - 60\n", line: 1, cause: "the phase made or dispatched has no machine id"},
-		{name: "dispatched with -", content: dispatchA + " dispatched - 60\n", line: 1, cause: "the phase made or dispatched has no machine id"},
+		{name: "made with -", content: dispatchA + " made - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "dispatched with -", content: dispatchA + " dispatched - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "deleting with -", content: dispatchA + " deleting - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "ended with -", content: dispatchA + " ended - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
 		{name: "claimed with a machine id", content: dispatchA + " claimed " + machine + " 60\n", line: 1, cause: "the machine id is set in the phase claimed"},
 		{name: "a machine id of 129", content: dispatchA + " made " + longID + "z 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
 		{name: "a machine id with qrk_", content: dispatchA + " made qrk_abc 60\n", line: 1, cause: "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},

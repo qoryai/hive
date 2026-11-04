@@ -248,6 +248,7 @@ func TestAFirstDispatchedThatIsRefusedCleansUp(t *testing.T) {
 			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 				"dispatched " + dispatchA + " " + machineID(1),
 				"machine-log " + dispatchA + " false",
+				"machine-end " + dispatchA + " gone",
 			})
 			if len(h.apiary.uploads) != 1 || h.apiary.uploads[0].log != "boot\nqory run exited\n" {
 				t.Errorf("the uploads are %v", h.apiary.uploads)

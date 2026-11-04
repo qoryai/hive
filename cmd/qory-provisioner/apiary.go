@@ -17,7 +17,7 @@ const claimWait = provisioner.MaxWaitSeconds
 // apiary is the provisioner's client of Qory Apiary as the loop uses it, see
 // [loop.Apiary]. Each error keeps the client's text, and the errors 410 gone, 409
 // lease_expired and 409 machine_exists also match the loop's sentinel of the same
-// refusal.
+// refusal. A machine end's errors match the loop's sentinels through [toLoopEnd].
 type apiary struct {
 	client *provisioner.Client
 }
@@ -65,6 +65,11 @@ func (a apiary) MachineLog(ctx context.Context, dispatchID, log string, truncate
 	return toLoop(a.client.MachineLog(ctx, dispatchID, log, truncated))
 }
 
+// MachineEnd sends how the removal of the dispatch's machine went, with one try.
+func (a apiary) MachineEnd(ctx context.Context, dispatchID, state string) error {
+	return toLoopEnd(a.client.MachineEnd(ctx, dispatchID, state))
+}
+
 // sentinels pairs each refusal of the client that the loop acts on with the loop's
 // sentinel for it.
 var sentinels = []struct{ client, loop error }{
@@ -83,6 +88,20 @@ func toLoop(err error) error {
 		if errors.Is(err, s.client) {
 			return &refusal{err: err, sentinel: s.loop}
 		}
+	}
+	return err
+}
+
+// toLoopEnd is err of a machine end as the loop reads it: a [refusal] with
+// [loop.ErrMachineEndStopped] for a signed 400, 403 or 404, a [refusal] with
+// [loop.ErrMachineEndDone] for a signed answer that breaks the contract, and err as it
+// is otherwise, nil included, so the loop sends the post again.
+func toLoopEnd(err error) error {
+	switch {
+	case errors.Is(err, provisioner.ErrMachineEndStopped):
+		return &refusal{err: err, sentinel: loop.ErrMachineEndStopped}
+	case errors.Is(err, provisioner.ErrAnswerUnusable):
+		return &refusal{err: err, sentinel: loop.ErrMachineEndDone}
 	}
 	return err
 }

@@ -33,7 +33,9 @@ type request struct {
 	schema  string
 	limit   int64
 	timeout time.Duration
-	body    func(time string) any
+	// once is one try and no retries.
+	once bool
+	body func(time string) any
 }
 
 // answer is the answer to one try: its status, its body, whether its signature
@@ -58,7 +60,7 @@ const reachFix = "check the route from this host to the Qory Apiary URL: "
 const retryLine = "a try failed, so the client sends the request again after the wait"
 
 // do sends req until Qory Apiary returns a signed status below 500, up to [tries]
-// tries. Each try is built anew, its time from
+// tries, or one try for a request with once set. Each try is built anew, its time from
 // [Client.nextTime], so its bytes and its signature are new. A try fails with no
 // answer, with an answer over its bound or with no valid signature, whatever its
 // status, a 429 among them, or with any other signed server error: such a try changes
@@ -108,7 +110,7 @@ func (c *Client) do(ctx context.Context, req request) (*answer, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("%s: %w", req.what, err)
 		}
-		if try == tries {
+		if try == tries || req.once {
 			return nil, failure
 		}
 		if c.Log != nil {

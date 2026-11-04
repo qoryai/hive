@@ -574,7 +574,7 @@ func TestTheSameBytesAreNeverSentTwice(t *testing.T) {
 // errors.Is matches the code's error only for a request whose schema lists it, and
 // never an unsigned answer of the same status and body.
 func TestRefusalsMatchTheirRequest(t *testing.T) {
-	all := []provisionertest.Route{"claim", "dispatched", "release", "machine-log"}
+	all := []provisionertest.Route{"claim", "dispatched", "release", "machine-log", "machine-end"}
 	codes := []struct {
 		err    error
 		status int
@@ -589,24 +589,35 @@ func TestRefusalsMatchTheirRequest(t *testing.T) {
 		{provisioner.ErrMachineLogExists, 409, "machine_log_exists", []provisionertest.Route{"machine-log"}},
 		{provisioner.ErrNoGateway, 409, "no_gateway", []provisionertest.Route{"claim"}},
 		{provisioner.ErrRateLimited, 429, "rate_limited", all},
+		{provisioner.ErrUnavailable, 503, "unavailable", []provisionertest.Route{"machine-end"}},
 	}
 	for _, code := range codes {
 		for _, route := range all {
 			srv, c, _, _ := setup(t)
 			cl := claimed(t, srv, c, provisionertest.Work{})
 			cl.RunCode.Clear()
-			srv.Script(route, provisionertest.Reply{Status: code.status, Code: code.code})
+			srv.Script(route, slices.Repeat([]provisionertest.Reply{{Status: code.status, Code: code.code}}, triesOf(route, code.status))...)
 			err := send(c, route, cl)
 			if want := slices.Contains(code.on, route); errors.Is(err, code.err) != want {
 				t.Errorf("%s to %s: %v, matches %v, want %v", code.code, route, err, !want, want)
 			}
 			unsigned := provisionertest.Reply{Status: code.status, Code: code.code, Unsigned: true}
-			srv.Script(route, unsigned, unsigned, unsigned, unsigned, unsigned)
+			srv.Script(route, slices.Repeat([]provisionertest.Reply{unsigned}, triesOf(route, 500))...)
 			if err := send(c, route, cl); errors.Is(err, code.err) || !errors.Is(err, provisioner.ErrUnsigned) {
 				t.Errorf("an unsigned %s to %s: %v", code.code, route, err)
 			}
 		}
 	}
+}
+
+// triesOf is the tries of route's request whose every answer is status. A machine end
+// has one try. Any other request sends a try with a server error or with no valid
+// signature again; pass 500 for the latter.
+func triesOf(route provisionertest.Route, status int) int {
+	if route == "machine-end" || status < 500 {
+		return 1
+	}
+	return 5
 }
 
 // send sends route's request for the claimed dispatch.
@@ -621,8 +632,99 @@ func send(c *provisioner.Client, route provisionertest.Route, cl provisioner.Cla
 		return c.Dispatched(ctx, cl.DispatchID, external)
 	case "machine-log":
 		return c.MachineLog(ctx, cl.DispatchID, "a line\n", false)
+	case "machine-end":
+		return c.MachineEnd(ctx, cl.DispatchID, contracts.MachineEndGone)
 	}
 	return c.Release(ctx, cl.DispatchID, "a reason")
+}
+
+// TestAMachineEndIsSent sends each state of the contract, any number of times, after
+// the dispatch ended, and the fake receives each one in order. The body passes the
+// fake's check against machine-end.schema.json.
+func TestAMachineEndIsSent(t *testing.T) {
+	srv, c, _, _ := setup(t)
+	ctx := context.Background()
+	cl := claimed(t, srv, c, provisionertest.Work{})
+	cl.RunCode.Clear()
+	srv.End(cl.DispatchID)
+	states := []string{contracts.MachineEndDeleteFailed, contracts.MachineEndDeleting, contracts.MachineEndGone, contracts.MachineEndGone}
+	for _, state := range states {
+		if err := c.MachineEnd(ctx, cl.DispatchID, state); err != nil {
+			t.Fatalf("%s: %v", state, err)
+		}
+	}
+	if d, _ := srv.Dispatch(cl.DispatchID); !slices.Equal(d.MachineEnds, states) {
+		t.Errorf("the machine ends are %q, want %q", d.MachineEnds, states)
+	}
+	if err := c.MachineEnd(ctx, "dp_0000000000000000", contracts.MachineEndGone); !errors.Is(err, provisioner.ErrForbidden) {
+		t.Errorf("an unknown dispatch: %v", err)
+	}
+	if err := c.MachineEnd(ctx, cl.DispatchID, "stopped"); err == nil || !strings.HasPrefix(err.Error(), "report this defect in the provisioner: ") {
+		t.Errorf("a state outside the schema: %v", err)
+	}
+}
+
+// TestASignedRefusalStopsTheMachineEnds matches ErrMachineEndStopped for a machine end's
+// signed 400, 403 and 404, with any code, after one try. No unsigned answer matches it,
+// an unsigned 404 among them, and no other status, and no other request.
+func TestASignedRefusalStopsTheMachineEnds(t *testing.T) {
+	for _, c := range []struct {
+		reply provisionertest.Reply
+		want  bool
+	}{
+		{provisionertest.Reply{Status: 400, Code: "invalid_request"}, true},
+		{provisionertest.Reply{Status: 403, Code: "forbidden"}, true},
+		{provisionertest.Reply{Status: 404, Code: "not_found"}, true},
+		{provisionertest.Reply{Status: 403, Code: "other"}, true},
+		{provisionertest.Reply{Status: 404, Code: "not_found", Unsigned: true}, false},
+		{provisionertest.Reply{Status: 403, Code: "forbidden", Unsigned: true}, false},
+		{provisionertest.Reply{Status: 401, Code: "unauthorized", Unsigned: true}, false},
+		{provisionertest.Reply{Status: 429, Code: "rate_limited"}, false},
+		{provisionertest.Reply{Status: 503, Code: "unavailable"}, false},
+		{provisionertest.Reply{Status: 410, Code: "gone"}, false},
+		{provisionertest.Reply{Status: 409, Code: "lease_expired"}, false},
+	} {
+		srv, cl, _, _ := setup(t)
+		got := claimed(t, srv, cl, provisionertest.Work{})
+		got.RunCode.Clear()
+		srv.Script("machine-end", c.reply)
+		err := cl.MachineEnd(context.Background(), got.DispatchID, contracts.MachineEndGone)
+		if err == nil || errors.Is(err, provisioner.ErrMachineEndStopped) != c.want {
+			t.Errorf("%d %s, unsigned %t: %v, want a match %t", c.reply.Status, c.reply.Code, c.reply.Unsigned, err, c.want)
+		}
+		srv.Script("release", provisionertest.Reply{Status: 403, Code: "forbidden"})
+		if err := cl.Release(context.Background(), got.DispatchID, "a reason"); errors.Is(err, provisioner.ErrMachineEndStopped) {
+			t.Errorf("a release's 403 matches: %v", err)
+		}
+	}
+}
+
+// TestAMachineEndHasOneTry sends one request for each failure that another request
+// sends again.
+func TestAMachineEndHasOneTry(t *testing.T) {
+	for _, rep := range []provisionertest.Reply{
+		{Status: 404, Code: "not_found", Unsigned: true},
+		{Status: 401, Unsigned: true},
+		{Status: 503, Code: "unavailable"},
+		{Status: 204, Drop: true},
+	} {
+		srv, c, _, _ := setup(t)
+		cl := claimed(t, srv, c, provisionertest.Work{})
+		cl.RunCode.Clear()
+		srv.Script("machine-end", rep)
+		if err := c.MachineEnd(context.Background(), cl.DispatchID, contracts.MachineEndGone); err == nil {
+			t.Errorf("%+v: no error", rep)
+		}
+		n := 0
+		for _, call := range srv.Calls() {
+			if call.Route == "machine-end" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%+v: %d tries", rep, n)
+		}
+	}
 }
 
 // TestTheModelsRefusals walks the fake's dispatches through the contract's refusals,
@@ -830,7 +932,7 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 		t.Errorf("a member twice: %v", err)
 	}
 
-	for _, route := range []provisionertest.Route{"dispatched", "release", "machine-log"} {
+	for _, route := range []provisionertest.Route{"dispatched", "release", "machine-log", "machine-end"} {
 		srv, c, _, _ = setup(t)
 		cl := claimed(t, srv, c, provisionertest.Work{})
 		cl.RunCode.Clear()

@@ -1,0 +1,31 @@
+# The start-data unit of a machine on EC2 that the provisioner makes. It runs
+# /usr/local/libexec/qory/qory-machine-data-aws-ec2 as root at boot, once, before
+# qory-machine.service. The script reads the EC2 user data, which is the start data,
+# and writes it to /run/qory-machine-start/start-data by the rule in the header of
+# qory-machine.service.
+#
+# Install it as /etc/systemd/system/qory-machine-data-aws-ec2.service, mode 0644, and
+# enable it, in a machine image for EC2.
+
+[Unit]
+Description=Write the start data from the EC2 user data
+Wants=network-online.target
+After=network-online.target
+Before=qory-machine.service
+# A failed or timed-out run of this unit powers the machine off.
+FailureAction=poweroff
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/qory/qory-machine-data-aws-ec2
+# Standard error goes to the console as well as the journal, so the machine log
+# contains the script's failure line.
+StandardError=journal+console
+# Each of the two curl calls takes at most 6 tries of 5 s and 5 waits of 1 s, 35 s, so
+# 70 s in all; 120 s leaves 50 s for the other steps.
+TimeoutStartSec=120
+
+[Install]
+# WantedBy, not RequiredBy: the start unit does not depend on this unit, so it runs,
+# prints its line and powers off whenever this unit is missing.
+WantedBy=qory-machine.service

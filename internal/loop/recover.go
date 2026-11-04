@@ -12,11 +12,14 @@ import (
 // machines once and acts on each journal entry as [journal.Recover] returns:
 //   - Release: the dispatch is released and its entry removed. When the release
 //     returns 409 machine_exists, the entry stays claimed for the watch.
-//   - Drop: the entry is removed. Its machine is deleting.
+//   - Deleting: the entry moves to the phase deleting with the machine id found, and
+//     the machine counts as logged. When the write fails, the entry stays as it is
+//     for the watch.
 //   - Resume: a claimed entry becomes made with the machine id found. Each made
-//     entry then gets dispatched. A dispatched entry stays for the watch. An entry
-//     whose machine is not listed stays too, and the watch removes it once
-//     [ListGrace] has passed since the start.
+//     entry then gets dispatched. A dispatched, deleting or ended entry stays for the
+//     watch.
+//     An entry whose machine is not listed stays too, and the watch cleans it up
+//     once [ListGrace] has passed since the start.
 //
 // It returns an error when the list fails or a resumed entry cannot be written.
 func (l *loop) recoverJournal(ctx context.Context) error {
@@ -32,9 +35,16 @@ func (l *loop) recoverJournal(ctx context.Context) error {
 		switch action.Kind {
 		case journal.Release:
 			l.releaseEntry(ctx, e.DispatchID, action.Reason)
-		case journal.Drop:
-			l.Log.Info("dropped a dispatch whose machine is deleting", attrs...)
-			l.remove(e.DispatchID)
+		case journal.Deleting:
+			next := e
+			next.Phase, next.MachineID = journal.PhaseDeleting, action.MachineID
+			attrs = append(attrs, slog.String("machine_id", next.MachineID))
+			l.setLogged(next.MachineID, true)
+			if err := l.Journal.Set(next); err != nil {
+				l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
+				continue
+			}
+			l.Log.Info("the machine of a recovered dispatch is deleting", attrs...)
 		case journal.Resume:
 			next := e
 			next.MachineID = action.MachineID

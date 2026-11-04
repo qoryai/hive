@@ -41,9 +41,9 @@ func stages(t *testing.T) []stage {
 // and the EC2 machine adapter for the image's platform, so one build makes the images
 // of linux/amd64 and linux/arm64. The image, the last stage, is on the pinned
 // distroless base, contains the adapter at /usr/local/bin/qory-machines-aws-ec2 and
-// the machine's start unit at /usr/share/qory-provisioner/machine/, runs as
-// 65532:65532, keeps its state directory in a volume, turns off IMDSv1 for an AWS SDK,
-// and runs qory-provisioner serve.
+// the machine's start unit and EC2 start-data unit at
+// /usr/share/qory-provisioner/machine/, runs as 65532:65532, keeps its state directory
+// in a volume, turns off IMDSv1 for an AWS SDK, and runs qory-provisioner serve.
 func TestDockerfileBuildsBothPrograms(t *testing.T) {
 	all := stages(t)
 	if len(all) != 2 {
@@ -77,6 +77,8 @@ func TestDockerfileBuildsBothPrograms(t *testing.T) {
 			"COPY --from=build /out/qory-machines-aws-ec2 /usr/local/bin/qory-machines-aws-ec2",
 			"COPY --chmod=0644 machine/qory-machine.service /usr/share/qory-provisioner/machine/qory-machine.service",
 			"COPY --chmod=0755 machine/qory-machine-start /usr/share/qory-provisioner/machine/qory-machine-start",
+			"COPY --chmod=0644 machine/qory-machine-data-aws-ec2.service /usr/share/qory-provisioner/machine/qory-machine-data-aws-ec2.service",
+			"COPY --chmod=0755 machine/qory-machine-data-aws-ec2 /usr/share/qory-provisioner/machine/qory-machine-data-aws-ec2",
 			"COPY --from=build --chown=65532:65532 /out/var/lib/ /var/lib/",
 			`VOLUME ["/var/lib/qory-provisioner"]`,
 			"ENV AWS_EC2_METADATA_V1_DISABLED=true",

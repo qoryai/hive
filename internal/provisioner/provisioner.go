@@ -1,7 +1,7 @@
 // Package provisioner is the provisioner's client of Qory Apiary's provisioner
 // contract, provisioner/v1, at [Revision]: it claims a request for one machine, posts
 // that the machine for a dispatch exists, again every minute while it lives, releases a
-// dispatch before that, and uploads the machine's log.
+// dispatch before that, uploads the machine's log, and reports the machine's removal.
 //
 // The client signs every request with the node pool's access key as Forager's accesskey
 // signs one, with X-Qory-Access-Key-Id, X-Qory-Instance-Id, X-Qory-Signature-Ed25519 and

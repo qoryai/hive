@@ -87,6 +87,27 @@ func (c *Client) MachineLog(ctx context.Context, dispatchID, log string, truncat
 	})
 }
 
+// MachineEnd sends POST /v1/dispatches/<dispatchID>/machine-end,
+// machine-end.schema.json: the result of deleting the machine the provisioner created
+// for the dispatch. state is [contracts.MachineEndDeleting], [contracts.MachineEndGone]
+// or [contracts.MachineEndDeleteFailed]. The request has one try and no retries, so a
+// Qory Apiary with no such route costs one request. Qory Apiary takes it any number of
+// times, before or after the dispatch ends. The answer is a signed 204. A refusal is a
+// [*Refusal]: [ErrForbidden], a dispatch that is unknown or of another node pool;
+// [ErrUnavailable]; [ErrNotFound]; or [ErrRateLimited]. A signed 400, 403 or 404 also
+// matches [ErrMachineEndStopped]. A machine end is never refused 410 gone or 409
+// lease_expired.
+func (c *Client) MachineEnd(ctx context.Context, dispatchID, state string) error {
+	what, err := ofDispatch("the machine end of ", dispatchID)
+	if err != nil {
+		return err
+	}
+	return c.sendToDispatch(ctx, request{
+		what: what, kind: kindMachineEnd, path: routeDispatches + dispatchID + "/machine-end", schema: "machine-end.schema.json", limit: MaxAnswer, timeout: RequestTimeout, once: true,
+		body: func(t string) any { return contracts.MachineEnd{Version: 1, Time: t, State: state} },
+	})
+}
+
 // cleanLog is log with each U+0000 replaced by U+FFFD, each run of bytes that is not
 // UTF-8 replaced by one U+FFFD, and each line that contains what looks like a secret
 // replaced by [hiddenLine]. A line ends after a line feed; the line feeds are kept.
@@ -171,15 +192,20 @@ func ofDispatch(prefix, dispatchID string) (string, error) {
 // toDispatch sends a request about one dispatch, whose id ofDispatch checked, with a
 // signed 204 as its answer.
 func (c *Client) toDispatch(ctx context.Context, what string, k kind, dispatchID, action, schema string, body func(string) any) error {
-	ans, err := c.do(ctx, request{
+	return c.sendToDispatch(ctx, request{
 		what: what, kind: k, path: routeDispatches + dispatchID + "/" + action, schema: schema, limit: MaxAnswer, timeout: RequestTimeout, body: body,
 	})
+}
+
+// sendToDispatch sends req, whose answer is a signed 204.
+func (c *Client) sendToDispatch(ctx context.Context, req request) error {
+	ans, err := c.do(ctx, req)
 	if err != nil {
 		return err
 	}
 	defer clear(ans.body)
 	if ans.status != http.StatusNoContent {
-		return c.refused(what, k, ans)
+		return c.refused(req.what, req.kind, ans)
 	}
 	return nil
 }

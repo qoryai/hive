@@ -7,6 +7,24 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Added
 
+- The start-data unit for EC2: `qory-machine-data-aws-ec2.service` and its script
+  `qory-machine-data-aws-ec2`. It runs before `qory-machine.service`, reads the EC2 user
+  data with IMDSv2, and writes it to `/run/qory-machine-start/start-data`. It fails
+  when the folder path is a link, is not a folder, or is a folder that another user
+  owns, and when a path exists at `start-data` before the write. When it fails, it
+  powers the machine off. The provisioner image contains both files in
+  `/usr/share/qory-provisioner/machine/`.
+- The provisioner tells Qory Apiary how each machine's removal went, with the signed
+  `POST /v1/dispatches/<id>/machine-end`. After each delete it sends `deleting` or
+  `gone`, and `delete_failed` when the delete fails. It sends `deleting` or
+  `delete_failed` once per change, and `gone` once the machine adapter reports that the
+  machine no longer exists. After a signed 400, 403 or 404, the provisioner sends no
+  more `machine-end` for that dispatch, and its deletes go on.
+- The provisioner keeps checking a machine after its delete. Every 60 seconds it sends
+  the delete again, also after a failed delete, until the machine adapter returns gone.
+- The journal of live dispatches has two more phases: `deleting`, for a machine whose
+  delete has not returned gone, and `ended`, for a machine that is gone while the post
+  of `gone` is pending.
 - The licence: `LICENSE`, the Apache License, Version 2.0; `NOTICE`; and
   `TRADEMARKS.md`, with the rules for using the name Qory.
 - The machine's start script, `qory-machine-start`, prints one line to standard error at
@@ -26,6 +44,35 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
+- The start script, `qory-machine-start`, reads the start data from the file
+  `/run/qory-machine-start/start-data`, which a start-data unit for the machine's vendor
+  writes, and deletes the file after the read. The script fails when the folder path is
+  a link, is not a folder, or is a folder that another user owns. It fails on a symbolic
+  link, on a file that is not a regular file, and on a file that root does not own, and
+  treats an empty file as missing. The header of `qory-machine.service` and the README
+  section "The machine image" describe how to write the file. Before, the script read
+  `machine: aws-ec2` from `/home/qory/.config/qory/forager.yaml` and fetched the EC2
+  user data itself, and the image needed curl and sed for the script. The lines about
+  `forager.yaml` are gone. The two lines about the token and user data requests moved to
+  the EC2 unit with the same words. In two lines, "The user data" now reads "The start
+  data".
+- A dispatch keeps its journal entry, and its place in `max_machines`, until the machine
+  adapter returns gone. Before, the entry left when the adapter accepted the delete. So
+  with `max_machines` of 1, the next run waits at least one more watch of 60 seconds,
+  and a delete that keeps failing holds its place while the provisioner retries it.
+- Each `machine-end` post has one try. After the first failed post in a watch, that
+  watch sends no more `machine-end`, and its deletes and `dispatched` go on. So a Qory
+  Apiary with no `machine-end` route costs one failed post per watch.
+- When the post of `gone` fails or waits for the next watch, the machine's entry stays
+  in the phase `ended`, which does not count toward `max_machines`. Each watch sends
+  `gone` again. After 24 hours the provisioner logs an error and removes the entry.
+- A post of `deleting` or `delete_failed` that keeps failing stops 24 hours after its
+  first failure. The provisioner logs an error, and a later state goes out as usual.
+- A machine that is deleting, or that is still not listed 5 minutes after its make, gets
+  a delete, and `gone` is posted for it. Before, the provisioner removed its entry with
+  no delete.
+- A listed machine with no journal entry and a key in the shape of a dispatch id gets a
+  journal entry, and `machine-end` as any other machine does.
 - The README describes Hive as vendor-agnostic: Hive reaches each hosting vendor through
   that vendor's machine adapter, by `contracts/machines/v1` of qoryai/integrations, and
   the AWS EC2 adapter is the one machine adapter in this repository. It adds the
@@ -62,6 +109,11 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Upgrading
 
+- In a machine image for EC2, install and enable `qory-machine-data-aws-ec2.service`
+  and its script, as the README section "The machine image" lists. Without the unit,
+  the start script prints "Install the start-data unit for this machine's vendor.
+  /run/qory-machine-start/start-data does not exist or is empty." and powers the
+  machine off.
 - Build the machine image with a qory that writes its status and error lines to the
   descriptor in `QORY_STATUS_FD`. With an earlier qory, the console and the machine log
   contain no line of qory run, and qory run's errors are only in the machine's journal,

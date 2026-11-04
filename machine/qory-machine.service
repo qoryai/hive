@@ -5,6 +5,23 @@
 # machine's lifetime ends.
 #
 # Install it as /etc/systemd/system/qory-machine.service, mode 0644, and enable it.
+# Install and enable the start-data unit for the image's vendor as well: on EC2,
+# qory-machine-data-aws-ec2.service and its script qory-machine-data-aws-ec2.
+#
+# The start data reaches the script in one file, /run/qory-machine-start/start-data.
+# A unit for the machine's vendor writes the file before this unit starts. A unit for
+# another vendor, a unit of the instance admin, cloud-init or a step on a bare host can
+# write it too. Each writer follows this rule:
+#   - Make the folder /run/qory-machine-start as root, mode 0700.
+#   - Write the start data to a temporary file in that folder, mode 0600, then rename
+#     the file to start-data. On failure, leave no file.
+#   - Finish before qory-machine.service starts. A systemd unit sets
+#     Before=qory-machine.service.
+# The script fails when the folder path is a link, is not a folder, or is a folder that
+# another user owns. It fails on a symbolic link, on a file that is not a regular file,
+# and on a file that root does not own. It treats an empty file as missing. It deletes
+# the file after the read. No file from an earlier boot remains: /run is a tmpfs, and
+# each machine boots once.
 
 [Unit]
 Description=Run qory on this machine, then power it off
@@ -27,8 +44,6 @@ ExecStart=/usr/local/libexec/qory/qory-machine-start
 # lines, its failure line and the status lines of qory run. Standard output goes to the
 # journal only; the script sends the rest of qory run's output there.
 StandardError=journal+console
-# Before READY, each of the two curl calls takes at most 6 tries of 5 s and 5 waits of
-# 1 s, 35 s, so 70 s in all; 120 s leaves 50 s for the other steps.
 TimeoutStartSec=120
 
 [Install]

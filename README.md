@@ -383,6 +383,44 @@ when you push to the branch `prerelease`, or when you run the workflow from the
 image to `ghcr.io/qoryai/hive` by digest, tags it `sha-` and the commit's first 7
 characters, and writes the digest in the run's summary.
 
+## The machine image
+
+Each machine that the provisioner makes boots from a machine image. The image needs two
+systemd units. Their files are in `machine/` in this repository, and in
+`/usr/share/qory-provisioner/machine/` in the provisioner image.
+
+1. Install the start unit, which runs qory and powers the machine off:
+   - `qory-machine.service` as `/etc/systemd/system/qory-machine.service`, mode 0644;
+   - `qory-machine-start` as `/usr/local/libexec/qory/qory-machine-start`, mode 0755.
+2. Install the start-data unit for the image's vendor. On EC2, it reads the start data
+   from the user data:
+   - `qory-machine-data-aws-ec2.service` as
+     `/etc/systemd/system/qory-machine-data-aws-ec2.service`, mode 0644;
+   - `qory-machine-data-aws-ec2` as `/usr/local/libexec/qory/qory-machine-data-aws-ec2`,
+     mode 0755.
+3. Enable both units:
+
+   ```
+   systemctl enable qory-machine.service qory-machine-data-aws-ec2.service
+   ```
+
+The start unit reads the start data from `/run/qory-machine-start/start-data`. A
+start-data unit, a unit of the instance admin, cloud-init, or a step on a bare host can
+write the file. Each writer follows this rule:
+
+- Make the folder `/run/qory-machine-start` as root, mode 0700.
+- Write the start data to a temporary file in that folder, mode 0600, then rename the
+  file to `start-data`. On failure, leave no file.
+- Finish before `qory-machine.service` starts. A systemd unit sets
+  `Before=qory-machine.service`.
+
+The start unit fails when the folder path is a link, is not a folder, or is a folder
+that another user owns. It fails on a symbolic link, on a file that is not a regular
+file, and on a file that root does not own. When the file is missing or empty, it prints
+"Install the start-data unit for this machine's vendor.
+/run/qory-machine-start/start-data does not exist or is empty." It deletes the file
+after the read. A failed start-data unit for EC2 powers the machine off.
+
 ## Licence
 
 Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). *Qory* is a trademark of

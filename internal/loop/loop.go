@@ -7,22 +7,28 @@
 // The loop has three parts. [Run] first runs the adapter's check and recovers the
 // journal of live dispatches after a restart. Then the claim path and the watch run in
 // parallel until the context ends:
-//   - The claim path claims a dispatch while the journal has fewer entries than
+//   - The claim path claims a dispatch while the journal has fewer machines than
 //     max_machines, records it, makes its machine and sends dispatched. When the
 //     make fails, it releases the dispatch. When the release returns 204 or 409
 //     lease_expired, it then uploads the make's error as the dispatch's machine log.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
-//     stopped, or that ran longer than its lifetime and 15 minutes. It removes the
-//     entry of a machine that is deleting, or that is still not listed 5 minutes
-//     after its make. It adopts the listed machine of a claimed entry that stays
-//     because its release returned machine_exists. It also cleans up each listed
-//     machine that has no journal entry.
+//     stopped, or that ran longer than its lifetime and 15 minutes. It also cleans up
+//     a machine that is deleting, or that is still not listed 5 minutes after its
+//     make, with no read of its log. It adopts the listed machine of a claimed entry
+//     that stays because its release returned machine_exists. It also cleans up each
+//     listed machine that has no journal entry.
 //
 // To clean up a machine, the loop reads the machine's log through the adapter,
-// uploads it to Qory Apiary, deletes the machine and removes the journal entry. Each
-// step runs after a failure of the step before it, and a failed delete runs again at
-// the next watch.
+// uploads it to Qory Apiary, deletes the machine and sends machine-end, which tells
+// Qory Apiary how the removal went. Each step runs after a failure of the step before
+// it. When the delete returns gone, the loop sends gone and removes the journal entry.
+// Otherwise the entry moves to the phase deleting, in which it still counts toward
+// max_machines, and each watch cleans up the machine again. A log read that failed
+// runs again only until a delete is accepted. When the post of gone fails, the entry
+// moves to the phase ended, which frees its place in max_machines, and each watch sends
+// gone again. Each post of machine-end is one try, the first failure pauses the posts
+// until the next watch, and a post that keeps failing stops at [MachineEndLimit].
 //
 // When the context ends, the claim path stops claiming. A claim that has no make yet
 // is released, and a make in flight finishes and its machine is recorded. The loop
@@ -65,6 +71,13 @@ const (
 	// counts from the make that returned the machine, or from the start of [Run] for
 	// an entry that the journal had at the start.
 	ListGrace = 5 * time.Minute
+	// MachineEndLimit is the time during which the loop keeps sending one failing
+	// machine-end. For gone, it counts from the first gone of an ended entry. For
+	// deleting and delete_failed, it counts from the first failure of that state. An
+	// ended entry that the journal had at the start counts from the start of [Run], and
+	// a restart starts each count again. After it, the state is dropped and an ended entry
+	// leaves the journal, as the contract allows for a call that keeps failing.
+	MachineEndLimit = 24 * time.Hour
 	// LongWait is the wait before the next claim after a make that failed with the
 	// kind limit or defect, after the start data of a claim could not be built, and
 	// after a claim for another pool than the provisioner's.
@@ -88,6 +101,12 @@ var (
 	// ErrMachineExists is 409 machine_exists: a release came after dispatched, or after
 	// the machine redeemed its run code.
 	ErrMachineExists = errors.New("409 machine_exists")
+	// ErrMachineEndDone is a signed answer to machine-end that breaks the contract. The
+	// post counts as done.
+	ErrMachineEndDone = errors.New("machine-end is done")
+	// ErrMachineEndStopped is a signed 400, 403 or 404 to machine-end. The post counts as
+	// done, the dispatch gets no more machine-end, and its deletes go on.
+	ErrMachineEndStopped = errors.New("machine-end is stopped for the dispatch")
 )
 
 // Claim is a claim answer: a request for one machine.
@@ -109,7 +128,7 @@ type Claim struct {
 	MaxLifetimeMinutes int
 }
 
-// Apiary is the provisioner's client of Qory Apiary: the four requests of the
+// Apiary is the provisioner's client of Qory Apiary: the five requests of the
 // provisioner contract that the loop sends.
 type Apiary interface {
 	// Claim claims a request for one machine. It returns false and no error when no
@@ -125,6 +144,10 @@ type Apiary interface {
 	// that made no machine. truncated is true when the log is the last part of a
 	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
+	// MachineEnd sends how the removal of the dispatch's machine went, with one try and
+	// no retries: deleting, gone or delete_failed. Its error wraps [ErrMachineEndDone] or
+	// [ErrMachineEndStopped] for those answers.
+	MachineEnd(ctx context.Context, dispatchID, state string) error
 }
 
 // Journal is the journal of live dispatches, as [journal.Journal] keeps it.
@@ -184,7 +207,8 @@ type Config struct {
 	Journal Journal
 	// PoolID is the node pool of the provisioner's access key, np_ and 16 characters.
 	PoolID string
-	// MaxMachines is max_machines of the settings: the most journal entries at once.
+	// MaxMachines is max_machines of the settings: the most journal entries at once,
+	// not counting those in the phase ended.
 	MaxMachines int
 	// GatewayAddress is gateway_address of the settings, which the start data contains.
 	GatewayAddress netip.Addr
@@ -200,12 +224,15 @@ type Config struct {
 // when the journal cannot be written before a make or after it.
 func Run(ctx context.Context, cfg Config) error {
 	l := &loop{
-		Config:  cfg,
-		busy:    map[string]bool{},
-		logged:  map[string]bool{},
-		freed:   make(chan struct{}, 1),
-		made:    map[string]time.Time{},
-		claimed: map[string]time.Time{},
+		Config:    cfg,
+		busy:      map[string]bool{},
+		logged:    map[string]bool{},
+		sentEnd:   map[string]string{},
+		failedEnd: map[string]endFailure{},
+		freed:     make(chan struct{}, 1),
+		made:      map[string]time.Time{},
+		claimed:   map[string]time.Time{},
+		gone:      map[string]time.Time{},
 	}
 	if l.Clock == nil {
 		l.Clock = systemClock{}
@@ -227,23 +254,42 @@ func Run(ctx context.Context, cfg Config) error {
 	return err
 }
 
+// endFailure is one machine-end state that keeps failing, and when it first failed.
+type endFailure struct {
+	state string
+	at    time.Time
+}
+
 // loop is one run of the loop.
 type loop struct {
 	Config
 	mu sync.Mutex
 	// busy are the dispatches that the claim path works on. The watch skips them.
 	busy map[string]bool
-	// logged are the machine ids whose log is uploaded, or whose upload failed, in a
-	// cleanup whose delete has not succeeded yet. A later try of the delete does not
-	// upload the log again.
+	// logged are the machine ids that get no more log reads in a cleanup: the read
+	// succeeded, a delete was accepted, or the machine reached its cleanup with no log
+	// read. An id leaves when its entry leaves the journal.
 	logged map[string]bool
-	// freed receives a value when an entry leaves the journal.
+	// sentEnd is the last machine-end state done for each entry, so that a state goes
+	// out once per change, or [machineEndStopped]. A restart starts with no record and
+	// sends the state once more.
+	sentEnd map[string]string
+	// failedEnd is the deleting or delete_failed that each entry has not got done, with
+	// the time of its first failure.
+	failedEnd map[string]endFailure
+	// endsPaused is true after a failed machine-end, until the next watch starts. The
+	// claim path reads and sets it too.
+	endsPaused bool
+	// freed receives a value when an entry leaves the journal or moves to the phase
+	// ended.
 	freed chan struct{}
 	// made is the time of the make that returned each entry's machine, and claimed
 	// the time of each entry's claim. An entry that the journal had at the start has
-	// no time in them and counts from start.
+	// no time in them and counts from start. gone is the time of each ended entry's
+	// first gone, with the same rule.
 	made    map[string]time.Time
 	claimed map[string]time.Time
+	gone    map[string]time.Time
 	start   time.Time
 }
 
@@ -253,6 +299,9 @@ func (l *loop) madeAt(id string) time.Time { return l.timeOf(l.made, id) }
 // claimedAt is the time of the claim of the dispatch id, or the start of Run, for an
 // entry that the journal had at the start.
 func (l *loop) claimedAt(id string) time.Time { return l.timeOf(l.claimed, id) }
+
+// goneAt is the time from which the [MachineEndLimit] of an ended entry counts.
+func (l *loop) goneAt(id string) time.Time { return l.timeOf(l.gone, id) }
 
 // timeOf is the time of the dispatch id in times, or the start.
 func (l *loop) timeOf(times map[string]time.Time, id string) time.Time {
@@ -301,20 +350,30 @@ func (l *loop) isBusy(id string) bool {
 // remove takes the dispatch out of the journal. Once the entry has left the journal's
 // list, the claim path may claim again, also when Remove returned an error after the
 // entry left, as when syncing the folder fails. A failure is logged. When the entry
-// is still in the list, it stays, and the next watch acts on it again.
-func (l *loop) remove(id string) {
+// is still in the list, it stays, and the next watch acts on it again. remove returns
+// whether the entry has left the list.
+func (l *loop) remove(id string) bool {
 	if err := l.Journal.Remove(id); err != nil {
 		l.Log.Error("removing a dispatch from the journal failed", slog.String("dispatch_id", id), errorAttr(err, nil))
 	}
 	for _, e := range l.Journal.List() {
 		if e.DispatchID == id {
-			return
+			return false
 		}
 	}
 	l.mu.Lock()
 	delete(l.made, id)
 	delete(l.claimed, id)
+	delete(l.gone, id)
+	delete(l.sentEnd, id)
+	delete(l.failedEnd, id)
 	l.mu.Unlock()
+	l.free()
+	return true
+}
+
+// free signals the claim path that an entry no longer counts toward MaxMachines.
+func (l *loop) free() {
 	select {
 	case l.freed <- struct{}{}:
 	default:

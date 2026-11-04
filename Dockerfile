@@ -55,11 +55,17 @@ FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55
 COPY --from=build /out/qory-provisioner /qory-provisioner
 COPY --from=build /out/qory-machines-aws-ec2 /usr/local/bin/qory-machines-aws-ec2
 
-# The start unit of each machine that the provisioner makes. The provisioner does not run
-# these files; a machine image installs them as /etc/systemd/system/qory-machine.service
-# and /usr/local/libexec/qory/qory-machine-start.
+# The start unit of each machine that the provisioner makes, and the start-data unit for
+# EC2. The provisioner does not run these files. A machine image installs the start unit
+# as /etc/systemd/system/qory-machine.service and
+# /usr/local/libexec/qory/qory-machine-start. A machine image for EC2 also installs
+# /etc/systemd/system/qory-machine-data-aws-ec2.service and
+# /usr/local/libexec/qory/qory-machine-data-aws-ec2. The machine image enables both
+# units.
 COPY --chmod=0644 machine/qory-machine.service /usr/share/qory-provisioner/machine/qory-machine.service
 COPY --chmod=0755 machine/qory-machine-start /usr/share/qory-provisioner/machine/qory-machine-start
+COPY --chmod=0644 machine/qory-machine-data-aws-ec2.service /usr/share/qory-provisioner/machine/qory-machine-data-aws-ec2.service
+COPY --chmod=0755 machine/qory-machine-data-aws-ec2 /usr/share/qory-provisioner/machine/qory-machine-data-aws-ec2
 
 # The state directory. A named volume mounted here starts as a copy of this directory,
 # with its owner and mode.
