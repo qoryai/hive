@@ -23,7 +23,8 @@ This repository builds two programs:
 
 `serve` reads the settings file at `--settings`, by default
 `/etc/qory-provisioner/settings.json`. It keeps the access key, the record of the
-enrolment, and the journal of live dispatches in the state folder at `--state-dir`, by
+enrolment, the instance id and the journal of live dispatches in the state folder at
+`--state-dir`, by
 default `/var/lib/qory-provisioner`. The enrolment is the step at the first start that
 makes the access key and registers it with Qory Apiary as the key of one node pool; see
 [Enrol the access key](#enrol-the-access-key). The settings file is one JSON object:
@@ -68,10 +69,11 @@ the answer from its standard output, in the documents of `contracts/machines/v1`
 `serve` starts, it runs `check` before it claims a dispatch, and it exits with status 1
 when `check` fails.
 
-The provisioner copies the adapter's standard error, line by line, to its standard
-error, where it writes its log. It cuts a line at 4096 bytes, and it replaces a line
-that contains what looks like a run code, or a piece of the start data that it passes
-to a machine, with a fixed text. The adapter runs with the provisioner's environment,
+The provisioner copies the adapter's standard error, line by line, to the
+provisioner's standard error, which also has the provisioner's log. The provisioner
+cuts each line at 4096 bytes. It replaces a line with a fixed text when the line
+contains what looks like a run code, or a piece of the start data that the provisioner
+passes to a machine. The adapter runs with the provisioner's environment,
 without any variable whose name starts with `QORY_`. The provisioner kills the adapter
 when `make` runs longer than 2 minutes, or another command longer than 1 minute.
 
@@ -105,9 +107,9 @@ from the settings file".
 
 While the file is missing, `serve` logs one line that starts with `the enrolment code
 file is missing` and reads the file again every 10 seconds. It reads at most 79 bytes
-and stops on a file longer than 78 bytes, the longest code and a newline. It removes
-one trailing newline. A code for another kind of node stops `serve` before it sends a
-request.
+and exits with status 1 on a file longer than 78 bytes, the longest code and a
+newline. It removes one trailing newline. When the code is for another kind of node,
+`serve` exits with status 1 before it sends a request.
 
 Before `serve` reads the file, it follows the path one link at a time, and checks the
 file, each link on the way, and each folder above them:
@@ -139,12 +141,14 @@ The adapter reads the region from `AWS_REGION`, or else from the instance metada
 the EC2 instance that it runs on. `AWS_DEFAULT_REGION` has no effect. The adapter uses
 only the credentials of the host's instance role, which it reads from the instance
 metadata service, and calls EC2 only at the region's standard endpoint. It reads no
-AWS config or credentials file. When the environment sets, to a value that is not
-empty, a variable that selects other credentials, a profile or a config or credentials
-file, another metadata address, another endpoint or another certificate authority, or
-that turns off the instance metadata, such as `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
-`AWS_EC2_METADATA_DISABLED` or `AWS_ENDPOINT_URL`, each command fails, and the error
-starts with `Unset` and the variable's name.
+AWS config or credentials file.
+
+Each command fails when the environment sets one of these variables to a value that is
+not empty: a variable that selects other credentials, a profile, or a config or
+credentials file, another metadata address, another endpoint or another certificate
+authority, or that turns off the instance metadata. Examples are `AWS_ACCESS_KEY_ID`,
+`AWS_PROFILE`, `AWS_EC2_METADATA_DISABLED` and `AWS_ENDPOINT_URL`. The error starts
+with `Unset` and the variable's name.
 
 ### Settings
 
