@@ -6,10 +6,13 @@
 # /var/lib/qory-machine/work, and powers the machine off when qory run exits, when any
 # step fails, or when the machine's lifetime ends.
 #
-# The machine image must contain bash 5, curl, jq, iptables, ip6tables, runuser (from
-# util-linux), systemd (shutdown, systemctl and systemd-notify), sed, and the coreutils
-# base64, chmod, chown, head, mkdir, rm and tr. It must have the user qory, and
-# /home/qory/.config/qory/forager.yaml with the line machine: aws-ec2.
+# The machine image must contain bash 5, jq, iptables, ip6tables, runuser (from
+# util-linux), systemd (shutdown, systemctl and systemd-notify), and the coreutils
+# base64, chmod, chown, head, mkdir, rm and tr. It must have the user qory.
+#
+# The script reads the start data from the file /run/qory-machine-start/start-data, and
+# deletes the file after the read. A unit for the machine's vendor writes the file
+# before this script runs, by the rule in the header of qory-machine.service.
 #
 # The start data, version 1, is one JSON object, with max_lifetime_minutes an integer
 # from 15 to 1470:
@@ -17,14 +20,15 @@
 #
 # The run code, the engine proxy password and the start data stay in shell variables and
 # pipes. The run code and the password reach no output, no command argument, and no file
-# except /run/qory-machine/run-code, /etc/docker/daemon.json and
-# /etc/qory/engine-proxy.json. Of the start data, only the gateway URL, the address and
-# the lifetime leave the script: the URL in the arguments of qory run, the URL's host and
-# the address in /etc/hosts, and the lifetime in the arguments of shutdown. Each failure
-# prints one line to stderr; the line starts with its fix and contains no secret. When
-# docker.service fails to start, the last 20 lines of its journal from this boot go to
-# stderr before that line, each with the password replaced by [hidden], and without the
-# lines that contain qak_, qrk_ or qecr_ in any case.
+# except /run/qory-machine-start/start-data, /run/qory-machine/run-code,
+# /etc/docker/daemon.json and /etc/qory/engine-proxy.json. Of the start data, only the
+# gateway URL, the address and the lifetime leave the script: the URL in the arguments
+# of qory run, the URL's host and the address in /etc/hosts, and the lifetime in the
+# arguments of shutdown. Each failure prints one line to stderr; the line starts with
+# its fix and contains no secret. When docker.service fails to start, the last 20 lines
+# of its journal from this boot go to stderr before that line, each with the password
+# replaced by [hidden], and without the lines that contain qak_, qrk_ or qecr_ in any
+# case.
 #
 # At each stage, the script prints one line to stderr:
 # "qory-machine-start: <UTC time> <stage>". It prints start data read, firewall set,
@@ -51,7 +55,8 @@ umask 077
 export LC_ALL=C
 
 root=${QORY_MACHINE_ROOT:-}
-forager_yaml=$root/home/qory/.config/qory/forager.yaml
+data_dir=$root/run/qory-machine-start
+data_file=$data_dir/start-data
 home=$root/home/qory
 urandom=$root/dev/urandom
 hosts=$root/etc/hosts
@@ -65,12 +70,12 @@ run_code_file=$run_code_dir/run-code
 state_dir=$root/var/lib/qory-machine
 work_dir=$state_dir/work
 
-# Every exit, after a failure, a signal or the end of qory run, removes the run code and
-# powers the machine off.
+# Every exit, after a failure, a signal or the end of qory run, removes the start data
+# file and the run code, and powers the machine off.
 on_exit() {
 	local status=$?
 	set +e
-	rm -f -- "$run_code_file" 2>/dev/null
+	rm -f -- "$data_file" "$run_code_file" 2>/dev/null
 	if ! systemctl poweroff 2>/dev/null; then
 		printf '%s\n' "Power this machine off with systemctl poweroff. The power-off request failed." >&2
 	fi
@@ -114,7 +119,7 @@ docker_log() {
 	done < <(journalctl -b -u docker.service -n 20 --no-pager -o cat 2>/dev/null || true)
 }
 
-for tool in base64 chmod chown curl head ip6tables iptables jq mkdir rm runuser sed shutdown systemctl systemd-notify tr; do
+for tool in base64 chmod chown head ip6tables iptables jq mkdir rm runuser shutdown systemctl systemd-notify tr; do
 	command -v "$tool" >/dev/null || fail "Install $tool in the machine image. This script runs $tool, and it is not on PATH."
 done
 
@@ -165,38 +170,23 @@ is_hostname() {
 	[[ ${#1} -le 253 && $1 =~ ^($label\.)*$label$ ]]
 }
 
-# 1. Read the start data, once.
-[[ -r $forager_yaml ]] || fail "Write machine: aws-ec2 into $forager_yaml. The file does not exist or is not readable."
-# Each machine line comes out of sed as = and its value. A line without a space after
-# the colon, such as machine:aws-ec2, is no machine key in YAML.
-machine_lines=$(sed -n -E 's/^machine:([[:space:]]+|$)/=/p' "$forager_yaml" 2>/dev/null) ||
-	fail "Write machine: aws-ec2 into $forager_yaml. Reading the file failed."
-[[ -n $machine_lines ]] || fail "Add the line machine: aws-ec2 to $forager_yaml. The file has no machine key."
-[[ $machine_lines != *$'\n'* ]] || fail "Keep one machine line in $forager_yaml. The file has more than one."
-machine=${machine_lines#=}
-machine=${machine%%#*}
-machine=${machine%"${machine##*[![:space:]]}"}
-if [[ $machine =~ ^\"(.*)\"$ || $machine =~ ^\'(.*)\'$ ]]; then
-	machine=${BASH_REMATCH[1]}
+# 1. Read the start data, once. The tests of -e, -f, -O and -s follow a symbolic link,
+# so the test of -L comes first. Under qory-machine.service the script runs as root, so
+# -O is true for a file that root owns.
+missing="Install the start-data unit for this machine's vendor. $data_file does not exist."
+if [[ -L $data_file ]]; then
+	fail "Write the start data to $data_file as a regular file. The path is a symbolic link."
+elif [[ ! -e $data_file ]]; then
+	fail "$missing"
+elif [[ ! -f $data_file ]]; then
+	fail "Write the start data to $data_file as a regular file. The path is not a regular file."
+elif [[ ! -O $data_file ]]; then
+	fail "Write $data_file as root. Another user owns the file."
+elif [[ ! -s $data_file ]]; then
+	fail "$missing"
 fi
-case $machine in
-aws-ec2)
-	# IMDSv2: a token from a PUT, then the user data with that token. The retries cover
-	# the seconds after boot before the metadata service accepts connections.
-	curl_options=(--silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5)
-	token=$(curl "${curl_options[@]}" -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
-		http://169.254.169.254/latest/api/token 2>/dev/null) ||
-		fail "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."
-	# The token reaches curl on stdin, so it is no argument.
-	data=$(printf 'X-aws-ec2-metadata-token: %s\n' "$token" |
-		curl "${curl_options[@]}" -H @- http://169.254.169.254/latest/user-data 2>/dev/null) ||
-		fail "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."
-	unset token
-	;;
-*)
-	fail "Set machine: aws-ec2 in $forager_yaml. This script reads start data only for aws-ec2, and the file sets machine to $(printf '%q' "$machine")."
-	;;
-esac
+{ data=$(<"$data_file"); } 2>/dev/null || fail "Check that root can read $data_file. Reading the file failed."
+rm -f -- "$data_file" 2>/dev/null || fail "Check that root can write $data_dir. Removing $data_file failed."
 
 # Valid start data has no backslash. An escape such as \u0073 in a member name would
 # give jq a member that the text checks below do not count.
@@ -269,8 +259,8 @@ if [[ $problem == ok ]] && ! is_ipv4 "$address" && ! is_ipv6 "$address"; then
 fi
 case $problem in
 ok) ;;
-json) fail "Launch this machine with start data that is one JSON object. The user data is not one JSON object." ;;
-escape) fail "Write the start data without a backslash. Valid start data has no escape sequence, and the user data contains a backslash." ;;
+json) fail "Launch this machine with start data that is one JSON object. The start data is not one JSON object." ;;
+escape) fail "Write the start data without a backslash. Valid start data has no escape sequence, and the start data contains a backslash." ;;
 member) fail "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address." ;;
 version) fail "Set version to 1 in the start data. This script reads only start data version 1." ;;
 lifetime) fail "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer." ;;

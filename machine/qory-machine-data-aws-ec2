@@ -1,0 +1,73 @@
+#!/bin/bash
+# qory-machine-data-aws-ec2: the script of the start-data unit on EC2, run as root by
+# qory-machine-data-aws-ec2.service at boot, once, before qory-machine.service. It reads
+# the EC2 user data, which is the start data, from the instance metadata service with
+# IMDSv2, and writes it to /run/qory-machine-start/start-data by the rule in the header
+# of qory-machine.service.
+#
+# The machine image must contain bash 5, curl, and the coreutils chmod, mkdir, mktemp,
+# mv and rm.
+#
+# The token and the start data reach no output and no command argument. The token
+# reaches curl on stdin, and the start data goes from curl's stdout into a temporary
+# file in /run/qory-machine-start, which the script then renames to start-data. Each
+# failure prints one line to stderr; the line starts with its fix and contains no
+# secret. After a failure or a signal, the script removes the temporary file, so it
+# leaves no start-data file.
+#
+# QORY_MACHINE_ROOT, when set, is a folder that every path below is placed under. The
+# tests set it; qory-machine-data-aws-ec2.service leaves it unset.
+
+set -euo pipefail
+umask 077
+export LC_ALL=C
+
+root=${QORY_MACHINE_ROOT:-}
+data_dir=$root/run/qory-machine-start
+data_file=$data_dir/start-data
+tmp=
+
+on_exit() {
+	local status=$?
+	set +e
+	if [[ -n $tmp ]]; then
+		rm -f -- "$tmp" 2>/dev/null
+	fi
+	exit "$status"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+for tool in chmod curl mkdir mktemp mv rm; do
+	command -v "$tool" >/dev/null || fail "Install $tool in the machine image. This script runs $tool, and it is not on PATH."
+done
+
+# IMDSv2: a token from a PUT, then the user data with that token. The retries cover the
+# seconds after boot before the metadata service accepts connections.
+curl_options=(--silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5)
+token=$(curl "${curl_options[@]}" -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+	http://169.254.169.254/latest/api/token 2>/dev/null) ||
+	fail "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."
+
+{ mkdir -p -m 0700 "$data_dir" && chmod 0700 "$data_dir"; } 2>/dev/null ||
+	fail "Check that root can write $root/run. Making $data_dir failed."
+# mktemp makes the file with mode 0600. No other user can write in the folder, so the
+# rename below replaces start-data or makes it.
+tmp=$(mktemp "$data_dir/.start-data.XXXXXX" 2>/dev/null) ||
+	fail "Check that root can write $data_dir. Making a temporary file in the folder failed."
+
+# The token reaches curl on stdin, so it is no argument.
+printf 'X-aws-ec2-metadata-token: %s\n' "$token" |
+	curl "${curl_options[@]}" -H @- http://169.254.169.254/latest/user-data 2>/dev/null >"$tmp" ||
+	fail "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."
+unset token
+
+mv -f -- "$tmp" "$data_file" 2>/dev/null || fail "Check that root can write $data_dir. Renaming $tmp to $data_file failed."
+tmp=

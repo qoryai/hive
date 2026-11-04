@@ -1,6 +1,8 @@
-// Package machine_test has the tests of the machine's start unit: qory-machine.service
-// and the script qory-machine-start. The tests run the script under a temporary root
-// folder, with stubs in place of every command that changes the computer.
+// Package machine_test has the tests of the machine's start unit, qory-machine.service
+// and the script qory-machine-start, and of the start-data unit for EC2,
+// qory-machine-data-aws-ec2.service and the script qory-machine-data-aws-ec2. The tests
+// run each script under a temporary root folder, with stubs in place of every command
+// that changes the computer.
 package machine_test
 
 import (
@@ -16,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -29,8 +32,8 @@ const (
 	// gatewayURL and gatewayAddress are the gateway in the start data.
 	gatewayURL     = "https://gateway.example.com:8443"
 	gatewayAddress = "10.0.1.5"
-	// forager is the machine's forager.yaml.
-	forager = "machine: aws-ec2\nwall:\n  engine_proxy_file: /etc/qory/engine-proxy.json\n"
+	// handOff is the start data file under the root folder.
+	handOff = "/run/qory-machine-start/start-data"
 )
 
 // dangerous are the commands that change the computer, start a service, or reach the
@@ -44,17 +47,19 @@ var dangerous = []string{
 
 // tools are the real commands that the script and the stubs run. The tools folder has a
 // link to each.
-var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "rm", "sed", "tr"}
+var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "mktemp", "mv", "rm", "tr"}
 
 // stub is the script behind every stub. It appends its name and arguments to
 // $STUB_LOG, one line per call. The curl stub returns $STUB_TOKEN for the token PUT and
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
-// stdin. The runuser stub logs HOME, NOTIFY_SOCKET, QORY_STATUS_FD and the working
-// directory, and links the run code file to $STUB_KEEP, so the test can read it after
-// the script removes it. With $STUB_QORY_OUTPUT set, it writes one line to the
-// descriptor in QORY_STATUS_FD and one line to stderr, as qory run does. With
-// $STUB_TERM set, it sends SIGTERM to the script. The journalctl stub
-// prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one stub exit with an error.
+// stdin. With $STUB_TERM set, the curl stub of the user data sends SIGTERM to the
+// script. The runuser stub logs HOME, NOTIFY_SOCKET, QORY_STATUS_FD, the working
+// directory and whether the start data file exists, and links the run code file to
+// $STUB_KEEP, so the test can read it after the script removes it. With
+// $STUB_QORY_OUTPUT set, it writes one line to the descriptor in QORY_STATUS_FD and one
+// line to stderr, as qory run does. With $STUB_TERM set, it sends SIGTERM to the
+// script. The journalctl stub prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one
+// stub exit with an error.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
@@ -70,6 +75,7 @@ curl)
 		printf 'curl-stdin %s\n' "$header" >>"$STUB_LOG"
 		[[ -z ${STUB_FAIL_USERDATA:-} ]] || exit 22
 		printf '%s' "$(<"$STUB_USERDATA")"
+		[[ -z ${STUB_TERM:-} ]] || kill -TERM "$PPID"
 		;;
 	esac
 	;;
@@ -95,6 +101,11 @@ runuser)
 	printf 'runuser-notify-socket %s\n' "${NOTIFY_SOCKET-unset}" >>"$STUB_LOG"
 	printf 'runuser-pwd %s\n' "$PWD" >>"$STUB_LOG"
 	printf 'runuser-status-fd %s\n' "${QORY_STATUS_FD-unset}" >>"$STUB_LOG"
+	if [[ -e $QORY_MACHINE_ROOT/run/qory-machine-start/start-data ]]; then
+		printf 'runuser-start-data present\n' >>"$STUB_LOG"
+	else
+		printf 'runuser-start-data absent\n' >>"$STUB_LOG"
+	fi
 	if [[ -n ${STUB_QORY_OUTPUT:-} ]]; then
 		printf '%s\n' "qory run: a status line" >&"$QORY_STATUS_FD"
 		printf '%s\n' "agent: a line of the agent's output" >&2
@@ -179,33 +190,49 @@ func commands(t *testing.T, sh string) string {
 	return path
 }
 
-// env is one run of the script: its root folder, the files of the stubs, and PATH.
+// env is one run of a script: its root folder, the start data file under it, the files
+// of the stubs, and PATH.
 type env struct {
-	root, userData, keep, log, path string
+	root, data, userData, keep, log, path string
+	// dataStays is set for a run after which the start data file stays.
+	dataStays bool
 }
 
-// newEnv makes a root folder with forager.yaml, /etc/hosts, /dev/urandom and /var/lib,
-// and a user data file with valid start data.
+// newEnv makes a root folder with /home/qory, /etc/hosts, /dev/urandom and /var/lib,
+// and the start data file with valid start data, mode 0600, in a folder of mode 0700.
+// It also makes a user data file for the curl stub, with valid start data.
 func newEnv(t *testing.T, path string) *env {
 	t.Helper()
 	dir := t.TempDir()
 	e := &env{
 		root:     filepath.Join(dir, "root"),
+		data:     filepath.Join(dir, "root"+handOff),
 		userData: filepath.Join(dir, "user-data"),
 		keep:     filepath.Join(dir, "kept-run-code"),
 		log:      filepath.Join(dir, "stub.log"),
 		path:     path,
 	}
-	for _, d := range []string{"/home/qory/.config/qory", "/etc", "/run", "/var/lib", "/dev"} {
+	for _, d := range []string{"/home/qory", "/etc", "/run", "/var/lib", "/dev"} {
 		if err := os.MkdirAll(e.root+d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write(t, e.root+"/home/qory/.config/qory/forager.yaml", forager)
+	if err := os.Mkdir(filepath.Dir(e.data), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	write(t, e.root+"/etc/hosts", "127.0.0.1 localhost\n")
 	write(t, e.root+"/dev/urandom", string(randomBytes())+"more bytes after the 32 that head reads")
+	e.writeData(t, startData(runCode, gatewayURL, gatewayAddress, 60))
 	write(t, e.userData, startData(runCode, gatewayURL, gatewayAddress, 60))
 	return e
+}
+
+// writeData writes content to the start data file, mode 0600.
+func (e *env) writeData(t *testing.T, content string) {
+	t.Helper()
+	if err := os.WriteFile(e.data, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func write(t *testing.T, path, content string) {
@@ -271,12 +298,31 @@ func (e *env) environ(vars ...string) []string {
 	}, vars...)
 }
 
-// run runs the script once and checks what every run must leave: no secret marker in
-// stdout, stderr or the stubs' arguments, no token marker in stdout or stderr, no run
-// code file, and systemctl poweroff as the last command.
+// run runs qory-machine-start once and checks what every run must leave: no secret
+// marker in stdout, stderr or the stubs' arguments, no token marker in stdout or stderr,
+// no run code file, no start data file unless dataStays is set, and systemctl poweroff
+// as the last command. A folder at the start data file's path may stay, since rm -f
+// does not remove a folder.
 func (e *env) run(t *testing.T, sh string, vars ...string) result {
 	t.Helper()
-	cmd := exec.Command(sh, "qory-machine-start")
+	r := e.runScript(t, sh, "qory-machine-start", vars...)
+	if _, err := os.Lstat(e.root + "/run/qory-machine/run-code"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the run code file exists after the script exits: %v", err)
+	}
+	if info, err := os.Lstat(e.data); !e.dataStays && !errors.Is(err, fs.ErrNotExist) && (err != nil || !info.IsDir()) {
+		t.Errorf("the start data file exists after the script exits: %v", err)
+	}
+	if got := r.log[len(r.log)-1]; got != "systemctl poweroff" {
+		t.Errorf("the last command is %q, want systemctl poweroff", got)
+	}
+	return r
+}
+
+// runScript runs script once and checks that no secret marker is in stdout, stderr or
+// the stubs' arguments, and that no token marker is in stdout or stderr.
+func (e *env) runScript(t *testing.T, sh, script string, vars ...string) result {
+	t.Helper()
+	cmd := exec.Command(sh, script)
 	cmd.Env = e.environ(vars...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -324,12 +370,6 @@ func (e *env) run(t *testing.T, sh string, vars ...string) result {
 			t.Errorf("%s contains the token marker %s:\n%s", name, token, out)
 		}
 	}
-	if _, err := os.Lstat(e.root + "/run/qory-machine/run-code"); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("the run code file exists after the script exits: %v", err)
-	}
-	if got := r.log[len(r.log)-1]; got != "systemctl poweroff" {
-		t.Errorf("the last command is %q, want systemctl poweroff", got)
-	}
 	return r
 }
 
@@ -357,30 +397,30 @@ func read(t *testing.T, path string) string {
 	return string(b)
 }
 
-// TestStartUnitRunsQory follows one boot: the script reads the start data, drops the
-// metadata service's packets, writes the hosts line, schedules the power-off at the end
-// of the lifetime, writes the engine proxy files, starts docker.service, runs qory with
-// the run code file in the working folder, and powers the machine off.
+// TestStartUnitRunsQory follows one boot: the script reads the start data file and
+// deletes it, drops the metadata service's packets, writes the hosts line, schedules the
+// power-off at the end of the lifetime, writes the engine proxy files, starts
+// docker.service, runs qory with the run code file in the working folder, and powers the
+// machine off.
 func TestStartUnitRunsQory(t *testing.T) {
 	sh := bash(t)
 	path := commands(t, sh)
 	cases := []struct {
-		name, forager, url, address, hostsLine, daemonJSON string
-		lifetime                                           int
-		wantDaemon                                         map[string]any
+		name, url, address, hostsLine, daemonJSON string
+		lifetime                                  int
+		wantDaemon                                map[string]any
 	}{
-		{name: "IPv4", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
-		{name: "lifetime 15", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 15},
-		{name: "lifetime 1470", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 1470},
-		{name: "IPv6, no port", forager: forager, url: "https://gateway.example.com", address: "fd00:ec2::5", hostsLine: "fd00:ec2::5 gateway.example.com"},
-		{name: "IPv4 in IPv6", forager: forager, url: gatewayURL, address: "::ffff:10.0.1.5", hostsLine: "::ffff:10.0.1.5 gateway.example.com"},
-		{name: "quoted machine", forager: "machine: \"aws-ec2\"  # the machine key\n", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
+		{name: "IPv4", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
+		{name: "lifetime 15", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 15},
+		{name: "lifetime 1470", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 1470},
+		{name: "IPv6, no port", url: "https://gateway.example.com", address: "fd00:ec2::5", hostsLine: "fd00:ec2::5 gateway.example.com"},
+		{name: "IPv4 in IPv6", url: gatewayURL, address: "::ffff:10.0.1.5", hostsLine: "::ffff:10.0.1.5 gateway.example.com"},
 		{
-			name: "empty daemon.json", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com",
+			name: "empty daemon.json", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com",
 			daemonJSON: "\n",
 		},
 		{
-			name: "existing daemon.json", forager: forager, url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com",
+			name: "existing daemon.json", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com",
 			daemonJSON: `{"log-driver": "journald", "proxies": {"http-proxy": "http://old.example.com"}}`,
 			wantDaemon: map[string]any{"log-driver": "journald"},
 		},
@@ -389,12 +429,11 @@ func TestStartUnitRunsQory(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t, path)
-			write(t, e.root+"/home/qory/.config/qory/forager.yaml", c.forager)
 			lifetime := c.lifetime
 			if lifetime == 0 {
 				lifetime = 60
 			}
-			write(t, e.userData, startData(runCode, c.url, c.address, lifetime))
+			e.writeData(t, startData(runCode, c.url, c.address, lifetime))
 			if c.daemonJSON != "" {
 				if err := os.MkdirAll(e.root+"/etc/docker", 0o755); err != nil {
 					t.Fatal(err)
@@ -408,11 +447,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 				t.Fatalf("status %d, stdout %q, stderr %q; want 0, qory run's stderr line on stdout, and its status line and the stage lines on stderr", r.status, r.stdout, r.stderr)
 			}
 			equalStages(t, r.stages, stages)
-			curl := "curl --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
 			want := []string{
-				curl + "-X PUT -H X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token",
-				curl + "-H @- http://169.254.169.254/latest/user-data",
-				"curl-stdin X-aws-ec2-metadata-token: " + token,
 				"iptables -w -t raw -I PREROUTING -d 169.254.169.254 -j DROP",
 				"ip6tables -w -t raw -I PREROUTING -d fd00:ec2::254 -j DROP",
 				"iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP",
@@ -429,6 +464,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"runuser-notify-socket unset",
 				"runuser-pwd " + e.root + "/var/lib/qory-machine/work",
 				"runuser-status-fd 3",
+				"runuser-start-data absent",
 				"systemctl poweroff",
 			}
 			if !slices.Equal(r.log, want) {
@@ -554,22 +590,66 @@ func link(t *testing.T, target, path string) {
 	}
 }
 
+// remove removes path, a file or an empty folder.
+func remove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// skipRoot skips the test when it runs as root, who can read and write a file whatever
+// its mode.
+func skipRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root can read and write a file whatever its mode")
+	}
+}
+
+// otherOwner replaces the start data file with a file that the user who runs the test
+// does not own. Run as root, the test gives the file to uid 65534. Otherwise, it makes
+// the start data file a hard link to a root-owned file, and skips when no such link can
+// be made. The script removes only the link.
+func otherOwner(t *testing.T, root string) {
+	t.Helper()
+	data := root + handOff
+	if os.Geteuid() == 0 {
+		if err := os.Chown(data, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	remove(t, data)
+	for _, f := range []string{"/etc/hosts", "/private/etc/hosts", "/etc/passwd", "/etc/protocols", "/etc/services"} {
+		if info, err := os.Lstat(f); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if os.Link(f, data) == nil {
+			return
+		}
+	}
+	t.Skip("make a file that another user owns to run this test: no hard link to a root-owned file could be made")
+}
+
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
 // one line to stderr, runs no qory after an invalid input, and powers the machine off.
 func TestStartUnitFails(t *testing.T) {
 	sh := bash(t)
 	path := commands(t, sh)
 	const (
-		json1       = "Launch this machine with start data that is one JSON object. The user data is not one JSON object."
-		escape      = "Write the start data without a backslash. Valid start data has no escape sequence, and the user data contains a backslash."
-		member      = "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address."
-		version     = "Set version to 1 in the start data. This script reads only start data version 1."
-		lifetime    = "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer."
-		code        = "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>."
-		gateway     = "Set gateway in the start data to an object with url and address. The gateway value is not an object."
-		url         = "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid."
-		address     = "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address."
-		foragerPath = "{root}/home/qory/.config/qory/forager.yaml"
+		json1     = "Launch this machine with start data that is one JSON object. The start data is not one JSON object."
+		escape    = "Write the start data without a backslash. Valid start data has no escape sequence, and the start data contains a backslash."
+		member    = "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address."
+		version   = "Set version to 1 in the start data. This script reads only start data version 1."
+		lifetime  = "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer."
+		code      = "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>."
+		gateway   = "Set gateway in the start data to an object with url and address. The gateway value is not an object."
+		url       = "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid."
+		address   = "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address."
+		missing   = "Install the start-data unit for this machine's vendor. {root}/run/qory-machine-start/start-data does not exist."
+		symlink   = "Write the start data to {root}/run/qory-machine-start/start-data as a regular file. The path is a symbolic link."
+		irregular = "Write the start data to {root}/run/qory-machine-start/start-data as a regular file. The path is not a regular file."
 	)
 	good := func(code, url, address string) string { return startData(code, url, address, 60) }
 	// doc is start data with the raw JSON texts of version and max_lifetime_minutes.
@@ -577,8 +657,8 @@ func TestStartUnitFails(t *testing.T) {
 		return `{"version": ` + version + `, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": ` + lifetime + `}`
 	}
 	cases := []struct {
-		name, userData, forager string
-		daemonJSON              string
+		name, data string
+		daemonJSON string
 		// readOnly is a folder under the root that the script cannot write.
 		readOnly string
 		vars     []string
@@ -595,70 +675,133 @@ func TestStartUnitFails(t *testing.T) {
 		stage string
 		// stdout is the script's stdout, which has qory run's stdout and stderr.
 		stdout string
+		// dataStays is set when the start data file stays after the run.
+		dataStays bool
+		// check checks the root folder after the run.
+		check func(t *testing.T, root string)
 	}{
-		{name: "not JSON", userData: `{"version": 1,`, want: json1},
-		{name: "empty", userData: ``, want: json1},
-		{name: "two objects", userData: good(runCode, gatewayURL, gatewayAddress) + good(runCode, gatewayURL, gatewayAddress), want: json1},
-		{name: "an array", userData: `[1]`, want: json1},
-		{name: "an escaped duplicate key", userData: doc("1", `60, "max_lifetime_minute\u0073": 9999`), want: escape},
-		{name: "an escaped slash", userData: good(runCode, `https:\/\/gateway.example.com`, gatewayAddress), want: escape},
-		{name: "an unknown member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60, "port": 1}`, want: member},
-		{name: "a gateway member", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5", "port": 1}, "max_lifetime_minutes": 60}`, want: member},
-		{name: "version 2", userData: doc("2", "60"), want: version},
-		{name: "version 1.0", userData: doc("1.0", "60"), want: version},
-		{name: "version 1e0", userData: doc("1e0", "60"), want: version},
-		{name: "version 10e-1", userData: doc("10e-1", "60"), want: version},
-		{name: "version 01", userData: doc("01", "60"), want: version},
-		{name: "version twice", userData: doc(`1, "version": 1`, "60"), want: version},
-		{name: "version as text", userData: doc(`"1"`, "60"), want: version},
-		{name: "no lifetime", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: lifetime},
-		{name: "lifetime 14", userData: doc("1", "14"), want: lifetime},
-		{name: "lifetime 1471", userData: doc("1", "1471"), want: lifetime},
-		{name: "lifetime 0", userData: doc("1", "0"), want: lifetime},
-		{name: "lifetime 60.0", userData: doc("1", "60.0"), want: lifetime},
-		{name: "lifetime 6e1", userData: doc("1", "6e1"), want: lifetime},
-		{name: "lifetime 060", userData: doc("1", "060"), want: lifetime},
-		{name: "lifetime -60", userData: doc("1", "-60"), want: lifetime},
+		{name: "not JSON", data: `{"version": 1,`, want: json1},
+		{name: "empty", data: ``, want: missing},
+		{name: "only a newline", data: "\n", want: json1},
+		{name: "two objects", data: good(runCode, gatewayURL, gatewayAddress) + good(runCode, gatewayURL, gatewayAddress), want: json1},
+		{name: "an array", data: `[1]`, want: json1},
+		{name: "an escaped duplicate key", data: doc("1", `60, "max_lifetime_minute\u0073": 9999`), want: escape},
+		{name: "an escaped slash", data: good(runCode, `https:\/\/gateway.example.com`, gatewayAddress), want: escape},
+		{name: "an unknown member", data: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60, "port": 1}`, want: member},
+		{name: "a gateway member", data: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5", "port": 1}, "max_lifetime_minutes": 60}`, want: member},
+		{name: "version 2", data: doc("2", "60"), want: version},
+		{name: "version 1.0", data: doc("1.0", "60"), want: version},
+		{name: "version 1e0", data: doc("1e0", "60"), want: version},
+		{name: "version 10e-1", data: doc("10e-1", "60"), want: version},
+		{name: "version 01", data: doc("01", "60"), want: version},
+		{name: "version twice", data: doc(`1, "version": 1`, "60"), want: version},
+		{name: "version as text", data: doc(`"1"`, "60"), want: version},
+		{name: "no lifetime", data: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: lifetime},
+		{name: "lifetime 14", data: doc("1", "14"), want: lifetime},
+		{name: "lifetime 1471", data: doc("1", "1471"), want: lifetime},
+		{name: "lifetime 0", data: doc("1", "0"), want: lifetime},
+		{name: "lifetime 60.0", data: doc("1", "60.0"), want: lifetime},
+		{name: "lifetime 6e1", data: doc("1", "6e1"), want: lifetime},
+		{name: "lifetime 060", data: doc("1", "060"), want: lifetime},
+		{name: "lifetime -60", data: doc("1", "-60"), want: lifetime},
 		// jq 1.8 reads +60 as the number 60.
-		{name: "lifetime +60", userData: doc("1", "+60"), want: lifetime, orWant: json1},
-		{name: "lifetime as text", userData: doc("1", `"60"`), want: lifetime},
-		{name: "lifetime twice", userData: doc("1", `60, "max_lifetime_minutes": 60`), want: lifetime},
-		{name: "no version", userData: `{"run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: version},
-		{name: "no run code", userData: `{"version": 1, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
-		{name: "run code as a number", userData: `{"version": 1, "run_code": 5, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
-		{name: "run code in lower case", userData: good(strings.ToLower(runCode), gatewayURL, gatewayAddress), want: code},
-		{name: "run code with I", userData: good("qecr_IARKER00000000000000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
-		{name: "run code with three parts", userData: good(runCode+".MARKERruncode000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
-		{name: "run code too short", userData: good(runCode[:len(runCode)-1], gatewayURL, gatewayAddress), want: code},
+		{name: "lifetime +60", data: doc("1", "+60"), want: lifetime, orWant: json1},
+		{name: "lifetime as text", data: doc("1", `"60"`), want: lifetime},
+		{name: "lifetime twice", data: doc("1", `60, "max_lifetime_minutes": 60`), want: lifetime},
+		{name: "no version", data: `{"run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: version},
+		{name: "no run code", data: `{"version": 1, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
+		{name: "run code as a number", data: `{"version": 1, "run_code": 5, "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}, "max_lifetime_minutes": 60}`, want: code},
+		{name: "run code in lower case", data: good(strings.ToLower(runCode), gatewayURL, gatewayAddress), want: code},
+		{name: "run code with I", data: good("qecr_IARKER00000000000000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
+		{name: "run code with three parts", data: good(runCode+".MARKERruncode000000000.MARKERruncode000000000", gatewayURL, gatewayAddress), want: code},
+		{name: "run code too short", data: good(runCode[:len(runCode)-1], gatewayURL, gatewayAddress), want: code},
 		// JSON writes the newline as \n, so the backslash check stops the script.
-		{name: "run code with a newline", userData: good(runCode+"\n", gatewayURL, gatewayAddress), want: escape},
-		{name: "gateway as text", userData: `{"version": 1, "run_code": "` + runCode + `", "gateway": "https://gateway.example.com", "max_lifetime_minutes": 60}`, want: gateway},
-		{name: "URL with a path", userData: good(runCode, gatewayURL+"/v1", gatewayAddress), want: url},
-		{name: "URL with a slash", userData: good(runCode, gatewayURL+"/", gatewayAddress), want: url},
-		{name: "URL with a query", userData: good(runCode, gatewayURL+"?a=1", gatewayAddress), want: url},
-		{name: "URL with a fragment", userData: good(runCode, gatewayURL+"#a", gatewayAddress), want: url},
-		{name: "URL with a user", userData: good(runCode, "https://user:MARKERruncode@gateway.example.com", gatewayAddress), want: url},
-		{name: "URL over http", userData: good(runCode, "http://gateway.example.com", gatewayAddress), want: url},
-		{name: "URL with port 0", userData: good(runCode, "https://gateway.example.com:0", gatewayAddress), want: url},
-		{name: "URL with port 70000", userData: good(runCode, "https://gateway.example.com:70000", gatewayAddress), want: url},
-		{name: "URL with no host", userData: good(runCode, "https://:8443", gatewayAddress), want: url},
-		{name: "URL with an IPv6 host", userData: good(runCode, "https://[fd00::1]:8443", gatewayAddress), want: url},
-		{name: "URL with a space", userData: good(runCode, "https://gateway example.com", gatewayAddress), want: url},
-		{name: "address as a name", userData: good(runCode, gatewayURL, "gateway.example.com"), want: address},
-		{name: "address over 255", userData: good(runCode, gatewayURL, "10.0.1.256"), want: address},
-		{name: "address with 3 parts", userData: good(runCode, gatewayURL, "10.0.1"), want: address},
-		{name: "address with a leading zero", userData: good(runCode, gatewayURL, "010.0.1.5"), want: address},
-		{name: "address with a zone", userData: good(runCode, gatewayURL, "fd00::1%eth0"), want: address},
-		{name: "address with two ::", userData: good(runCode, gatewayURL, "fd00::1::2"), want: address},
-		{name: "address with 9 groups", userData: good(runCode, gatewayURL, "1:2:3:4:5:6:7:8:9"), want: address},
-		{name: "empty address", userData: good(runCode, gatewayURL, ""), want: address},
-		{name: "another machine", forager: "machine: gcp-compute\n", want: "Set machine: aws-ec2 in " + foragerPath + ". This script reads start data only for aws-ec2, and the file sets machine to gcp-compute."},
-		{name: "machine without a space", forager: "machine:aws-ec2\n", want: "Add the line machine: aws-ec2 to " + foragerPath + ". The file has no machine key."},
-		{name: "no machine key", forager: "wall:\n  engine_proxy_file: /etc/qory/engine-proxy.json\n", want: "Add the line machine: aws-ec2 to " + foragerPath + ". The file has no machine key."},
-		{name: "two machine keys", forager: "machine: aws-ec2\nmachine: aws-ec2\n", want: "Keep one machine line in " + foragerPath + ". The file has more than one."},
-		{name: "no forager.yaml", forager: "-", want: "Write machine: aws-ec2 into " + foragerPath + ". The file does not exist or is not readable."},
-		{name: "token request fails", vars: []string{"STUB_FAIL_TOKEN=1"}, want: "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."},
-		{name: "user data request fails", vars: []string{"STUB_FAIL_USERDATA=1"}, want: "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries."},
+		{name: "run code with a newline", data: good(runCode+"\n", gatewayURL, gatewayAddress), want: escape},
+		{name: "gateway as text", data: `{"version": 1, "run_code": "` + runCode + `", "gateway": "https://gateway.example.com", "max_lifetime_minutes": 60}`, want: gateway},
+		{name: "URL with a path", data: good(runCode, gatewayURL+"/v1", gatewayAddress), want: url},
+		{name: "URL with a slash", data: good(runCode, gatewayURL+"/", gatewayAddress), want: url},
+		{name: "URL with a query", data: good(runCode, gatewayURL+"?a=1", gatewayAddress), want: url},
+		{name: "URL with a fragment", data: good(runCode, gatewayURL+"#a", gatewayAddress), want: url},
+		{name: "URL with a user", data: good(runCode, "https://user:MARKERruncode@gateway.example.com", gatewayAddress), want: url},
+		{name: "URL over http", data: good(runCode, "http://gateway.example.com", gatewayAddress), want: url},
+		{name: "URL with port 0", data: good(runCode, "https://gateway.example.com:0", gatewayAddress), want: url},
+		{name: "URL with port 70000", data: good(runCode, "https://gateway.example.com:70000", gatewayAddress), want: url},
+		{name: "URL with no host", data: good(runCode, "https://:8443", gatewayAddress), want: url},
+		{name: "URL with an IPv6 host", data: good(runCode, "https://[fd00::1]:8443", gatewayAddress), want: url},
+		{name: "URL with a space", data: good(runCode, "https://gateway example.com", gatewayAddress), want: url},
+		{name: "address as a name", data: good(runCode, gatewayURL, "gateway.example.com"), want: address},
+		{name: "address over 255", data: good(runCode, gatewayURL, "10.0.1.256"), want: address},
+		{name: "address with 3 parts", data: good(runCode, gatewayURL, "10.0.1"), want: address},
+		{name: "address with a leading zero", data: good(runCode, gatewayURL, "010.0.1.5"), want: address},
+		{name: "address with a zone", data: good(runCode, gatewayURL, "fd00::1%eth0"), want: address},
+		{name: "address with two ::", data: good(runCode, gatewayURL, "fd00::1::2"), want: address},
+		{name: "address with 9 groups", data: good(runCode, gatewayURL, "1:2:3:4:5:6:7:8:9"), want: address},
+		{name: "empty address", data: good(runCode, gatewayURL, ""), want: address},
+		{name: "no start data file", setup: func(t *testing.T, root string) { remove(t, root+handOff) }, want: missing},
+		{
+			name: "no start data folder", want: missing,
+			setup: func(t *testing.T, root string) {
+				if err := os.RemoveAll(filepath.Dir(root + handOff)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		// The script removes the link, and the file it links to stays.
+		{
+			name: "a symbolic link", want: symlink,
+			setup: func(t *testing.T, root string) {
+				remove(t, root+handOff)
+				write(t, root+"/target", startData(runCode, gatewayURL, gatewayAddress, 60))
+				link(t, root+"/target", root+handOff)
+			},
+			check: func(t *testing.T, root string) {
+				if _, err := os.Lstat(root + "/target"); err != nil {
+					t.Errorf("the file that the link pointed to is gone: %v", err)
+				}
+			},
+		},
+		{name: "a link to nothing", want: symlink, setup: func(t *testing.T, root string) { remove(t, root+handOff); link(t, root+"/none", root+handOff) }},
+		{name: "a link to a folder", want: symlink, setup: func(t *testing.T, root string) { remove(t, root+handOff); link(t, root+"/etc", root+handOff) }},
+		{
+			name: "a named pipe", want: irregular,
+			setup: func(t *testing.T, root string) {
+				remove(t, root+handOff)
+				if err := syscall.Mkfifo(root+handOff, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a folder", want: irregular,
+			setup: func(t *testing.T, root string) {
+				remove(t, root+handOff)
+				if err := os.Mkdir(root+handOff, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{name: "another user's file", setup: otherOwner, want: "Write {root}/run/qory-machine-start/start-data as root. Another user owns the file."},
+		{
+			name: "start data file not readable", want: "Check that root can read {root}/run/qory-machine-start/start-data. Reading the file failed.",
+			setup: func(t *testing.T, root string) {
+				skipRoot(t)
+				if err := os.Chmod(root+handOff, 0); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "start data folder not writable", dataStays: true,
+			want: "Check that root can write {root}/run/qory-machine-start. Removing {root}/run/qory-machine-start/start-data failed.",
+			setup: func(t *testing.T, root string) {
+				skipRoot(t)
+				dir := filepath.Dir(root + handOff)
+				if err := os.Chmod(dir, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+			},
+		},
 		{name: "iptables fails", stage: "start data read", vars: []string{"STUB_FAIL_IPTABLES=1"}, ran: "iptables -w -t raw -I PREROUTING -d 169.254.169.254 -j DROP", want: "Check that iptables can add rules to the raw table on this machine image. Adding the PREROUTING rule that drops packets to 169.254.169.254 failed."},
 		{name: "daemon.json is not an object", stage: "firewall set", daemonJSON: `["not an object"]`, ran: "iptables -w -t raw -I OUTPUT -d 169.254.169.254 -j DROP", want: "Make {root}/etc/docker/daemon.json in the machine image one JSON object, or remove it. Writing the engine proxy into it failed."},
 		// The journal's lines reach stderr with the password replaced and without the
@@ -733,17 +876,9 @@ func TestStartUnitFails(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t, path)
-			if c.userData != "" || c.name == "empty" {
-				write(t, e.userData, c.userData)
-			}
-			switch c.forager {
-			case "":
-			case "-":
-				if err := os.Remove(e.root + "/home/qory/.config/qory/forager.yaml"); err != nil {
-					t.Fatal(err)
-				}
-			default:
-				write(t, e.root+"/home/qory/.config/qory/forager.yaml", c.forager)
+			e.dataStays = c.dataStays
+			if c.data != "" || c.name == "empty" {
+				e.writeData(t, c.data)
 			}
 			if c.daemonJSON != "" {
 				if err := os.MkdirAll(e.root+"/etc/docker", 0o755); err != nil {
@@ -790,11 +925,29 @@ func TestStartUnitFails(t *testing.T) {
 			if c.status == 0 && slices.ContainsFunc(r.log, func(l string) bool { return strings.HasPrefix(l, "runuser") }) {
 				t.Errorf("the script ran qory after a failure:\n%s", strings.Join(r.log, "\n"))
 			}
+			if c.check != nil {
+				c.check(t, e.root)
+			}
 		})
 	}
 }
 
-// TestStartUnitFiles checks the unit file, and the lines that neither file may contain.
+// sections returns the lines of each section of a unit file, by the section's header.
+func sections(unit string) map[string][]string {
+	all := map[string][]string{}
+	section := ""
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = line
+			continue
+		}
+		all[section] = append(all[section], line)
+	}
+	return all
+}
+
+// TestStartUnitFiles checks the unit files, the start of each script, and the lines
+// that no file may contain.
 func TestStartUnitFiles(t *testing.T) {
 	unit := read(t, "qory-machine.service")
 	for _, line := range []string{
@@ -816,35 +969,64 @@ func TestStartUnitFiles(t *testing.T) {
 	}
 	// systemd reads SuccessAction and FailureAction only in [Unit], and ignores them in
 	// [Service].
-	sections := map[string][]string{}
-	section := ""
-	for _, line := range strings.Split(unit, "\n") {
-		if strings.HasPrefix(line, "[") {
-			section = line
-			continue
-		}
-		sections[section] = append(sections[section], line)
-	}
+	unitSections := sections(unit)
 	for _, line := range []string{"SuccessAction=poweroff", "FailureAction=poweroff"} {
-		if !slices.Contains(sections["[Unit]"], line) {
+		if !slices.Contains(unitSections["[Unit]"], line) {
 			t.Errorf("qory-machine.service has no line %s in [Unit]", line)
 		}
 		key := strings.SplitAfter(line, "=")[0]
-		if slices.ContainsFunc(sections["[Service]"], func(l string) bool { return strings.HasPrefix(l, key) }) {
+		if slices.ContainsFunc(unitSections["[Service]"], func(l string) bool { return strings.HasPrefix(l, key) }) {
 			t.Errorf("qory-machine.service sets %s in [Service], where systemd ignores it", key)
 		}
 	}
-	script := read(t, "qory-machine-start")
-	if !strings.HasPrefix(script, "#!/bin/bash\n") || !strings.Contains(script, "\nset -euo pipefail\n") {
-		t.Error("qory-machine-start does not start with #!/bin/bash and set -euo pipefail")
+
+	// The start-data unit for EC2 runs before the start unit and powers the machine off
+	// when it fails. It has no RequiredBy= or Requires=, so its failure does not skip the
+	// start unit.
+	ec2Unit := read(t, "qory-machine-data-aws-ec2.service")
+	ec2Sections := sections(ec2Unit)
+	for section, lines := range map[string][]string{
+		"[Unit]": {
+			"Wants=network-online.target",
+			"After=network-online.target",
+			"Before=qory-machine.service",
+			"FailureAction=poweroff",
+		},
+		"[Service]": {
+			"Type=oneshot",
+			"ExecStart=/usr/local/libexec/qory/qory-machine-data-aws-ec2",
+			"StandardError=journal+console",
+			"TimeoutStartSec=120",
+		},
+		"[Install]": {"WantedBy=qory-machine.service"},
+	} {
+		for _, line := range lines {
+			if !slices.Contains(ec2Sections[section], line) {
+				t.Errorf("qory-machine-data-aws-ec2.service has no line %s in %s", line, section)
+			}
+		}
 	}
-	if got := mode(t, "qory-machine-start"); got&0o111 == 0 {
-		t.Errorf("qory-machine-start has mode %v, want an executable", got)
+	for _, line := range strings.Split(ec2Unit, "\n") {
+		if strings.HasPrefix(line, "RequiredBy=") || strings.HasPrefix(line, "Requires=") || strings.HasPrefix(line, "SuccessAction=") {
+			t.Errorf("qory-machine-data-aws-ec2.service has the line %s", line)
+		}
+	}
+
+	files := map[string]string{"qory-machine.service": unit, "qory-machine-data-aws-ec2.service": ec2Unit}
+	for _, name := range []string{"qory-machine-start", "qory-machine-data-aws-ec2"} {
+		script := read(t, name)
+		files[name] = script
+		if !strings.HasPrefix(script, "#!/bin/bash\n") || !strings.Contains(script, "\nset -euo pipefail\n") {
+			t.Errorf("%s does not start with #!/bin/bash and set -euo pipefail", name)
+		}
+		if got := mode(t, name); got&0o111 == 0 {
+			t.Errorf("%s has mode %v, want an executable", name, got)
+		}
 	}
 	// An absolute command path would bypass the stubs on PATH.
 	absolute := regexp.MustCompile(`(^|[\s;|&(])/(usr/)?s?bin/`)
 	forbidden := regexp.MustCompile(`set -x|set -o xtrace`)
-	for name, text := range map[string]string{"qory-machine.service": unit, "qory-machine-start": script} {
+	for name, text := range files {
 		for i, line := range strings.Split(text, "\n") {
 			if m := forbidden.FindString(line); m != "" {
 				t.Errorf("%s:%d contains %q", name, i+1, m)
@@ -856,38 +1038,182 @@ func TestStartUnitFiles(t *testing.T) {
 	}
 }
 
-// TestStartUnitSecretLines pins every line of the script that expands the token, the
+// TestStartUnitSecretLines pins every line of each script that expands the token, the
 // start data, the run code or the password. The runs in the other tests observe the
 // arguments of the stubs only, so this list covers the arguments of the real tools: each
 // line passes the secret to a builtin printf, a pipe, a file or a [[ test, or is inside a
 // jq program. A new line that expands a secret fails this test until it is reviewed and
 // added here.
 func TestStartUnitSecretLines(t *testing.T) {
-	allowed := []string{
-		`data=$(printf 'X-aws-ec2-metadata-token: %s\n' "$token" |`,
-		`if [[ $data == *'\'* ]]; then`,
-		`problem=$(printf '%s' "$data" | jq -rs '`,
-		`run_code=$(printf '%s' "$data" | jq -rs '.[0].run_code' 2>/dev/null) || problem=json`,
-		`url=$(printf '%s' "$data" | jq -rs '.[0].gateway.url' 2>/dev/null) || problem=json`,
-		`address=$(printf '%s' "$data" | jq -rs '.[0].gateway.address' 2>/dev/null) || problem=json`,
-		`without_version=${data//\"version\"/}`,
-		`if [[ $problem == ok ]] && { ((${#data} - ${#without_version} != 9)) || ! [[ $data =~ $version_text ]]; }; then`,
-		`without_lifetime=${data//\"max_lifetime_minutes\"/}`,
-		`if ((${#data} - ${#without_lifetime} == 22)) && [[ $data =~ $lifetime_text ]] &&`,
-		`if [[ $problem == ok ]] && ! [[ $run_code =~ ^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$ ]]; then`,
-		`{ printf '%s\n' "$password"; printf '%s' "$daemon_base"; } | jq -nR '`,
-		`input as $password |`,
-		`"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
-		`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
-		`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
-		`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
-		`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
+	allowed := map[string][]string{
+		"qory-machine-start": {
+			`if [[ $data == *'\'* ]]; then`,
+			`problem=$(printf '%s' "$data" | jq -rs '`,
+			`run_code=$(printf '%s' "$data" | jq -rs '.[0].run_code' 2>/dev/null) || problem=json`,
+			`url=$(printf '%s' "$data" | jq -rs '.[0].gateway.url' 2>/dev/null) || problem=json`,
+			`address=$(printf '%s' "$data" | jq -rs '.[0].gateway.address' 2>/dev/null) || problem=json`,
+			`without_version=${data//\"version\"/}`,
+			`if [[ $problem == ok ]] && { ((${#data} - ${#without_version} != 9)) || ! [[ $data =~ $version_text ]]; }; then`,
+			`without_lifetime=${data//\"max_lifetime_minutes\"/}`,
+			`if ((${#data} - ${#without_lifetime} == 22)) && [[ $data =~ $lifetime_text ]] &&`,
+			`if [[ $problem == ok ]] && ! [[ $run_code =~ ^qecr_[0-9A-HJKMNP-TV-Z]{26}(\.[A-Za-z0-9_-]{22}){1,2}$ ]]; then`,
+			`{ printf '%s\n' "$password"; printf '%s' "$daemon_base"; } | jq -nR '`,
+			`input as $password |`,
+			`"http-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
+			`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
+			`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
+			`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
+			`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
+		},
+		"qory-machine-data-aws-ec2": {
+			`printf 'X-aws-ec2-metadata-token: %s\n' "$token" |`,
+		},
 	}
 	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)
-	for i, line := range strings.Split(read(t, "qory-machine-start"), "\n") {
-		line = strings.TrimSpace(line)
-		if secret.MatchString(line) && !slices.Contains(allowed, line) {
-			t.Errorf("qory-machine-start:%d expands a secret in a line that is not reviewed: %s", i+1, line)
+	for name, lines := range allowed {
+		for i, line := range strings.Split(read(t, name), "\n") {
+			line = strings.TrimSpace(line)
+			if secret.MatchString(line) && !slices.Contains(lines, line) {
+				t.Errorf("%s:%d expands a secret in a line that is not reviewed: %s", name, i+1, line)
+			}
 		}
+	}
+}
+
+// curlOptions are the options of both curl calls of qory-machine-data-aws-ec2.
+const curlOptions = "curl --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
+
+// newEC2Env makes the root folder of newEnv without the start data folder, and returns
+// it with the start data folder's path.
+func newEC2Env(t *testing.T, path string) (*env, string) {
+	t.Helper()
+	e := newEnv(t, path)
+	dir := filepath.Dir(e.data)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	return e, dir
+}
+
+// runEC2 runs qory-machine-data-aws-ec2 once. It checks what every run must leave: no
+// stage line, and no token marker in the stubs' arguments, besides the checks of
+// runScript.
+func (e *env) runEC2(t *testing.T, sh string, vars ...string) result {
+	t.Helper()
+	r := e.runScript(t, sh, "qory-machine-data-aws-ec2", vars...)
+	if len(r.stages) != 0 {
+		t.Errorf("the script printed the stage lines %q", r.stages)
+	}
+	for _, line := range r.log {
+		if !strings.HasPrefix(line, "curl-stdin ") && strings.Contains(line, token) {
+			t.Errorf("a stub's arguments contain the token marker %s: %s", token, line)
+		}
+	}
+	return r
+}
+
+// entries returns the names in the folder dir, or nil when dir does not exist.
+func entries(t *testing.T, dir string) []string {
+	t.Helper()
+	list, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range list {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// TestDataUnitWritesStartData follows one boot on EC2: the script gets an IMDSv2 token,
+// reads the user data with the token on stdin, and writes it to the start data file,
+// mode 0600, in a folder of mode 0700, with no other file in the folder.
+func TestDataUnitWritesStartData(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	for _, c := range []struct {
+		name string
+		// folder is the mode of a start data folder that exists before the run, or 0.
+		folder fs.FileMode
+	}{
+		{name: "no folder"},
+		{name: "a folder of mode 0755", folder: 0o755},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e, dir := newEC2Env(t, path)
+			if c.folder != 0 {
+				if err := os.Mkdir(dir, c.folder); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(dir, c.folder); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := e.runEC2(t, sh)
+			if r.status != 0 || r.stdout != "" || r.stderr != "" {
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and no output", r.status, r.stdout, r.stderr)
+			}
+			want := []string{
+				curlOptions + "-X PUT -H X-aws-ec2-metadata-token-ttl-seconds: 60 http://169.254.169.254/latest/api/token",
+				curlOptions + "-H @- http://169.254.169.254/latest/user-data",
+				"curl-stdin X-aws-ec2-metadata-token: " + token,
+			}
+			if !slices.Equal(r.log, want) {
+				t.Errorf("the commands are\n%s\nwant\n%s", strings.Join(r.log, "\n"), strings.Join(want, "\n"))
+			}
+			if got, want := read(t, e.data), read(t, e.userData); got != want {
+				t.Errorf("the start data file is %q, want the user data %q", got, want)
+			}
+			if got := mode(t, e.data); got != 0o600 {
+				t.Errorf("the start data file has mode %v, want 0600", got)
+			}
+			if got := mode(t, dir); got != fs.ModeDir|0o700 {
+				t.Errorf("the start data folder has mode %v, want 0700", got)
+			}
+			if got := entries(t, dir); !slices.Equal(got, []string{"start-data"}) {
+				t.Errorf("the start data folder contains %q, want only start-data", got)
+			}
+		})
+	}
+}
+
+// TestDataUnitFails checks each failed step: the script prints one line to stderr, or
+// none after a signal, and leaves no file in the start data folder.
+func TestDataUnitFails(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	for _, c := range []struct {
+		name   string
+		vars   []string
+		status int
+		want   string
+		// readOnly is a folder under the root that the script cannot write.
+		readOnly string
+	}{
+		{name: "token request fails", vars: []string{"STUB_FAIL_TOKEN=1"}, status: 1, want: "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries.\n"},
+		{name: "user data request fails", vars: []string{"STUB_FAIL_USERDATA=1"}, status: 1, want: "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries.\n"},
+		{name: "/run not writable", readOnly: "/run", status: 1, want: "Check that root can write {root}/run. Making {root}/run/qory-machine-start failed.\n"},
+		{name: "SIGTERM", vars: []string{"STUB_TERM=1"}, status: 143},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e, dir := newEC2Env(t, path)
+			if c.readOnly != "" {
+				readOnly(t, e.root+c.readOnly)
+			}
+			r := e.runEC2(t, sh, c.vars...)
+			want := strings.ReplaceAll(c.want, "{root}", e.root)
+			if r.status != c.status || r.stdout != "" || r.stderr != want {
+				t.Errorf("status %d, stdout %q, stderr %q; want %d, no stdout, and stderr %q", r.status, r.stdout, r.stderr, c.status, want)
+			}
+			if got := entries(t, dir); len(got) != 0 {
+				t.Errorf("the start data folder contains %q after a failure, want no file", got)
+			}
+		})
 	}
 }
