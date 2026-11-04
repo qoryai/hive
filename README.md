@@ -1,16 +1,81 @@
-# qory-provisioner
+# Hive
+
+Hive makes and deletes the machines of Qory Apiary's node pools. A node pool is a
+group of machines in Qory Apiary, and one provisioner serves it. Hive is
+vendor-agnostic: it reaches each hosting vendor only through that vendor's machine
+adapter, a separate program that makes, lists, reads and deletes machines at one
+vendor. Each machine adapter follows the machine adapter contract
+[`contracts/machines/v1`](https://github.com/qoryai/integrations/tree/main/contracts/machines/v1)
+of [qoryai/integrations](https://github.com/qoryai/integrations). This repository
+contains one machine adapter, the AWS EC2 adapter, `qory-machines-aws-ec2`.
 
 This repository builds two programs:
 
-- `qory-provisioner`, a program with one command, `serve`.
-- `qory-machines-aws-ec2`, the EC2 machine adapter. The provisioner runs it as
-  `qory-machines-aws-ec2 <command> --settings FILE` to make, list, read and delete EC2
-  instances, as `contracts/machines/v1` of `github.com/qoryai/integrations` states the
-  protocol. FILE is the adapter's settings file, `aws-ec2.json`.
+- `qory-provisioner`, the program of Hive. Its one command, `serve`, claims
+  dispatches from Qory Apiary (a dispatch is one piece of work that runs on one new
+  machine), makes one machine for each through the machine adapter, and deletes each
+  machine once its dispatch ends. It runs until SIGTERM or SIGINT.
+  `qory-provisioner serve -h` prints its flags.
+- `qory-machines-aws-ec2`, the AWS EC2 adapter. See
+  [The AWS EC2 adapter](#the-aws-ec2-adapter).
 
-`serve` claims dispatches from Qory Apiary, makes one machine for each through the
-machine adapter, and deletes each machine once its dispatch ends. It runs until SIGTERM.
-`qory-provisioner serve -h` prints its flags.
+## Settings of the provisioner
+
+`serve` reads the settings file at `--settings`, by default
+`/etc/qory-provisioner/settings.json`. It keeps the access key, the record of the
+enrolment, the instance id and the journal of live dispatches in the state folder at
+`--state-dir`, by default `/var/lib/qory-provisioner`. The enrolment is the step at the
+first start that makes the access key and registers it with Qory Apiary as the key of
+one node pool; see
+[Enrol the access key](#enrol-the-access-key). The settings file is one JSON object:
+
+```json
+{
+  "apiary_url": "https://apiary.example.com",
+  "gateway_address": "10.0.1.5",
+  "max_machines": 2,
+  "adapter": {
+    "command": "/usr/local/bin/qory-machines-aws-ec2",
+    "settings": "/etc/qory-provisioner/aws-ec2.json"
+  },
+  "enrolment_code_file": "/run/qory-enrolment/provisioner/code"
+}
+```
+
+- `apiary_url`: the origin of Qory Apiary, with `https`. For a test, an `http` origin
+  on `localhost`, `127.0.0.1` or `[::1]` also works. Required.
+- `gateway_address`: the IPv4 or IPv6 address of the gateway on the machines'
+  network, with no zone and no port, and not an unspecified, multicast or loopback
+  address. The provisioner passes it to each machine that it makes. Required.
+- `max_machines`: the most machines that exist at once, 1 to 100. Optional, 1 when
+  you leave it out.
+- `adapter`: the machine adapter. `command` is the path of the adapter's program, and
+  `settings` is the path of the adapter's settings file. Required.
+- `enrolment_code_file`: the path of the file with the node pool's enrolment code.
+  Optional. See [Enrol the access key](#enrol-the-access-key).
+
+Write each path as an absolute path of at most 4096 bytes, with no `.` or `..`
+element, no double slash, no trailing slash, and no NUL byte. Keep secrets out of
+the settings file: when it contains an access key secret, a run key, a run code or an
+enrolment code, `serve` exits with status 1, and the error starts with the fix.
+
+## How the provisioner runs the machine adapter
+
+The provisioner makes no call to a hosting vendor. It runs the machine adapter as
+`<command> <name> --settings <file>`, where `<command>` is `adapter.command`,
+`<name>` is `check`, `make`, `list`, `log` or `delete`, and `<file>` is
+`adapter.settings`. It writes each request to the adapter's standard input and reads
+the answer from its standard output, in the documents of `contracts/machines/v1`. When
+`serve` starts, it runs `check` before it claims a dispatch, and it exits with status 1
+when `check` fails.
+
+The provisioner copies the adapter's standard error, line by line, to the
+provisioner's standard error, which also has the provisioner's log. The provisioner
+cuts each line at 4096 bytes. It replaces a line with a fixed text when the line
+contains what looks like a run code, or a piece of the start data that the provisioner
+passes to a machine. The adapter runs with the provisioner's environment,
+without any variable whose name starts with `QORY_`. The provisioner kills the adapter
+when `make` runs longer than 2 minutes, or another command longer than 1 minute.
 
 ## Run one provisioner per node pool
 
@@ -42,9 +107,9 @@ from the settings file".
 
 While the file is missing, `serve` logs one line that starts with `the enrolment code
 file is missing` and reads the file again every 10 seconds. It reads at most 79 bytes
-and stops on a file longer than 78 bytes, the longest code and a newline. It removes
-one trailing newline. A code for another kind of node stops `serve` before it sends a
-request.
+and exits with status 1 on a file longer than 78 bytes, the longest code and a
+newline. It removes one trailing newline. When the code is for another kind of node,
+`serve` exits with status 1 before it sends a request.
 
 Before `serve` reads the file, it follows the path one link at a time, and checks the
 file, each link on the way, and each folder above them:
@@ -63,7 +128,29 @@ owner's uid.
 When the state folder has an access key, `serve` reads neither the file nor the
 variable, and logs one line that the one that is set is not used.
 
-## Settings of the EC2 machine adapter
+## The AWS EC2 adapter
+
+`qory-machines-aws-ec2` makes, lists and deletes EC2 instances, and reads their
+console output as the machine log. The image contains it at
+`/usr/local/bin/qory-machines-aws-ec2`. To use it, set `adapter.command` to that path,
+and `adapter.settings` to the path of its settings file, `aws-ec2.json`.
+
+### Region and credentials
+
+The adapter reads the region from `AWS_REGION`, or else from the instance metadata of
+the EC2 instance that it runs on. `AWS_DEFAULT_REGION` has no effect. The adapter uses
+only the credentials of the host's instance role, which it reads from the instance
+metadata service, and calls EC2 only at the region's standard endpoint. It reads no
+AWS config or credentials file.
+
+Each command fails when the environment sets one of these variables to a value that is
+not empty: a variable that selects other credentials, a profile, a config or
+credentials file, another metadata address, another endpoint, or another certificate
+authority, or that turns off the instance metadata. Examples are `AWS_ACCESS_KEY_ID`,
+`AWS_PROFILE`, `AWS_EC2_METADATA_DISABLED` and `AWS_ENDPOINT_URL`. The error starts
+with `Unset` and the variable's name.
+
+### Settings
 
 `qory-machines-aws-ec2 check` and `make` read the settings file `aws-ec2.json`, one
 JSON object:
@@ -93,13 +180,13 @@ digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may n
 a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
 member breaks a rule, `check` and `make` fail, and the error starts with the fix.
 
-## Instance role policy
+### Instance role policy
 
-The provisioner makes no AWS call. The EC2 machine adapter calls EC2 with the
-credentials of the instance role of the host that runs both programs. This IAM policy
-contains the actions that the adapter calls. It limits launches to instances tagged
-`qory:managed=true`, and limits deletes and console reads to the machines of one node
-pool. Replace these example values before you attach it to the instance role:
+The AWS EC2 adapter calls EC2 with the credentials of the instance role of the host
+that runs the provisioner and the adapter. This IAM policy contains the actions that
+the adapter calls. It limits launches to instances tagged `qory:managed=true`, and
+limits deletes and console reads to the machines of one node pool. Replace these
+example values before you attach it to the instance role:
 
 - `<region>` and `<account-id>`: the region and the account of the machines.
 - `subnet-0123456789abcdef0`, `sg-0123456789abcdef0` and `ami-0123456789abcdef0`:
@@ -286,8 +373,9 @@ docker build --build-arg VERSION=dev -t qory-provisioner .
 ```
 
 The image runs `qory-provisioner serve` as uid 65532 and gid 65532, with the volume
-`/var/lib/qory-provisioner`, 0700. It sets `AWS_EC2_METADATA_V1_DISABLED=true`. The
-image also contains the EC2 machine adapter at `/usr/local/bin/qory-machines-aws-ec2`.
+`/var/lib/qory-provisioner`, 0700. The image also contains the AWS EC2 adapter at
+`/usr/local/bin/qory-machines-aws-ec2`, and sets `AWS_EC2_METADATA_V1_DISABLED=true`,
+so that the AWS SDK reads the instance metadata only with an IMDSv2 token.
 
 `.github/workflows/prerelease.yml` builds the image for linux/amd64 and linux/arm64
 when you push to the branch `prerelease`, or when you run the workflow from the
@@ -332,3 +420,8 @@ file, and on a file that root does not own. When the file is missing or empty, i
 "Install the start-data unit for this machine's vendor.
 /run/qory-machine-start/start-data does not exist or is empty." It deletes the file
 after the read. A failed start-data unit for EC2 powers the machine off.
+
+## Licence
+
+Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). *Qory* is a trademark of
+8wonders GmbH; see [TRADEMARKS.md](TRADEMARKS.md).

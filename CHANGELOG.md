@@ -25,6 +25,8 @@ The changes to Hive that no release contains yet, in the shape of
 - The journal of live dispatches has two more phases: `deleting`, for a machine whose
   delete has not returned gone, and `ended`, for a machine that is gone while the post
   of `gone` is pending.
+- The licence: `LICENSE`, the Apache License, Version 2.0; `NOTICE`; and
+  `TRADEMARKS.md`, with the rules for using the name Qory.
 - The machine's start script, `qory-machine-start`, prints one line to standard error at
   each stage, with the time in UTC, such as
   `qory-machine-start: 2026-10-30T14:02:13Z Docker started`. It prints start data read,
@@ -71,6 +73,14 @@ The changes to Hive that no release contains yet, in the shape of
   no delete.
 - A listed machine with no journal entry and a key in the shape of a dispatch id gets a
   journal entry, and `machine-end` as any other machine does.
+- The README describes Hive as vendor-agnostic: Hive reaches each hosting vendor through
+  that vendor's machine adapter, by `contracts/machines/v1` of qoryai/integrations, and
+  the AWS EC2 adapter is the one machine adapter in this repository. It adds the
+  settings of the provisioner, how the provisioner runs the machine adapter, and the
+  region and credentials of the AWS EC2 adapter. It moves the settings and the instance
+  role policy of the AWS EC2 adapter into one section about that adapter. Before, the
+  README was titled `qory-provisioner` and described the EC2 adapter beside the
+  provisioner.
 - `qory-machine.service` sends standard error to the console as well as the journal
   (`StandardError=journal+console`). The start script sets `QORY_STATUS_FD=3` for qory
   run, with descriptor 3 on that standard error, and sends qory run's stdout and stderr
