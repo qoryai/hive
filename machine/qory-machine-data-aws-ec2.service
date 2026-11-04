@@ -12,8 +12,7 @@ Description=Write the start data from the EC2 user data
 Wants=network-online.target
 After=network-online.target
 Before=qory-machine.service
-# A failed fetch powers the machine off. When this unit fails, qory-machine.service
-# still starts, fails on the missing start-data file, and powers the machine off too.
+# A failed or timed-out run of this unit powers the machine off.
 FailureAction=poweroff
 
 [Service]
@@ -27,6 +26,6 @@ StandardError=journal+console
 TimeoutStartSec=120
 
 [Install]
-# WantedBy, not RequiredBy: with RequiredBy, a failure of this unit would skip
-# qory-machine.service, with its failure line and its power-off.
+# WantedBy, not RequiredBy: the start unit does not depend on this unit, so it runs,
+# prints its line and powers off whenever this unit is missing.
 WantedBy=qory-machine.service

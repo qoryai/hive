@@ -323,9 +323,12 @@ write the file. Each writer follows this rule:
 - Make the folder `/run/qory-machine-start` as root, mode 0700.
 - Write the start data to a temporary file in that folder, mode 0600, then rename the
   file to `start-data`. On failure, leave no file.
+- Finish before `qory-machine.service` starts. A systemd unit sets
+  `Before=qory-machine.service`.
 
-The start unit fails on a symbolic link, on a file that is not a regular file, and on a
-file that root does not own. It treats an empty file as missing, and then prints
-"Install the start-data unit for this machine's vendor.
-/run/qory-machine-start/start-data does not exist." It deletes the file after the read.
-A failed start-data unit for EC2 powers the machine off.
+The start unit fails on a folder that is a link or that another user owns, on a
+symbolic link, on a file that is not a regular file, and on a file that root does not
+own. When the file is missing or empty, it prints "Install the start-data unit for this
+machine's vendor. /run/qory-machine-start/start-data does not exist or is empty." It
+deletes the file after the read. A failed start-data unit for EC2 powers the machine
+off.

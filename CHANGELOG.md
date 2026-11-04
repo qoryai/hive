@@ -9,8 +9,9 @@ The changes to Hive that no release contains yet, in the shape of
 
 - The start-data unit for EC2: `qory-machine-data-aws-ec2.service` and its script
   `qory-machine-data-aws-ec2`. It runs before `qory-machine.service`, reads the EC2 user
-  data with IMDSv2, and writes it to `/run/qory-machine-start/start-data`. When it
-  fails, it powers the machine off. The provisioner image contains both files in
+  data with IMDSv2, and writes it to `/run/qory-machine-start/start-data`. It fails
+  when a path exists at `start-data` before the write. When it fails, it powers the
+  machine off. The provisioner image contains both files in
   `/usr/share/qory-provisioner/machine/`.
 - The provisioner tells Qory Apiary how each machine's removal went, with the signed
   `POST /v1/dispatches/<id>/machine-end`. After each delete it sends `deleting` or
@@ -42,15 +43,15 @@ The changes to Hive that no release contains yet, in the shape of
 
 - The start script, `qory-machine-start`, reads the start data from the file
   `/run/qory-machine-start/start-data`, which a start-data unit for the machine's vendor
-  writes, and deletes the file after the read. The script fails on a symbolic link, on
-  a file that is not a regular file, and on a file that root does not own, and treats
-  an empty file as missing. The header of `qory-machine.service` and the README section
-  "The machine image" describe how to write the file. Before, the script read
-  `machine: aws-ec2` from `/home/qory/.config/qory/forager.yaml` and fetched the EC2
-  user data itself, and the image needed curl and sed for the script. The lines about
-  `forager.yaml` are gone. The two lines about the token and user data requests moved
-  to the EC2 unit with the same words. In two lines, "The user data" now reads "The
-  start data".
+  writes, and deletes the file after the read. The script fails on a folder that is a
+  link or that another user owns, on a symbolic link, on a file that is not a regular
+  file, and on a file that root does not own, and treats an empty file as missing. The
+  header of `qory-machine.service` and the README section "The machine image" describe
+  how to write the file. Before, the script read `machine: aws-ec2` from
+  `/home/qory/.config/qory/forager.yaml` and fetched the EC2 user data itself, and the
+  image needed curl and sed for the script. The lines about `forager.yaml` are gone. The
+  two lines about the token and user data requests moved to the EC2 unit with the same
+  words. In two lines, "The user data" now reads "The start data".
 - A dispatch keeps its journal entry, and its place in `max_machines`, until the machine
   adapter returns gone. Before, the entry left when the adapter accepted the delete. So
   with `max_machines` of 1, the next run waits at least one more watch of 60 seconds,
@@ -99,7 +100,8 @@ The changes to Hive that no release contains yet, in the shape of
 - In a machine image for EC2, install and enable `qory-machine-data-aws-ec2.service`
   and its script, as the README section "The machine image" lists. Without the unit,
   the start script prints "Install the start-data unit for this machine's vendor.
-  /run/qory-machine-start/start-data does not exist." and powers the machine off.
+  /run/qory-machine-start/start-data does not exist or is empty." and powers the
+  machine off.
 - Build the machine image with a qory that writes its status and error lines to the
   descriptor in `QORY_STATUS_FD`. With an earlier qory, the console and the machine log
   contain no line of qory run, and qory run's errors are only in the machine's journal,

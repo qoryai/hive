@@ -15,10 +15,12 @@
 #   - Make the folder /run/qory-machine-start as root, mode 0700.
 #   - Write the start data to a temporary file in that folder, mode 0600, then rename
 #     the file to start-data. On failure, leave no file.
-# The script fails on a symbolic link, on a file that is not a regular file, and on a
-# file that root does not own. It treats an empty file as missing. It deletes the file
-# after the read. No file from an earlier boot remains: /run is a tmpfs, and each
-# machine boots once.
+#   - Finish before qory-machine.service starts. A systemd unit sets
+#     Before=qory-machine.service.
+# The script fails on a folder that is a link or that another user owns, on a symbolic
+# link, on a file that is not a regular file, and on a file that root does not own. It
+# treats an empty file as missing. It deletes the file after the read. No file from an
+# earlier boot remains: /run is a tmpfs, and each machine boots once.
 
 [Unit]
 Description=Run qory on this machine, then power it off

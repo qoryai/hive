@@ -440,7 +440,12 @@ func TestStartUnitRunsQory(t *testing.T) {
 				}
 				write(t, e.root+"/etc/docker/daemon.json", c.daemonJSON)
 			}
+			// A writer that was killed before its rename left this temporary file.
+			write(t, filepath.Dir(e.data)+"/.start-data.Ab12Cd", "left by a killed writer")
 			r := e.run(t, sh, "STUB_QORY_OUTPUT=1")
+			if got := entries(t, filepath.Dir(e.data)); len(got) != 0 {
+				t.Errorf("the start data folder contains %q after the run, want no file", got)
+			}
 			// qory run's status line reaches the script's stderr, and its stderr the
 			// script's stdout, which reaches the journal only.
 			if r.status != 0 || r.stdout != "agent: a line of the agent's output\n" || r.stderr != "qory run: a status line\n" {
@@ -608,9 +613,9 @@ func skipRoot(t *testing.T) {
 }
 
 // otherOwner replaces the start data file with a file that the user who runs the test
-// does not own. Run as root, the test gives the file to uid 65534. Otherwise, it makes
-// the start data file a hard link to a root-owned file, and skips when no such link can
-// be made. The script removes only the link.
+// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
+// it makes the start data file a hard link to a root-owned file, and skips when no such
+// link can be made. The script removes only the link.
 func otherOwner(t *testing.T, root string) {
 	t.Helper()
 	data := root + handOff
@@ -632,6 +637,35 @@ func otherOwner(t *testing.T, root string) {
 	t.Skip("make a file that another user owns to run this test: no hard link to a root-owned file could be made")
 }
 
+// otherOwnerFolder changes the owner of the folder dir to uid 65534. Only root can do
+// that, and a folder has no hard link, so the test is skipped when it does not run as
+// root.
+func otherOwnerFolder(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("run this test as root: only root can make a folder that another user owns, and a folder cannot be hard linked")
+	}
+	if err := os.Chown(dir, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// linkFolder replaces the start data folder under root with a link to the folder
+// root/elsewhere, which contains a start data file and a temporary file .start-data.x.
+func linkFolder(t *testing.T, root string) {
+	t.Helper()
+	dir := filepath.Dir(root + handOff)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root+"/elsewhere", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root+"/elsewhere/start-data", startData(runCode, gatewayURL, gatewayAddress, 60))
+	write(t, root+"/elsewhere/.start-data.x", "a temporary file")
+	link(t, root+"/elsewhere", dir)
+}
+
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
 // one line to stderr, runs no qory after an invalid input, and powers the machine off.
 func TestStartUnitFails(t *testing.T) {
@@ -647,7 +681,8 @@ func TestStartUnitFails(t *testing.T) {
 		gateway   = "Set gateway in the start data to an object with url and address. The gateway value is not an object."
 		url       = "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid."
 		address   = "Set gateway.address in the start data to an IPv4 or IPv6 address. The value is not an IP address."
-		missing   = "Install the start-data unit for this machine's vendor. {root}/run/qory-machine-start/start-data does not exist."
+		missing   = "Install the start-data unit for this machine's vendor. {root}/run/qory-machine-start/start-data does not exist or is empty."
+		folder    = "Remove {root}/run/qory-machine-start. The path is a link, not a folder, or a folder that another user owns."
 		symlink   = "Write the start data to {root}/run/qory-machine-start/start-data as a regular file. The path is a symbolic link."
 		irregular = "Write the start data to {root}/run/qory-machine-start/start-data as a regular file. The path is not a regular file."
 	)
@@ -762,6 +797,27 @@ func TestStartUnitFails(t *testing.T) {
 		},
 		{name: "a link to nothing", want: symlink, setup: func(t *testing.T, root string) { remove(t, root+handOff); link(t, root+"/none", root+handOff) }},
 		{name: "a link to a folder", want: symlink, setup: func(t *testing.T, root string) { remove(t, root+handOff); link(t, root+"/etc", root+handOff) }},
+		// The script reads no file through the link, and removes none in the folder that
+		// the link points to.
+		{
+			name: "the start data folder is a link", want: folder, dataStays: true, setup: linkFolder,
+			check: func(t *testing.T, root string) {
+				if got := entries(t, root+"/elsewhere"); !slices.Equal(got, []string{".start-data.x", "start-data"}) {
+					t.Errorf("the folder that the link points to contains %q, want .start-data.x and start-data", got)
+				}
+			},
+		},
+		{
+			name: "a file at the start data folder", want: folder, dataStays: true,
+			setup: func(t *testing.T, root string) {
+				dir := filepath.Dir(root + handOff)
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+				write(t, dir, "not a folder")
+			},
+		},
+		{name: "another user's folder", want: folder, setup: func(t *testing.T, root string) { otherOwnerFolder(t, filepath.Dir(root+handOff)) }},
 		{
 			name: "a named pipe", want: irregular,
 			setup: func(t *testing.T, root string) {
@@ -1081,7 +1137,7 @@ func TestStartUnitSecretLines(t *testing.T) {
 }
 
 // curlOptions are the options of both curl calls of qory-machine-data-aws-ec2.
-const curlOptions = "curl --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
+const curlOptions = "curl -q --noproxy * --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 "
 
 // newEC2Env makes the root folder of newEnv without the start data folder, and returns
 // it with the start data folder's path.
@@ -1182,37 +1238,123 @@ func TestDataUnitWritesStartData(t *testing.T) {
 	}
 }
 
-// TestDataUnitFails checks each failed step: the script prints one line to stderr, or
-// none after a signal, and leaves no file in the start data folder.
+// TestDataUnitFails checks each failed step: the script prints one line to stderr and
+// leaves no file in the start data folder that it did not find there.
 func TestDataUnitFails(t *testing.T) {
 	sh := bash(t)
 	path := commands(t, sh)
+	const (
+		folder = "Remove {root}/run/qory-machine-start. The path is a link, not a folder, or a folder that another user owns."
+		exists = "Remove {root}/run/qory-machine-start/start-data. The path exists before this unit writes it."
+	)
+	// toolDir is the tools folder of commands, without the stubs and so without curl.
+	toolDir := filepath.SplitList(path)[1]
 	for _, c := range []struct {
 		name   string
 		vars   []string
 		status int
 		want   string
+		// path is PATH for the run, or "" for the stubs and the tools.
+		path string
 		// readOnly is a folder under the root that the script cannot write.
 		readOnly string
+		// setup changes the root folder and the start data folder dir before the run.
+		setup func(t *testing.T, root, dir string)
+		// left are the names in the start data folder after the run.
+		left []string
+		// check checks the root folder after the run.
+		check func(t *testing.T, root string)
 	}{
 		{name: "token request fails", vars: []string{"STUB_FAIL_TOKEN=1"}, status: 1, want: "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries.\n"},
 		{name: "user data request fails", vars: []string{"STUB_FAIL_USERDATA=1"}, status: 1, want: "Launch this machine with the start data as its user data. The user data request to 169.254.169.254 failed after 5 retries.\n"},
 		{name: "/run not writable", readOnly: "/run", status: 1, want: "Check that root can write {root}/run. Making {root}/run/qory-machine-start failed.\n"},
-		{name: "SIGTERM", vars: []string{"STUB_TERM=1"}, status: 143},
+		{name: "SIGTERM", vars: []string{"STUB_TERM=1"}, status: 143, want: "No action needed. The script stopped on SIGTERM, and the machine powers off.\n"},
+		{name: "no curl", path: toolDir, status: 1, want: "Install curl in the machine image. This script runs curl, and it is not on PATH.\n"},
+		{
+			name: "a folder at start-data", status: 1, want: exists + "\n", left: []string{"start-data"},
+			setup: func(t *testing.T, _, dir string) {
+				if err := os.MkdirAll(dir+"/start-data", 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				if got := entries(t, root+handOff); len(got) != 0 {
+					t.Errorf("the folder at start-data contains %q, want no file", got)
+				}
+			},
+		},
+		{
+			name: "a link to a folder at start-data", status: 1, want: exists + "\n", left: []string{"start-data"},
+			setup: func(t *testing.T, root, dir string) {
+				if err := os.Mkdir(root+"/elsewhere", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link(t, root+"/elsewhere", dir+"/start-data")
+			},
+			check: func(t *testing.T, root string) {
+				if got := entries(t, root+"/elsewhere"); len(got) != 0 {
+					t.Errorf("the folder that the link points to contains %q, want no file", got)
+				}
+			},
+		},
+		{
+			name: "a link to nothing at start-data", status: 1, want: exists + "\n", left: []string{"start-data"},
+			setup: func(t *testing.T, root, dir string) { link(t, root+"/none", dir+"/start-data") },
+		},
+		// The script writes nothing in the folder that the link points to, and leaves its
+		// mode.
+		{
+			name: "the start data folder is a link", status: 1, want: folder + "\n",
+			setup: func(t *testing.T, root, dir string) {
+				if err := os.Mkdir(root+"/elsewhere", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(root+"/elsewhere", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link(t, root+"/elsewhere", dir)
+			},
+			check: func(t *testing.T, root string) {
+				if got := entries(t, root+"/elsewhere"); len(got) != 0 {
+					t.Errorf("the folder that the link points to contains %q, want no file", got)
+				}
+				if got := mode(t, root+"/elsewhere"); got != fs.ModeDir|0o755 {
+					t.Errorf("the folder that the link points to has mode %v, want 0755", got)
+				}
+			},
+		},
+		{
+			name: "another user's folder", status: 1, want: folder + "\n",
+			setup: func(t *testing.T, _, dir string) {
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				otherOwnerFolder(t, dir)
+			},
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			e, dir := newEC2Env(t, path)
+			if c.path != "" {
+				e.path = c.path
+			}
 			if c.readOnly != "" {
 				readOnly(t, e.root+c.readOnly)
+			}
+			if c.setup != nil {
+				c.setup(t, e.root, dir)
 			}
 			r := e.runEC2(t, sh, c.vars...)
 			want := strings.ReplaceAll(c.want, "{root}", e.root)
 			if r.status != c.status || r.stdout != "" || r.stderr != want {
 				t.Errorf("status %d, stdout %q, stderr %q; want %d, no stdout, and stderr %q", r.status, r.stdout, r.stderr, c.status, want)
 			}
-			if got := entries(t, dir); len(got) != 0 {
-				t.Errorf("the start data folder contains %q after a failure, want no file", got)
+			if got := entries(t, dir); !slices.Equal(got, c.left) {
+				t.Errorf("the start data folder contains %q after a failure, want %q", got, c.left)
+			}
+			if c.check != nil {
+				c.check(t, e.root)
 			}
 		})
 	}

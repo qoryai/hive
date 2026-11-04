@@ -3,7 +3,8 @@
 # qory-machine-data-aws-ec2.service at boot, once, before qory-machine.service. It reads
 # the EC2 user data, which is the start data, from the instance metadata service with
 # IMDSv2, and writes it to /run/qory-machine-start/start-data by the rule in the header
-# of qory-machine.service.
+# of qory-machine.service. It fails when the folder is a link, is not a folder or
+# another user owns it, and when a path exists at start-data before the write.
 #
 # The machine image must contain bash 5, curl, and the coreutils chmod, mkdir, mktemp,
 # mv and rm.
@@ -11,9 +12,9 @@
 # The token and the start data reach no output and no command argument. The token
 # reaches curl on stdin, and the start data goes from curl's stdout into a temporary
 # file in /run/qory-machine-start, which the script then renames to start-data. Each
-# failure prints one line to stderr; the line starts with its fix and contains no
-# secret. After a failure or a signal, the script removes the temporary file, so it
-# leaves no start-data file.
+# failure and each signal prints one line to stderr; the line starts with its fix and
+# contains no secret. After a failure or a signal, the script removes the temporary
+# file, so it leaves no start-data file.
 #
 # QORY_MACHINE_ROOT, when set, is a folder that every path below is placed under. The
 # tests set it; qory-machine-data-aws-ec2.service leaves it unset.
@@ -36,9 +37,15 @@ on_exit() {
 	exit "$status"
 }
 trap on_exit EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# After a signal, FailureAction=poweroff in qory-machine-data-aws-ec2.service powers
+# the machine off.
+stop() {
+	printf '%s\n' "No action needed. The script stopped on $1, and the machine powers off." >&2
+	exit "$2"
+}
+trap 'stop SIGHUP 129' HUP
+trap 'stop SIGINT 130' INT
+trap 'stop SIGTERM 143' TERM
 
 fail() {
 	printf '%s\n' "$1" >&2
@@ -50,16 +57,23 @@ for tool in chmod curl mkdir mktemp mv rm; do
 done
 
 # IMDSv2: a token from a PUT, then the user data with that token. The retries cover the
-# seconds after boot before the metadata service accepts connections.
-curl_options=(--silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5)
+# seconds after boot before the metadata service accepts connections. -q, the first
+# argument, skips .curlrc, and --noproxy '*' skips the proxy variables, so curl calls
+# 169.254.169.254 directly.
+curl_options=(-q --noproxy '*' --silent --fail --retry 5 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5)
 token=$(curl "${curl_options[@]}" -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
 	http://169.254.169.254/latest/api/token 2>/dev/null) ||
 	fail "Turn on the instance metadata service with IMDSv2 for this machine. The token request to 169.254.169.254 failed after 5 retries."
 
-{ mkdir -p -m 0700 "$data_dir" && chmod 0700 "$data_dir"; } 2>/dev/null ||
-	fail "Check that root can write $root/run. Making $data_dir failed."
-# mktemp makes the file with mode 0600. No other user can write in the folder, so the
-# rename below replaces start-data or makes it.
+mkdir -p -m 0700 "$data_dir" 2>/dev/null || fail "Check that root can write $root/run. Making $data_dir failed."
+# chmod follows a link, so the folder check comes before chmod. Under the unit, the
+# script runs as root, so -O is true for a folder that root owns.
+[[ ! -L $data_dir && -d $data_dir && -O $data_dir ]] ||
+	fail "Remove $data_dir. The path is a link, not a folder, or a folder that another user owns."
+chmod 0700 "$data_dir" 2>/dev/null || fail "Check that root can set the mode of $data_dir. Setting the folder to mode 0700 failed."
+[[ ! -e $data_file && ! -L $data_file ]] || fail "Remove $data_file. The path exists before this unit writes it."
+# mktemp makes the file with mode 0600. The check above leaves no path at start-data, so
+# the rename makes it.
 tmp=$(mktemp "$data_dir/.start-data.XXXXXX" 2>/dev/null) ||
 	fail "Check that root can write $data_dir. Making a temporary file in the folder failed."
 

@@ -60,7 +60,8 @@ COPY --from=build /out/qory-machines-aws-ec2 /usr/local/bin/qory-machines-aws-ec
 # as /etc/systemd/system/qory-machine.service and
 # /usr/local/libexec/qory/qory-machine-start. A machine image for EC2 also installs
 # /etc/systemd/system/qory-machine-data-aws-ec2.service and
-# /usr/local/libexec/qory/qory-machine-data-aws-ec2. The image enables both units.
+# /usr/local/libexec/qory/qory-machine-data-aws-ec2. The machine image enables both
+# units.
 COPY --chmod=0644 machine/qory-machine.service /usr/share/qory-provisioner/machine/qory-machine.service
 COPY --chmod=0755 machine/qory-machine-start /usr/share/qory-provisioner/machine/qory-machine-start
 COPY --chmod=0644 machine/qory-machine-data-aws-ec2.service /usr/share/qory-provisioner/machine/qory-machine-data-aws-ec2.service

@@ -70,12 +70,17 @@ run_code_file=$run_code_dir/run-code
 state_dir=$root/var/lib/qory-machine
 work_dir=$state_dir/work
 
-# Every exit, after a failure, a signal or the end of qory run, removes the start data
-# file and the run code, and powers the machine off.
+# Every exit, after a failure, a signal or the end of qory run, removes the run code,
+# the start data file and any temporary file .start-data.* that a killed writer left,
+# and powers the machine off. When the start data folder is a link, the files in the
+# folder it links to stay.
 on_exit() {
 	local status=$?
 	set +e
-	rm -f -- "$data_file" "$run_code_file" 2>/dev/null
+	rm -f -- "$run_code_file" 2>/dev/null
+	if [[ ! -L $data_dir ]]; then
+		rm -f -- "$data_file" "$data_dir"/.start-data.* 2>/dev/null
+	fi
 	if ! systemctl poweroff 2>/dev/null; then
 		printf '%s\n' "Power this machine off with systemctl poweroff. The power-off request failed." >&2
 	fi
@@ -170,10 +175,15 @@ is_hostname() {
 	[[ ${#1} -le 253 && $1 =~ ^($label\.)*$label$ ]]
 }
 
-# 1. Read the start data, once. The tests of -e, -f, -O and -s follow a symbolic link,
-# so the test of -L comes first. Under qory-machine.service the script runs as root, so
-# -O is true for a file that root owns.
-missing="Install the start-data unit for this machine's vendor. $data_file does not exist."
+# 1. Read the start data, once. The tests of -e, -d, -f, -O and -s follow a symbolic
+# link, so the test of -L comes first. Under qory-machine.service the script runs as
+# root, so -O is true for a file or folder that root owns. A missing folder gets the
+# line of a missing file.
+if [[ -e $data_dir || -L $data_dir ]]; then
+	[[ ! -L $data_dir && -d $data_dir && -O $data_dir ]] ||
+		fail "Remove $data_dir. The path is a link, not a folder, or a folder that another user owns."
+fi
+missing="Install the start-data unit for this machine's vendor. $data_file does not exist or is empty."
 if [[ -L $data_file ]]; then
 	fail "Write the start data to $data_file as a regular file. The path is a symbolic link."
 elif [[ ! -e $data_file ]]; then
