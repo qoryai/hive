@@ -1,28 +1,32 @@
 # Hive
 
-Hive makes and deletes the machines of Qory Apiary's node pools. Hive is
+Hive makes and deletes the machines of Qory Apiary's node pools. A node pool is a
+group of machines in Qory Apiary, and one provisioner serves it. Hive is
 vendor-agnostic: it reaches each hosting vendor only through that vendor's machine
 adapter, a separate program that makes, lists, reads and deletes machines at one
 vendor. Each machine adapter follows the machine adapter contract
 [`contracts/machines/v1`](https://github.com/qoryai/integrations/tree/main/contracts/machines/v1)
-of [qoryai/integrations](https://github.com/qoryai/integrations). The one machine
-adapter today is the AWS EC2 adapter, `qory-machines-aws-ec2`.
+of [qoryai/integrations](https://github.com/qoryai/integrations). This repository
+contains one machine adapter, the AWS EC2 adapter, `qory-machines-aws-ec2`.
 
 This repository builds two programs:
 
 - `qory-provisioner`, the program of Hive. Its one command, `serve`, claims
-  dispatches from Qory Apiary, makes one machine for each through the machine
-  adapter, and deletes each machine once its dispatch ends. It runs until SIGTERM or
-  SIGINT. `qory-provisioner serve -h` prints its flags.
+  dispatches from Qory Apiary (a dispatch is one piece of work that runs on one new
+  machine), makes one machine for each through the machine adapter, and deletes each
+  machine once its dispatch ends. It runs until SIGTERM or SIGINT.
+  `qory-provisioner serve -h` prints its flags.
 - `qory-machines-aws-ec2`, the AWS EC2 adapter. See
   [The AWS EC2 adapter](#the-aws-ec2-adapter).
 
 ## Settings of the provisioner
 
 `serve` reads the settings file at `--settings`, by default
-`/etc/qory-provisioner/settings.json`. It keeps the access key, the enrolment and the
-journal of live dispatches in the state folder at `--state-dir`, by default
-`/var/lib/qory-provisioner`. The settings file is one JSON object:
+`/etc/qory-provisioner/settings.json`. It keeps the access key, the record of the
+enrolment, and the journal of live dispatches in the state folder at `--state-dir`, by
+default `/var/lib/qory-provisioner`. The enrolment is the step at the first start that
+makes the access key and registers it with Qory Apiary as the key of one node pool; see
+[Enrol the access key](#enrol-the-access-key). The settings file is one JSON object:
 
 ```json
 {
@@ -50,26 +54,26 @@ journal of live dispatches in the state folder at `--state-dir`, by default
   Optional. See [Enrol the access key](#enrol-the-access-key).
 
 Write each path as an absolute path of at most 4096 bytes, with no `.` or `..`
-element, no double slash and no trailing slash. Keep secrets out of the settings
-file: when it contains an access key secret, a run key, a run code or an enrolment
-code, `serve` exits with status 1, and the error starts with the fix.
+element, no double slash, no trailing slash, and no NUL byte. Keep secrets out of
+the settings file: when it contains an access key secret, a run key, a run code or an
+enrolment code, `serve` exits with status 1, and the error starts with the fix.
 
 ## How the provisioner runs the machine adapter
 
 The provisioner makes no call to a hosting vendor. It runs the machine adapter as
 `<command> <name> --settings <file>`, where `<command>` is `adapter.command`,
 `<name>` is `check`, `make`, `list`, `log` or `delete`, and `<file>` is
-`adapter.settings`. It writes each request on the adapter's standard input and reads
-the answer on the adapter's standard output, in the documents of
-`contracts/machines/v1`. When `serve` starts, it runs `check` before it claims a
-dispatch, and it stops with status 1 when `check` fails.
+`adapter.settings`. It writes each request to the adapter's standard input and reads
+the answer from its standard output, in the documents of `contracts/machines/v1`. When
+`serve` starts, it runs `check` before it claims a dispatch, and it exits with status 1
+when `check` fails.
 
-The adapter's standard error goes to the provisioner's log, line by line. A line
-that contains what looks like a run code, or a piece of the data that the
-provisioner passes to a machine, is replaced by a fixed text. The adapter runs with
-the provisioner's environment, without any variable whose name starts with `QORY_`.
-The provisioner kills the adapter when `make` runs longer than 2 minutes, or another
-command longer than 1 minute.
+The provisioner copies the adapter's standard error, line by line, to its standard
+error, where it writes its log. It cuts a line at 4096 bytes, and it replaces a line
+that contains what looks like a run code, or a piece of the start data that it passes
+to a machine, with a fixed text. The adapter runs with the provisioner's environment,
+without any variable whose name starts with `QORY_`. The provisioner kills the adapter
+when `make` runs longer than 2 minutes, or another command longer than 1 minute.
 
 ## Run one provisioner per node pool
 
@@ -135,11 +139,12 @@ The adapter reads the region from `AWS_REGION`, or else from the instance metada
 the EC2 instance that it runs on. `AWS_DEFAULT_REGION` has no effect. The adapter uses
 only the credentials of the host's instance role, which it reads from the instance
 metadata service, and calls EC2 only at the region's standard endpoint. It reads no
-AWS config or credentials file. When the environment sets a variable that selects
-other credentials, a profile or file, another metadata address, another endpoint or
-another certificate authority, such as `AWS_ACCESS_KEY_ID`, `AWS_PROFILE` or
-`AWS_ENDPOINT_URL`, each command fails, and the error starts with `Unset` and the
-variable's name.
+AWS config or credentials file. When the environment sets, to a value that is not
+empty, a variable that selects other credentials, a profile or a config or credentials
+file, another metadata address, another endpoint or another certificate authority, or
+that turns off the instance metadata, such as `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+`AWS_EC2_METADATA_DISABLED` or `AWS_ENDPOINT_URL`, each command fails, and the error
+starts with `Unset` and the variable's name.
 
 ### Settings
 
