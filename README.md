@@ -24,9 +24,9 @@ This repository builds two programs:
 `serve` reads the settings file at `--settings`, by default
 `/etc/qory-provisioner/settings.json`. It keeps the access key, the record of the
 enrolment, the instance id and the journal of live dispatches in the state folder at
-`--state-dir`, by
-default `/var/lib/qory-provisioner`. The enrolment is the step at the first start that
-makes the access key and registers it with Qory Apiary as the key of one node pool; see
+`--state-dir`, by default `/var/lib/qory-provisioner`. The enrolment is the step at the
+first start that makes the access key and registers it with Qory Apiary as the key of
+one node pool; see
 [Enrol the access key](#enrol-the-access-key). The settings file is one JSON object:
 
 ```json
@@ -144,8 +144,8 @@ metadata service, and calls EC2 only at the region's standard endpoint. It reads
 AWS config or credentials file.
 
 Each command fails when the environment sets one of these variables to a value that is
-not empty: a variable that selects other credentials, a profile, or a config or
-credentials file, another metadata address, another endpoint or another certificate
+not empty: a variable that selects other credentials, a profile, a config or
+credentials file, another metadata address, another endpoint, or another certificate
 authority, or that turns off the instance metadata. Examples are `AWS_ACCESS_KEY_ID`,
 `AWS_PROFILE`, `AWS_EC2_METADATA_DISABLED` and `AWS_ENDPOINT_URL`. The error starts
 with `Unset` and the variable's name.
