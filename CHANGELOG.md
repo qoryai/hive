@@ -7,6 +7,13 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Added
 
+- The machine's start script writes the steps of the machine's start to
+  `/var/lib/qory-machine/steps.jsonl` just before it runs `qory run`: one JSON object
+  per line with the step's name and its start and end in UTC to the millisecond, for
+  boot, read start data, set firewall, start Docker and write run code. The file
+  contains no value of the start data. The script passes the file to `qory run` with
+  `--machine-steps-file`. A failed write does not stop the script, and `qory run` then
+  starts without the flag.
 - The start-data unit for EC2: `qory-machine-data-aws-ec2.service` and its script
   `qory-machine-data-aws-ec2`. It runs before `qory-machine.service`, reads the EC2 user
   data with IMDSv2, and writes it to `/run/qory-machine-start/start-data`. It fails

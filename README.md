@@ -421,6 +421,31 @@ file, and on a file that root does not own. When the file is missing or empty, i
 /run/qory-machine-start/start-data does not exist or is empty." It deletes the file
 after the read. A failed start-data unit for EC2 powers the machine off.
 
+Just before `qory run`, the start unit writes the steps of the machine's start to
+`/var/lib/qory-machine/steps.jsonl`, owner root, mode 0644, and passes the file to
+`qory run` with `--machine-steps-file`. Each line is one JSON object, in the order the
+steps ran, with times in UTC to the millisecond:
+
+```
+{"name":"start Docker","started":"2026-11-06T00:31:44.120Z","ended":"2026-11-06T00:31:58.904Z"}
+```
+
+The steps are `boot`, `read start data`, `set firewall`, `start Docker` and
+`write run code`. `boot` runs from the kernel's start to the start of the script. Each
+other step runs from the end of the step before it, or from the start of the script
+when there is no boot line, to its stage line. The times come from `/proc/uptime`, so a
+change of the clock during the start does not reorder the steps. When `/proc/uptime`
+cannot be read or has no number, the times come from the clock, and the file has no
+`boot` line. The file contains no value of the start data.
+
+The start unit first removes any `steps.jsonl`, so a file from the machine image never
+stays. It writes the file only when `/var/lib/qory-machine` is a folder, not a link,
+that root owns and that no group or other user can write. When the write fails or is
+skipped, the start unit prints one line to the console that starts with the fix, leaves
+no `steps.jsonl`, and runs `qory run` without `--machine-steps-file`. When
+`/var/lib/qory-machine` is a link, the start unit removes and writes no `steps.jsonl`
+in the folder that it links to.
+
 ## Licence
 
 Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). *Qory* is a trademark of
