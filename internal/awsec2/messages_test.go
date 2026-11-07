@@ -8,6 +8,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
 	"github.com/qoryai/hive/internal/adapterio"
@@ -99,10 +101,40 @@ func TestMessagesFit(t *testing.T) {
 		}
 		wantFits(t, err.Error())
 	}
-	spec := contracts.MachineSpec{VCPUs: 1024, MemoryMiB: 8388608, DiskGiB: 65536, Arch: "arm64", Virtualization: true}
+	spec := contracts.MachineSpec{VCPUs: 1024, MemoryMiB: 8388608, DiskGiB: 16384, Arch: "arm64", Virtualization: true}
 	_, err = region(world()).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
 	if err == nil {
 		t.Fatal("make with a spec that nothing fits: no error")
+	}
+	wantFits(t, err.Error())
+
+	// The defects of max_root_gib, with the largest values.
+	big := func(f *fakeAPI) *fakeAPI {
+		f.image = func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) {
+			return &ec2.DescribeImagesOutput{Images: []types.Image{{
+				ImageId:             aws.String("ami-0123456789abcdef0"),
+				Architecture:        types.ArchitectureValuesX8664,
+				RootDeviceName:      aws.String("/dev/xvda"),
+				BlockDeviceMappings: []types.BlockDeviceMapping{{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsBlockDevice{VolumeSize: aws.Int32(16384)}}},
+			}}}, nil
+		}
+		return f
+	}
+	_, err = region(big(world())).Check(context.Background(), writeSettings(t, withMaxRoot(`16383`)), contracts.MachinesCheck{Version: 1})
+	if err == nil || !strings.HasPrefix(err.Error(), "Raise max_root_gib") {
+		t.Fatalf("check with an image larger than max_root_gib: error %v", err)
+	}
+	wantFits(t, err.Error())
+	spec.DiskGiB = 16384
+	_, err = region(world()).Make(context.Background(), writeSettings(t, withMaxRoot(`16383`)), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
+	if err == nil || !strings.HasPrefix(err.Error(), "Raise max_root_gib") {
+		t.Fatalf("make with a disk larger than max_root_gib: error %v", err)
+	}
+	wantFits(t, err.Error())
+	spec.DiskGiB = 65536
+	_, err = region(world()).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
+	if err == nil || !strings.HasPrefix(err.Error(), "Report this defect") {
+		t.Fatalf("make with a disk larger than a gp3 volume: error %v", err)
 	}
 	wantFits(t, err.Error())
 }

@@ -45,6 +45,7 @@ func TestParseSettings(t *testing.T) {
 		SecurityGroupID: "sg-0123456789abcdef0",
 		ImageID:         "ami-0123456789abcdef0",
 		InstanceTypes:   []string{"t3.medium", "m7i.large"},
+		MaxRootGiB:      16384,
 	}
 	if !reflect.DeepEqual(s, want) {
 		t.Errorf("settings %+v, want %+v", s, want)
@@ -113,6 +114,28 @@ func TestParseSettingsTags(t *testing.T) {
 	}
 }
 
+// withMaxRoot is validSettings with the member max_root_gib set to the JSON value n.
+func withMaxRoot(n string) string {
+	return strings.TrimSuffix(validSettings, "\n}") + ",\n  \"max_root_gib\": " + n + "\n}"
+}
+
+// TestParseSettingsMaxRoot pins the member max_root_gib: absent gives 16384, and the
+// bounds that pass are 1 and 16384, also next to tags.
+func TestParseSettingsMaxRoot(t *testing.T) {
+	for doc, want := range map[string]int{
+		validSettings:        16384,
+		withMaxRoot(`1`):     1,
+		withMaxRoot(`500`):   500,
+		withMaxRoot(`16384`): 16384,
+		strings.TrimSuffix(withTags(`{"qory:stack": "example-stack"}`), "\n}") + `, "max_root_gib": 500}`: 500,
+	} {
+		s, err := ParseSettings([]byte(doc))
+		if err != nil || s.MaxRootGiB != want {
+			t.Errorf("%s: max_root_gib %d, error %v, want %d", doc, s.MaxRootGiB, err, want)
+		}
+	}
+}
+
 // TestParseSettingsErrors pins each error, word for word, and its kind defect. No
 // error quotes a value or a member name of the document: each document contains the
 // marker in a place that the error would quote.
@@ -141,6 +164,8 @@ func TestParseSettingsErrors(t *testing.T) {
 	tagsRule := "Set tags in " + file + " to an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters."
 	tagText := "Write the keys and values of tags in " + file + " with only letters, digits, spaces and _ . : / = + - @."
 	tagAWS := "Remove every key that starts with aws: from tags in " + file + ": AWS reserves that prefix."
+	maxRootRule := "Set max_root_gib in " + file + " to an integer from 1 to 16384."
+	unknown := "Remove every member other than subnet_id, security_group_id, image_id, instance_types, tags and max_root_gib from " + file + "."
 	tagAdapter := "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + file + ": the adapter sets these tags on every machine."
 	var manyTags []string
 	for i := range 21 {
@@ -158,10 +183,11 @@ func TestParseSettingsErrors(t *testing.T) {
 		{`{"subnet_id": "` + marker + `",}`, "Fix the JSON in " + file + " at byte offset 31."},
 		{"{\"subnet_id\": \"" + marker + "\xff\"}", "Fix the JSON in " + file + " at byte offset 30."},
 		{`{"subnet_id": "subnet-01234567", "subnet_id": "` + marker + `"}`, "Write each member once in " + file + "."},
-		{`{"` + marker + `": 1}`, "Remove every member other than subnet_id, security_group_id, image_id, instance_types and tags from " + file + "."},
-		{`{"run_subnet_id": "subnet-01234567"}`, "Remove every member other than subnet_id, security_group_id, image_id, instance_types and tags from " + file + "."},
-		{`{"sizes": {"standard": "t3.medium"}}`, "Remove every member other than subnet_id, security_group_id, image_id, instance_types and tags from " + file + "."},
+		{`{"` + marker + `": 1}`, unknown},
+		{`{"run_subnet_id": "subnet-01234567"}`, unknown},
+		{`{"sizes": {"standard": "t3.medium"}}`, unknown},
 		{`{"tags": {}}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
+		{`{"max_root_gib": 500}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
 		{`{}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
 		{`{"subnet_id": "subnet-01234567", "instance_types": []}`, "Add the missing members to " + file + ": security_group_id, image_id."},
 		{member("subnet_id", `"`+marker+`"`), subnetRule},
@@ -207,6 +233,18 @@ func TestParseSettingsErrors(t *testing.T) {
 		{withTags(`{"qory:managed": "` + marker + `"}`), tagAdapter},
 		{withTags(`{"QORY:POOL": "` + marker + `"}`), tagAdapter},
 		{withTags(`{"qory:Key": "` + marker + `"}`), tagAdapter},
+		{withMaxRoot(`0`), maxRootRule},
+		{withMaxRoot(`-1`), maxRootRule},
+		{withMaxRoot(`16385`), maxRootRule},
+		{withMaxRoot(`99999999999999999999`), maxRootRule},
+		{withMaxRoot(`1.5`), maxRootRule},
+		{withMaxRoot(`500.0`), maxRootRule},
+		{withMaxRoot(`5e2`), maxRootRule},
+		{withMaxRoot(`"500"`), maxRootRule},
+		{withMaxRoot(`"` + marker + `"`), maxRootRule},
+		{withMaxRoot(`null`), maxRootRule},
+		{withMaxRoot(`[500]`), maxRootRule},
+		{withMaxRoot(`500, "max_root_gib": 600`), "Write each member once in " + file + "."},
 		// Of several faults, the error is the one of the first check, on every read.
 		{withTags(`{"aws:a": "x", "qory:key": "y", "b": "z!"}`), tagText},
 		{withTags(`{"qory:key": "y", "aws:a": "x"}`), tagAWS},

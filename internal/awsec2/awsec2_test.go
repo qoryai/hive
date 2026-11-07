@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -341,6 +342,31 @@ func TestCheckFailsOnTypes(t *testing.T) {
 	}
 }
 
+// TestCheckMaxRoot pins that each offer of check has a disk of max_root_gib, also when
+// max_root_gib equals the image's root volume of 30 GiB, and that check fails with the
+// kind defect, and sends no dry run, when max_root_gib is smaller than that volume.
+func TestCheckMaxRoot(t *testing.T) {
+	for _, n := range []int{500, 30} {
+		f := world()
+		h, _, _ := testHandler(f)
+		status, out := serve(t, h, "check", writeSettings(t, withMaxRoot(strconv.Itoa(n))), `{"version": 1}`)
+		want := fmt.Sprintf(`{"offers":[`+
+			`{"vcpus":2,"memory_mib":4096,"disk_gib":%d,"arch":"amd64","virtualization":false},`+
+			`{"vcpus":2,"memory_mib":8192,"disk_gib":%d,"arch":"amd64","virtualization":false}]}`+"\n", n, n)
+		if status != adapterio.ExitOK || out != want {
+			t.Errorf("max_root_gib %d: exit status %d, output\n%s\nwant\n%s", n, status, out, want)
+		}
+	}
+
+	f := world()
+	h, _, _ := testHandler(f)
+	status, out := serve(t, h, "check", writeSettings(t, withMaxRoot(`29`)), `{"version": 1}`)
+	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The image's root volume has 30 GiB, above max_root_gib 29 GiB")
+	if len(f.runs) != 0 || len(f.subnets) != 0 {
+		t.Errorf("%d RunInstances and %d DescribeSubnets calls, want none", len(f.runs), len(f.subnets))
+	}
+}
+
 // TestCheckStopsEarly pins that check makes no EC2 call when the settings or the
 // credentials fail, and writes their errors, and that it stops after a failed read of
 // the image or the subnet.
@@ -502,7 +528,6 @@ func TestMakeNothingFits(t *testing.T) {
 	}{
 		{makeRequest(8, 1024, 8, false, testData), "Add an instance type that fits the machine spec to instance_types in aws-ec2.json: in eu-west-1, no type fits 8 vCPUs, 1024 MiB, 8 GiB, amd64"},
 		{makeRequest(2, 16384, 8, false, testData), "Add an instance type that fits the machine spec to instance_types in aws-ec2.json: in eu-west-1, no type fits 2 vCPUs, 16384 MiB, 8 GiB, amd64"},
-		{makeRequest(2, 1024, 16385, false, testData), "Add an instance type that fits the machine spec to instance_types in aws-ec2.json: in eu-west-1, no type fits 2 vCPUs, 1024 MiB, 16385 GiB, amd64"},
 		{makeRequest(2, 1024, 8, true, testData), "Add an instance type that fits the machine spec to instance_types in aws-ec2.json: in eu-west-1, no type fits 2 vCPUs, 1024 MiB, 8 GiB, amd64, with virtualization"},
 		{strings.Replace(makeRequest(2, 1024, 8, false, testData), "amd64", "arm64", 1), "Add an instance type that fits the machine spec to instance_types in aws-ec2.json: in eu-west-1, no type fits 2 vCPUs, 1024 MiB, 8 GiB, arm64"},
 	} {
@@ -554,6 +579,52 @@ func TestMakeRootVolume(t *testing.T) {
 		if aws.ToInt32(ebs.VolumeSize) != want || ebs.VolumeType != types.VolumeTypeGp3 || !aws.ToBool(ebs.Encrypted) || !aws.ToBool(ebs.DeleteOnTermination) {
 			t.Errorf("disk %d: root volume %+v, want %d GiB, gp3, encrypted, deleted on termination", disk, ebs, want)
 		}
+	}
+}
+
+// TestMakeMaxRoot pins that make fails with the kind defect, before any EC2 call, for a
+// spec whose disk is larger than max_root_gib, 16384 when the member is absent; that
+// it fails with the kind defect, before any RunInstances call, when the image's root
+// volume is larger than max_root_gib; and that a spec with a disk of exactly
+// max_root_gib gets a root volume of that size.
+func TestMakeMaxRoot(t *testing.T) {
+	for _, tc := range []struct {
+		settings string
+		disk     int
+		want     string
+	}{
+		{withMaxRoot(`500`), 501, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The machine spec has disk_gib 501 GiB, above max_root_gib 500 GiB"},
+		{withMaxRoot(`500`), 16384, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The machine spec has disk_gib 16384 GiB, above max_root_gib 500 GiB"},
+		{withMaxRoot(`500`), 65536, "Report this defect in the provisioner: the machine spec has disk_gib 65536 GiB, and a gp3 volume has at most 16384 GiB"},
+		{validSettings, 16385, "Report this defect in the provisioner: the machine spec has disk_gib 16385 GiB, and a gp3 volume has at most 16384 GiB"},
+		{withMaxRoot(`500`), 16385, "Report this defect in the provisioner: the machine spec has disk_gib 16385 GiB, and a gp3 volume has at most 16384 GiB"},
+	} {
+		f := world()
+		h, _, built := testHandler(f)
+		status, out := serve(t, h, "make", writeSettings(t, tc.settings), makeRequest(1, 1024, tc.disk, false, testData))
+		wantFailure(t, status, out, contracts.FailureDefect, tc.want)
+		if *built != 0 || f.calls() != 0 {
+			t.Errorf("disk %d: %d clients built and %d EC2 calls, want none", tc.disk, *built, f.calls())
+		}
+	}
+
+	// The image's root volume of 30 GiB is larger than max_root_gib.
+	f := world()
+	h, _, _ := testHandler(f)
+	status, out := serve(t, h, "make", writeSettings(t, withMaxRoot(`29`)), makeRequest(1, 1024, 8, false, testData))
+	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The image's root volume has 30 GiB, above max_root_gib 29 GiB")
+	if len(f.runs) != 0 || len(f.describes) != 0 {
+		t.Errorf("%d RunInstances and %d DescribeInstances calls, want none", len(f.runs), len(f.describes))
+	}
+
+	f = world()
+	h, _, _ = testHandler(f)
+	status, out = serve(t, h, "make", writeSettings(t, withMaxRoot(`500`)), makeRequest(1, 1024, 500, false, testData))
+	if status != adapterio.ExitOK || out != `{"id":"`+testID+`","machine_type":"t3.medium"}`+"\n" {
+		t.Fatalf("exit status %d, output %q", status, out)
+	}
+	if got := makes(f); len(got) != 1 || aws.ToInt32(got[0].BlockDeviceMappings[0].Ebs.VolumeSize) != 500 {
+		t.Errorf("RunInstances calls %+v, want one with a root volume of 500 GiB", got)
 	}
 }
 

@@ -40,13 +40,20 @@ type Settings struct {
 	// qory:pool and qory:key. Tags is nil when the member tags is
 	// absent or an empty object.
 	Tags map[string]string
+	// MaxRootGiB is the largest root volume that make may start, in GiB: 1 to
+	// [machine.MaxRootGiB], and machine.MaxRootGiB when the member max_root_gib is
+	// absent. Each offer of check has this disk.
+	MaxRootGiB int
 }
 
 // members are the required members, in the order an error lists the missing ones.
 var members = []string{"subnet_id", "security_group_id", "image_id", "instance_types"}
 
-// tagsMember is the one optional member.
-const tagsMember = "tags"
+// The optional members.
+const (
+	tagsMember    = "tags"
+	maxRootMember = "max_root_gib"
+)
 
 // maxFile is the most bytes a settings file may contain.
 const maxFile = 64 << 10
@@ -80,6 +87,7 @@ var rules = map[string]string{
 	"image_id":          "ami- and 8 or 17 lower-case hexadecimal digits",
 	"instance_types":    "a list of 1 to 64 EC2 instance types such as t3.medium, each of 1 to 40 characters",
 	tagsMember:          "an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters",
+	maxRootMember:       "an integer from 1 to 16384",
 }
 
 // The errors of tags beyond its rule, in the order tags checks them, so a document
@@ -90,8 +98,8 @@ const (
 	msgTagAdapter = "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + settingsFile + ": the adapter sets these tags on every machine."
 )
 
-// msgUnknownMember is the error of a member that is neither required nor tags.
-const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id, instance_types and tags from " + settingsFile + "."
+// msgUnknownMember is the error of a member that is neither required nor optional.
+const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id, instance_types, tags and max_root_gib from " + settingsFile + "."
 
 // msgRepeatedType is the error of an instance type that instance_types lists twice.
 const msgRepeatedType = "Write each instance type once in instance_types in " + settingsFile + "."
@@ -165,7 +173,7 @@ func ParseSettings(b []byte) (Settings, error) {
 		return Settings{}, settingsError("Write " + settingsFile + " as one JSON object.")
 	}
 	for name := range doc {
-		if name != tagsMember && !slices.Contains(members, name) {
+		if name != tagsMember && name != maxRootMember && !slices.Contains(members, name) {
 			return Settings{}, settingsError(msgUnknownMember)
 		}
 	}
@@ -204,6 +212,13 @@ func ParseSettings(b []byte) (Settings, error) {
 		var msg string
 		if s.Tags, msg = tags(raw); msg != "" {
 			return Settings{}, settingsError(msg)
+		}
+	}
+	s.MaxRootGiB = machine.MaxRootGiB
+	if raw, ok := doc[maxRootMember]; ok {
+		var good bool
+		if s.MaxRootGiB, good = maxRoot(raw); !good {
+			return Settings{}, settingsError(ruleError(maxRootMember))
 		}
 	}
 	return s, nil
@@ -246,6 +261,16 @@ func instanceTypes(raw jsontext.Value) (list []string, good, repeated bool) {
 		}
 	}
 	return out, true, false
+}
+
+// maxRoot reads the member max_root_gib: an integer from 1 to [machine.MaxRootGiB].
+// A number with a fraction or an exponent is not an integer.
+func maxRoot(raw jsontext.Value) (int, bool) {
+	var n int
+	if raw.Kind() != '0' || jsonv2.Unmarshal(raw, &n) != nil || n < 1 || n > machine.MaxRootGiB {
+		return 0, false
+	}
+	return n, true
 }
 
 // tags reads the member tags: an object of at most maxTags members, each a key of 1
