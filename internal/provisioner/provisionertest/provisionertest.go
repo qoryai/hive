@@ -16,17 +16,17 @@
 // answer: a reply that [Server.Script] queued for the route, else the model's.
 //
 // The model keeps a queue of work, which [Server.Offer] fills, and the dispatches it
-// made of it. A claim takes the first work waiting into a new dispatch, or is held up
-// to its wait_seconds and [Server.Hold] for one, then gets a signed 204. Each
-// dispatch's refusals follow the contract's order: 403 for an unknown dispatch; for a
-// dispatched or a release, 410 for one that ended; for a release, 409 machine_exists
-// after dispatched or after [Server.Redeem]; for a dispatched or a release, 409
-// lease_expired for one whose lease lapsed before its first dispatched and before
-// [Server.Redeem], or that [Server.Expire] made stale; and for a machine log, 409
-// machine_log_exists for a second one. A redeemed dispatch never goes stale. Every dispatched of a live
-// dispatch gets a signed 204, and the fake records the external of the first one. A
-// release ends the dispatch, and so does [Server.End]. The fake records every request
-// in order, [Server.Calls].
+// made of it. A claim takes the first work waiting into a new dispatch, or is held up to
+// its wait_seconds and [Server.Hold] for one, then gets a signed 204. Each dispatch's
+// refusals follow the contract's order: 403 for an unknown dispatch; for a dispatched or
+// a release, 410 for one that ended; for a release, 409 machine_exists after dispatched
+// or after [Server.Redeem]; for a dispatched or a release, 409 lease_expired for one
+// whose lease lapsed before its first dispatched and before [Server.Redeem], or that
+// [Server.Expire] made stale; and for a machine log, 409 machine_log_exists for a second
+// one. A redeemed dispatch never goes stale. Every dispatched of a live dispatch gets a
+// signed 204, and the fake records the external of the first one. A release ends the
+// dispatch, and so does [Server.End]. The fake records every request in order,
+// [Server.Calls].
 package provisionertest
 
 import (
@@ -91,9 +91,11 @@ const (
 
 // Work is a request for one machine waiting in the queue, as [Server.Offer] puts it
 // there. Each member left empty is filled in: a new run code, [GatewayURL],
-// [MaxLifetimeMinutes] and [Lease]. An empty Machine sends no machine.
+// [MaxLifetimeMinutes] and [Lease]. An empty Machine and a nil MachineSpec send no
+// machine and no machine spec.
 type Work struct {
-	Machine string
+	Machine     string
+	MachineSpec *contracts.MachineSpec
 	// RunCode is the claim answer's run code, of the contract's form: qecr_, 26
 	// upper-case Crockford base32 characters, a dot and 22 base64url characters.
 	RunCode            string
@@ -171,10 +173,13 @@ type Dispatch struct {
 	// redemption, and Redeemed one whose run code [Server.Redeem] marked as redeemed.
 	Stale    bool
 	Redeemed bool
-	// Dispatched is how many dispatched got the 204, and External the external of the
-	// first one, if it had one.
-	Dispatched int
-	External   *contracts.External
+	// Offers are the offers of the claim that made the dispatch.
+	Offers []contracts.MachineSpec
+	// Dispatched is how many dispatched got the 204, and External and MachineType the
+	// external and the machine type of the first one, if it had them.
+	Dispatched  int
+	External    *contracts.External
+	MachineType string
 	// Release is the release that ended it, if one did, and MachineLog its machine log.
 	Release    *contracts.Release
 	MachineLog *contracts.MachineLog
@@ -687,7 +692,7 @@ func (s *Server) model(ctx context.Context, route Route, id string, body []byte)
 		if d.State == StateClaimed {
 			var dp contracts.Dispatched
 			_ = json.Unmarshal(body, &dp)
-			d.State, d.External = StateDispatched, dp.External
+			d.State, d.External, d.MachineType = StateDispatched, dp.External, dp.MachineType
 		}
 		d.Dispatched++
 		return answer{status: http.StatusNoContent}
@@ -711,12 +716,12 @@ func (s *Server) claim(ctx context.Context, body []byte) answer {
 			defer s.mu.Unlock()
 			w := s.queue[0]
 			s.queue = s.queue[1:]
-			d := &Dispatch{ID: newDispatchID(), Work: w, LeaseUntil: s.now().Add(w.Lease).UTC().Truncate(time.Second), State: StateClaimed}
+			d := &Dispatch{ID: newDispatchID(), Work: w, LeaseUntil: s.now().Add(w.Lease).UTC().Truncate(time.Second), State: StateClaimed, Offers: cl.Offers}
 			s.dispatches[d.ID] = d
 			s.order = append(s.order, d.ID)
 			b, _ := json.Marshal(contracts.ClaimAnswer{
 				Version: 1, Revision: provisioner.Revision, DispatchID: d.ID, PoolID: PoolID,
-				LeaseUntil: contracts.FormatTime(d.LeaseUntil), Machine: w.Machine, RunCode: w.RunCode,
+				LeaseUntil: contracts.FormatTime(d.LeaseUntil), Machine: w.Machine, MachineSpec: w.MachineSpec, RunCode: w.RunCode,
 				GatewayURL: w.GatewayURL, MaxLifetimeMinutes: w.MaxLifetimeMinutes,
 			})
 			return answer{status: http.StatusOK, body: b, header: http.Header{"Cache-Control": {"no-store"}}}

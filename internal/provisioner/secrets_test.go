@@ -58,7 +58,7 @@ func TestNoSecretLeaks(t *testing.T) {
 	)
 	work := provisionertest.Work{RunCode: markerCode}
 	srv.Offer(work)
-	cl, ok, err := c.Claim(ctx, provisioner.MaxWaitSeconds)
+	cl, ok, err := c.Claim(ctx, provisioner.MaxWaitSeconds, nil)
 	if err != nil || !ok {
 		t.Fatalf("claim: %v %v", ok, err)
 	}
@@ -80,7 +80,7 @@ func TestNoSecretLeaks(t *testing.T) {
 	} {
 		srv.Offer(work)
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Edit: edit})
-		if got, _, err := c.Claim(ctx, provisioner.MaxWaitSeconds); err == nil || got.RunCode.Len() != 0 {
+		if got, _, err := c.Claim(ctx, provisioner.MaxWaitSeconds, nil); err == nil || got.RunCode.Len() != 0 {
 			t.Error("a claim answer that breaks the contract is used")
 		} else {
 			out.WriteString(err.Error() + "\n")
@@ -97,8 +97,8 @@ func TestNoSecretLeaks(t *testing.T) {
 	for _, err := range []error{
 		c.Release(ctx, cl.DispatchID, "the run code is "+markerCode),
 		c.Release(ctx, cl.DispatchID, "the run key is "+markerKey),
-		c.Dispatched(ctx, cl.DispatchID, &contracts.External{Type: "example-ci", Ref: markerCode, URL: "https://ci.example.com/runs/1"}),
-		c.Dispatched(ctx, cl.DispatchID, &contracts.External{Type: "example-ci", Ref: "i-0123456789abcdef0", URL: "https://ci.example.com/" + markerSecret}),
+		c.Dispatched(ctx, cl.DispatchID, &contracts.External{Type: "example-ci", Ref: markerCode, URL: "https://ci.example.com/runs/1"}, ""),
+		c.Dispatched(ctx, cl.DispatchID, &contracts.External{Type: "example-ci", Ref: "i-0123456789abcdef0", URL: "https://ci.example.com/" + markerSecret}, ""),
 	} {
 		if err == nil {
 			t.Error("a request that contains a marker is sent")

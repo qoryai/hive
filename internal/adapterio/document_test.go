@@ -51,9 +51,16 @@ type fixture struct {
 func b64(n int) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, n)) }
 
 func fixtures() []fixture {
-	makeReq := func(key, pool, size, data string) string {
-		return `{"version": 1, "key": ` + key + `, "pool": ` + pool + `, "size": ` + size + `, "start_data": ` + data + `}`
+	makeReq := func(key, pool, spec, data string) string {
+		return `{"version": 1, "key": ` + key + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
 	}
+	// spec is a machine_spec with the vCPUs, memory, disk, architecture and
+	// virtualization written as JSON.
+	spec := func(vcpus, mib, disk, arch, virt string) string {
+		return `{"vcpus": ` + vcpus + `, "memory_mib": ` + mib + `, "disk_gib": ` + disk + `, "arch": ` + arch + `, "virtualization": ` + virt + `}`
+	}
+	s := spec("2", "4096", "30", `"amd64"`, "false")
+	offers := func(n int) string { return `{"offers": [` + strings.TrimSuffix(strings.Repeat(s+",", n), ",") + `]}` }
 	good := `"` + b64(10) + `"`
 	machine := func(id, key, state, started string) string {
 		return `{"machines": [{"id": ` + id + `, "key": ` + key + `, "state": ` + state + `, "started": ` + started + `}]}`
@@ -74,46 +81,61 @@ func fixtures() []fixture {
 		both("check", `null`, false),
 		both("check", `"x"`, false),
 
-		both("check-answer", `{}`, true),
+		both("check-answer", offers(1), true),
+		both("check-answer", offers(64), true),
+		both("check-answer", offers(65), false),
+		both("check-answer", offers(0), false),
+		both("check-answer", `{"offers": null}`, false),
+		both("check-answer", `{}`, false),
 		both("check-answer", `{"ok": true}`, false),
 		both("check-answer", `[]`, false),
 
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"standard"`, good), true),
-		both("make", makeReq(`"dp_vwxyz0123456789a"`, `"np_hjkmnpqrstvwxyz0"`, `"s"`, good), true),
-		both("make", makeReq(`"dp_0123456789abcde"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef0"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdei"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdeu"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789ABCDEF"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"np_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`""`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`1`, `"np_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"dp_0123456789abcdef"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdel"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdeo"`, `"s"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"`+"s"+strings.Repeat("a", 63)+`"`, good), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"`+"s"+strings.Repeat("a", 64)+`"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"Standard"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"1x"`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `""`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"x-1"`, good), true),
-		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `""`), true, false},
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(1)+`"`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(2)+`"`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(16382)+`"`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(16383)+`"`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(16384)+`"`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(16385)+`"`), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"`+b64(16386)+`"`), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eA"`), false),
-		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eB=="`), true, false},
-		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eHl="`), true, false},
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eA=="`), true),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eHg\n="`), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eH-="`), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"s"`, `"eHh4"`), true),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "s"}`, false),
-		both("make", `{"version": 2, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "s", "start_data": "eA=="}`, false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, good), true),
+		both("make", makeReq(`"dp_vwxyz0123456789a"`, `"np_hjkmnpqrstvwxyz0"`, s, good), true),
+		both("make", makeReq(`"dp_0123456789abcde"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef0"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdei"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdeu"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789ABCDEF"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"np_0123456789abcdef"`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`""`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`1`, `"np_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"dp_0123456789abcdef"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdel"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdeo"`, s, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("1", "512", "1", `"arm64"`, "true"), good), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("1024", "8388608", "65536", `"amd64"`, "false"), good), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("0", "4096", "30", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("1025", "4096", "30", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "511", "30", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "8388609", "30", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "0", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "65537", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2.5", "4096", "30", `"amd64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "30", `"x86_64"`, "false"), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "30", `"amd64"`, `"no"`), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `{"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64"}`, good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, strings.Replace(s, "}", `, "gpus": 1}`, 1), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"standard"`, good), false),
+		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "eA=="}`, false),
+		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `""`), true, false},
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(1)+`"`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(2)+`"`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(16382)+`"`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(16383)+`"`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(16384)+`"`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(16385)+`"`), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(16386)+`"`), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eA"`), false),
+		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eB=="`), true, false},
+		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHl="`), true, false},
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eA=="`), true),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHg\n="`), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eH-="`), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHh4"`), true),
+		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`}`, false),
+		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, false),
+		both("make", `{"version": 2, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`, "start_data": "eA=="}`, false),
 
 		both("make-answer", `{"id": "i-0123456789abcdef0"}`, true),
 		both("make-answer", `{"id": "-"}`, false),
@@ -125,6 +147,11 @@ func fixtures() []fixture {
 		both("make-answer", `{"id": "é"}`, false),
 		both("make-answer", `{"id": "i-1", "key": "d"}`, false),
 		both("make-answer", `{"id": 7}`, false),
+		both("make-answer", `{"id": "i-1", "machine_type": "m7i.large"}`, true),
+		both("make-answer", `{"id": "i-1", "machine_type": "`+strings.Repeat("t", 64)+`"}`, true),
+		both("make-answer", `{"id": "i-1", "machine_type": "`+strings.Repeat("t", 65)+`"}`, false),
+		both("make-answer", `{"id": "i-1", "machine_type": "m7i large"}`, false),
+		both("make-answer", `{"id": "i-1", "machine_type": ""}`, false),
 
 		both("list", `{"version": 1, "pool": "np_0123456789abcdef"}`, true),
 		both("list", `{"version": 1}`, false),
@@ -305,7 +332,7 @@ func TestDecoderRefusesLogBytes(t *testing.T) {
 func TestDecodeErrorsHaveNoValue(t *testing.T) {
 	const marker = "qecr_MARKER7f3a"
 	cases := map[string]string{
-		"make":         `{"version": 1, "key": "` + marker + `", "pool": "np_0123456789abcdef", "size": "s", "start_data": "eA=="}`,
+		"make":         `{"version": 1, "key": "` + marker + `", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`,
 		"make-answer":  `{"id": "` + marker + ` "}`,
 		"list-answer":  `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "` + marker + `", "started": "2026-10-22T10:00:00Z"}]}`,
 		"error":        `{"error": {"kind": "` + marker + `", "message": "m"}}`,
@@ -326,9 +353,10 @@ func TestDecodeErrors(t *testing.T) {
 		{"check", `{"version": 2}`, "the member version must be 1"},
 		{"check", `{"version": 1, "x": 1}`, "the document has a member that version 1 does not define"},
 		{"check", `[]`, "the document must be one JSON object in UTF-8, with no member name twice"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "s"}`, "the member start_data is missing"},
-		{"make", `{"version": 1, "key": "d", "pool": "np_0123456789abcdef", "size": "s", "start_data": "eA=="}`, "the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "s", "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
+		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
+		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
+		{"make", `{"version": 1, "key": "d", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`, "the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
+		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
 		{"make-answer", `{"id": 7}`, "the member id must be a string"},
 		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
 		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},

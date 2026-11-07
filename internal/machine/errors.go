@@ -50,7 +50,7 @@ func (e *Error) Error() string {
 	var maxAttempts *retry.MaxAttemptsError
 	switch {
 	case e.Code == codeCapacity:
-		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s in the subnet's zone: %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Wait, or add a type that fits to instance_types in %s: %s failed with %s in the subnet's zone: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeSubnetFull:
 		return fmt.Sprintf("Wait until machines end, or set subnet_id in %s to a subnet with free addresses: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Kind == contracts.FailureLimit:
@@ -126,6 +126,12 @@ func errorCode(err error) string {
 		return api.ErrorCode()
 	}
 	return ""
+}
+
+// NoCapacity reports whether err is InsufficientInstanceCapacity: EC2 has no capacity
+// for the instance type in the subnet's zone, and another instance type may have it.
+func NoCapacity(err error) bool {
+	return errorCode(err) == codeCapacity
 }
 
 // TokenTerminated reports whether err is IdempotentInstanceTerminated: the machine

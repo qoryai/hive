@@ -16,16 +16,22 @@ import (
 const (
 	dispatchA = "dp_0123456789abcdef"
 	dispatchB = "dp_ghjkmnpqrstvwxyz"
+	dispatchC = "dp_abcdefghjkmnpq01"
 	// machine is a machine id. The journal treats a machine id as opaque.
 	machine = "m-0123456789abcdef"
 	// oddID is a machine id with punctuation, in the shape of the adapter protocol.
 	oddID = "pool/a:01~x"
 	// lifetime is a machine's lifetime in minutes.
 	lifetime = 60
+	// machineType is the type of a machine, such as an EC2 instance type.
+	machineType = "t3.medium"
 )
 
 // longID is a machine id of 128 characters, the longest that the shape allows.
 var longID = strings.Repeat("z", 128)
+
+// longType is a machine type of 64 characters, the longest that the shape allows.
+var longType = strings.Repeat("y", 64)
 
 // open opens the journal in dir and fails the test on an error.
 func open(t *testing.T, dir string) *journal.Journal {
@@ -68,18 +74,20 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 	for _, c := range []struct {
 		phase, machine string
 		lifetime       int
+		machineType    string
 		line           string
 	}{
-		{journal.PhaseClaimed, "", lifetime, dispatchA + " claimed - 60"},
-		{journal.PhaseMade, machine, lifetime, dispatchA + " made " + machine + " 60"},
-		{journal.PhaseDispatched, machine, lifetime, dispatchA + " dispatched " + machine + " 60"},
-		{journal.PhaseDispatched, oddID, 15, dispatchA + " dispatched " + oddID + " 15"},
-		{journal.PhaseMade, longID, 1470, dispatchA + " made " + longID + " 1470"},
-		{journal.PhaseMade, "a", 999, dispatchA + " made a 999"},
-		{journal.PhaseDeleting, oddID, journal.MinLifetime, dispatchA + " deleting " + oddID + " 15"},
-		{journal.PhaseEnded, oddID, journal.MinLifetime, dispatchA + " ended " + oddID + " 15"},
+		{journal.PhaseClaimed, "", lifetime, "", dispatchA + " claimed - 60 -"},
+		{journal.PhaseMade, machine, lifetime, "", dispatchA + " made " + machine + " 60 -"},
+		{journal.PhaseMade, machine, lifetime, machineType, dispatchA + " made " + machine + " 60 " + machineType},
+		{journal.PhaseDispatched, machine, lifetime, machineType, dispatchA + " dispatched " + machine + " 60 " + machineType},
+		{journal.PhaseDispatched, oddID, 15, "", dispatchA + " dispatched " + oddID + " 15 -"},
+		{journal.PhaseMade, longID, 1470, longType, dispatchA + " made " + longID + " 1470 " + longType},
+		{journal.PhaseMade, "a", 999, "b", dispatchA + " made a 999 b"},
+		{journal.PhaseDeleting, oddID, journal.MinLifetime, machineType, dispatchA + " deleting " + oddID + " 15 " + machineType},
+		{journal.PhaseEnded, oddID, journal.MinLifetime, "", dispatchA + " ended " + oddID + " 15 -"},
 	} {
-		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: c.lifetime}
+		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: c.lifetime, MachineType: c.machineType}
 		if err := j.Set(e); err != nil {
 			t.Fatalf("%s: %v", c.phase, err)
 		}
@@ -136,8 +144,8 @@ func TestSetKeepsTheOrderOfClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		dispatchA + " made " + machine + " 60",
-		dispatchB + " claimed - 60",
+		dispatchA + " made " + machine + " 60 -",
+		dispatchB + " claimed - 60 -",
 	}
 	if got := lines(t, dir); !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
@@ -182,7 +190,7 @@ func TestALeftNewFileIsReplaced(t *testing.T) {
 	if err := j.Set(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
+	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60 -"}; !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
 	}
 }
@@ -210,7 +218,7 @@ func TestAFailedWriteLeavesTheJournalAsItWas(t *testing.T) {
 	if got := j.List(); !slices.Equal(got, []journal.Entry{a}) {
 		t.Errorf("the journal lists %v, want %v", got, a)
 	}
-	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
+	if got, want := lines(t, dir), []string{dispatchA + " claimed - 60 -"}; !slices.Equal(got, want) {
 		t.Errorf("the journal is %q, want %q", got, want)
 	}
 }
@@ -223,6 +231,8 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		machineShape  = "the machine id is not 1 to 128 printable ASCII characters other than a space"
 		secret        = "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 		lifetimeRange = "the lifetime is not 15 to 1470 minutes"
+		typeShape     = "the machine type is not 1 to 64 printable ASCII characters other than a space, or is -"
+		typeSecret    = "the machine type contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	)
 	ok := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}
 	for _, c := range []struct {
@@ -263,6 +273,15 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		}, lifetimeRange},
 		{"a lifetime below 0", func(e *journal.Entry) { e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, -60 }, lifetimeRange},
 		{"claimed with qrk_", func(e *journal.Entry) { e.MachineID = "qrk_abc" }, secret},
+		{"a machine type of 65", func(e *journal.Entry) { e.MachineType = longType + "y" }, typeShape},
+		{"a machine type of -", func(e *journal.Entry) { e.MachineType = "-" }, typeShape},
+		{"a machine type with a space", func(e *journal.Entry) { e.MachineType = "t3 medium" }, typeShape},
+		{"a machine type with a line feed", func(e *journal.Entry) { e.MachineType = "t3\nmedium" }, typeShape},
+		{"a machine type that is not ASCII", func(e *journal.Entry) { e.MachineType = "t3.é" }, typeShape},
+		{"a machine type with qak_", func(e *journal.Entry) { e.MachineType = "x.qak_abc" }, typeSecret},
+		{"a machine type with qecp_", func(e *journal.Entry) {
+			e.Phase, e.MachineID, e.MachineType = journal.PhaseMade, machine, "qecp_abc"
+		}, typeSecret},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -280,7 +299,7 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 			if got := j.List(); !slices.Equal(got, []journal.Entry{ok}) {
 				t.Errorf("the journal lists %v", got)
 			}
-			if got, want := lines(t, dir), []string{dispatchA + " claimed - 60"}; !slices.Equal(got, want) {
+			if got, want := lines(t, dir), []string{dispatchA + " claimed - 60 -"}; !slices.Equal(got, want) {
 				t.Errorf("the journal is %q, want %q", got, want)
 			}
 		})
@@ -291,9 +310,10 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 // at most 1 MiB, or whose lines are out of shape or repeat a dispatch. Open returns an
 // error that gives the line's number and quotes no value.
 func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
-	const entry = dispatchA + " claimed - 60"
-	const other = dispatchB + " made " + machine + " 60"
-	const fields = "the line is not four fields separated by single spaces and ended by a line feed"
+	const entry = dispatchA + " claimed - 60 -"
+	const other = dispatchB + " made " + machine + " 60 " + machineType
+	const fields = "the line is not four or five fields separated by single spaces and ended by a line feed"
+	const typeText = "the machine type is not 1 to 64 printable ASCII characters other than a space, or is -"
 	const lifetimeText = "the lifetime is not a whole number of minutes"
 	const run = "0192f0c1-7d4e-7a2b-8c3d-00000000000a"
 	for _, c := range []struct {
@@ -305,37 +325,41 @@ func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
 	}{
 		{name: "a line of two", content: entry + "\n" + dispatchB + " claimed\n", line: 2, cause: fields},
 		{name: "a line of three", content: dispatchA + " claimed -\n", line: 1, cause: fields},
-		{name: "a line of five", content: entry + " -\n", line: 1, cause: fields},
+		{name: "a line of six", content: entry + " -\n", line: 1, cause: fields},
 		{name: "the old three fields with a machine", content: dispatchA + " made " + machine + "\n", line: 1, cause: fields},
-		{name: "the old five fields", content: dispatchA + " " + run + " explore claimed -\n", line: 1, cause: fields},
-		{name: "the old five fields with a machine", content: dispatchA + " " + run + " explore created i-0123456789abcdef0\n", line: 1, cause: fields},
+		{name: "the old five fields", content: dispatchA + " " + run + " explore claimed -\n", line: 1, cause: lifetimeText},
+		{name: "the old five fields with a machine", content: dispatchA + " " + run + " explore created i-0123456789abcdef0\n", line: 1, cause: lifetimeText},
 		{name: "no line feed", content: entry, line: 1, cause: fields},
-		{name: "two spaces", content: dispatchA + "  claimed - 60\n", line: 1, cause: fields},
+		{name: "two spaces", content: dispatchA + "  claimed - 60 -\n", line: 1, cause: fields},
 		{name: "a space at the end", content: entry + " \n", line: 1, cause: fields},
-		{name: "a carriage return", content: entry + "\r\n", line: 1, cause: lifetimeText},
-		{name: "a carriage return after a lifetime", content: other + "\r\n", line: 1, cause: lifetimeText},
-		{name: "a carriage return after a machine id", content: dispatchB + " made " + machine + "\r 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
+		{name: "a carriage return", content: entry + "\r\n", line: 1, cause: typeText},
+		{name: "a carriage return after a machine type", content: other + "\r\n", line: 1, cause: typeText},
+		{name: "a carriage return after a lifetime", content: dispatchB + " made " + machine + " 60\r -\n", line: 1, cause: lifetimeText},
+		{name: "a carriage return after a machine id", content: dispatchB + " made " + machine + "\r 60 -\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
 		{name: "an empty line", content: entry + "\n\n", line: 2, cause: fields},
-		{name: "an unknown phase", content: dispatchA + " running - 60\n", line: 1, cause: "the phase is not claimed, made, dispatched, deleting or ended"},
-		{name: "a dispatch id out of shape", content: "dp_0 claimed - 60\n", line: 1, cause: "the dispatch id is not dp_ and 16 Crockford base32 characters"},
-		{name: "made with -", content: dispatchA + " made - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
-		{name: "dispatched with -", content: dispatchA + " dispatched - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
-		{name: "deleting with -", content: dispatchA + " deleting - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
-		{name: "ended with -", content: dispatchA + " ended - 60\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
-		{name: "claimed with a machine id", content: dispatchA + " claimed " + machine + " 60\n", line: 1, cause: "the machine id is set in the phase claimed"},
-		{name: "a machine id of 129", content: dispatchA + " made " + longID + "z 60\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
-		{name: "a machine id with qrk_", content: dispatchA + " made qrk_abc 60\n", line: 1, cause: "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
-		{name: "claimed with the lifetime -", content: dispatchA + " claimed - -\n", line: 1, cause: lifetimeText},
-		{name: "made with the lifetime -", content: dispatchA + " made " + machine + " -\n", line: 1, cause: lifetimeText},
-		{name: "claimed with a lifetime of 14", content: dispatchA + " claimed - 14\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 14", content: dispatchA + " made " + machine + " 14\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 1471", content: dispatchA + " dispatched " + machine + " 1471\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 5 digits", content: dispatchA + " made " + machine + " 10000\n", line: 1, cause: lifetimeText},
-		{name: "a lifetime with a leading zero", content: dispatchA + " made " + machine + " 060\n", line: 1, cause: lifetimeText},
-		{name: "a lifetime of 0", content: dispatchA + " made " + machine + " 0\n", line: 1, cause: lifetimeText},
-		{name: "a lifetime with a sign", content: dispatchA + " made " + machine + " +60\n", line: 1, cause: lifetimeText},
-		{name: "a lifetime with a fraction", content: dispatchA + " made " + machine + " 60.0\n", line: 1, cause: lifetimeText},
-		{name: "a dispatch twice", content: entry + "\n" + other + "\n" + dispatchA + " made " + machine + " 60\n", line: 3},
+		{name: "an unknown phase", content: dispatchA + " running - 60 -\n", line: 1, cause: "the phase is not claimed, made, dispatched, deleting or ended"},
+		{name: "a dispatch id out of shape", content: "dp_0 claimed - 60 -\n", line: 1, cause: "the dispatch id is not dp_ and 16 Crockford base32 characters"},
+		{name: "made with -", content: dispatchA + " made - 60 -\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "dispatched with -", content: dispatchA + " dispatched - 60 -\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "deleting with -", content: dispatchA + " deleting - 60 -\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "ended with -", content: dispatchA + " ended - 60 -\n", line: 1, cause: "the phase made, dispatched, deleting or ended has no machine id"},
+		{name: "claimed with a machine id", content: dispatchA + " claimed " + machine + " 60 -\n", line: 1, cause: "the machine id is set in the phase claimed"},
+		{name: "a machine id of 129", content: dispatchA + " made " + longID + "z 60 -\n", line: 1, cause: "the machine id is not 1 to 128 printable ASCII characters other than a space"},
+		{name: "a machine id with qrk_", content: dispatchA + " made qrk_abc 60 -\n", line: 1, cause: "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
+		{name: "a machine type of 65", content: dispatchA + " made " + machine + " 60 " + longType + "y\n", line: 1, cause: typeText},
+		{name: "a machine type that is not ASCII", content: dispatchA + " made " + machine + " 60 t3.é\n", line: 1, cause: typeText},
+		{name: "a machine type with qrk_", content: dispatchA + " made " + machine + " 60 qrk_abc\n", line: 1, cause: "the machine type contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
+		{name: "claimed with the lifetime -", content: dispatchA + " claimed - - -\n", line: 1, cause: lifetimeText},
+		{name: "made with the lifetime -", content: dispatchA + " made " + machine + " - -\n", line: 1, cause: lifetimeText},
+		{name: "claimed with a lifetime of 14", content: dispatchA + " claimed - 14 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
+		{name: "a lifetime of 14", content: dispatchA + " made " + machine + " 14 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
+		{name: "a lifetime of 1471", content: dispatchA + " dispatched " + machine + " 1471 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
+		{name: "a lifetime of 5 digits", content: dispatchA + " made " + machine + " 10000 -\n", line: 1, cause: lifetimeText},
+		{name: "a lifetime with a leading zero", content: dispatchA + " made " + machine + " 060 -\n", line: 1, cause: lifetimeText},
+		{name: "a lifetime of 0", content: dispatchA + " made " + machine + " 0 -\n", line: 1, cause: lifetimeText},
+		{name: "a lifetime with a sign", content: dispatchA + " made " + machine + " +60 -\n", line: 1, cause: lifetimeText},
+		{name: "a lifetime with a fraction", content: dispatchA + " made " + machine + " 60.0 -\n", line: 1, cause: lifetimeText},
+		{name: "a dispatch twice", content: entry + "\n" + other + "\n" + dispatchA + " made " + machine + " 60 -\n", line: 3},
 		{name: "a link", link: true},
 		{name: "a folder", folder: true},
 		{name: "too large", large: true},
@@ -384,11 +408,38 @@ func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
 	}
 }
 
+// TestAJournalOfFourFieldsIsRead opens a journal that an earlier version wrote, with
+// no machine type, beside a line of five fields. Its entries have no machine type, and
+// the next write gives each line five fields.
+func TestAJournalOfFourFieldsIsRead(t *testing.T) {
+	dir := t.TempDir()
+	content := dispatchA + " claimed - 60\n" + dispatchB + " dispatched " + machine + " 60\n" + dispatchC + " made " + oddID + " 15 " + machineType + "\n"
+	if err := os.WriteFile(filepath.Join(dir, journal.File), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j := open(t, dir)
+	want := []journal.Entry{
+		{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime},
+		{DispatchID: dispatchB, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: lifetime},
+		{DispatchID: dispatchC, Phase: journal.PhaseMade, MachineID: oddID, MaxLifetimeMinutes: 15, MachineType: machineType},
+	}
+	if got := j.List(); !slices.Equal(got, want) {
+		t.Fatalf("the journal lists %v, want %v", got, want)
+	}
+	if err := j.Remove(dispatchA); err != nil {
+		t.Fatal(err)
+	}
+	wantLines := []string{dispatchB + " dispatched " + machine + " 60 -", dispatchC + " made " + oddID + " 15 " + machineType}
+	if got := lines(t, dir); !slices.Equal(got, wantLines) {
+		t.Errorf("the journal is %q, want %q", got, wantLines)
+	}
+}
+
 // TestAJournalOfExactly1MiBIsRead opens a journal of 1 MiB, the most it may contain.
 func TestAJournalOfExactly1MiBIsRead(t *testing.T) {
-	// line is a line of n bytes, from 30 to 157, for the dispatch k.
+	// line is a line of n bytes, from 32 to 159, for the dispatch k.
 	line := func(k, n int) string {
-		return fmt.Sprintf("dp_%016d made %s 60\n", k, strings.Repeat("a", n-29))
+		return fmt.Sprintf("dp_%016d made %s 60 -\n", k, strings.Repeat("a", n-31))
 	}
 	var b strings.Builder
 	k := 0
@@ -413,11 +464,11 @@ func TestAJournalOfExactly1MiBIsRead(t *testing.T) {
 	}
 }
 
-// TestAnEntryHasOnlyItsFourFields pins the fields of an entry: none is for a secret
+// TestAnEntryHasOnlyItsFiveFields pins the fields of an entry: none is for a secret
 // or for inputs.
-func TestAnEntryHasOnlyItsFourFields(t *testing.T) {
+func TestAnEntryHasOnlyItsFiveFields(t *testing.T) {
 	typ := reflect.TypeFor[journal.Entry]()
-	kinds := []reflect.Kind{reflect.String, reflect.String, reflect.String, reflect.Int}
+	kinds := []reflect.Kind{reflect.String, reflect.String, reflect.String, reflect.Int, reflect.String}
 	var got []string
 	for i := range typ.NumField() {
 		f := typ.Field(i)
@@ -426,7 +477,7 @@ func TestAnEntryHasOnlyItsFourFields(t *testing.T) {
 		}
 		got = append(got, f.Name)
 	}
-	if want := []string{"DispatchID", "Phase", "MachineID", "MaxLifetimeMinutes"}; !slices.Equal(got, want) {
+	if want := []string{"DispatchID", "Phase", "MachineID", "MaxLifetimeMinutes", "MachineType"}; !slices.Equal(got, want) {
 		t.Errorf("the fields are %q, want %q", got, want)
 	}
 }
@@ -477,6 +528,8 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 		}
 		for _, m := range secrets {
 			edits = append(edits,
+				func(x *journal.Entry) { x.MachineType = m },
+				func(x *journal.Entry) { x.MachineType = "t3." + m },
 				func(x *journal.Entry) { x.MachineID = m },
 				func(x *journal.Entry) { x.MachineID = "m-" + m },
 				func(x *journal.Entry) { x.Phase, x.MachineID, x.MaxLifetimeMinutes = journal.PhaseMade, m, lifetime },
@@ -502,10 +555,10 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 	// error quotes no line.
 	for _, m := range markers[1:] {
 		for _, line := range []string{
-			dispatchA + " claimed " + m + " 60\n",
-			dispatchA + " " + m + " - 60\n",
-			dispatchA + " made " + machine + " " + m + "\n",
-			m + " claimed - 60\n",
+			dispatchA + " claimed " + m + " 60 -\n",
+			dispatchA + " " + m + " - 60 -\n",
+			dispatchA + " made " + machine + " " + m + " -\n",
+			m + " claimed - 60 -\n",
 			m + "\n",
 		} {
 			other := t.TempDir()
@@ -521,8 +574,10 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 	}
 	for _, m := range secrets {
 		for _, line := range []string{
-			dispatchA + " made " + m + " 60\n",
-			dispatchA + " dispatched m-" + m + " 60\n",
+			dispatchA + " made " + m + " 60 -\n",
+			dispatchA + " dispatched m-" + m + " 60 -\n",
+			dispatchA + " made " + machine + " 60 " + m + "\n",
+			dispatchA + " dispatched " + machine + " 60 t3." + m + "\n",
 		} {
 			other := t.TempDir()
 			if err := os.WriteFile(filepath.Join(other, journal.File), []byte(line), 0o600); err != nil {
@@ -555,6 +610,28 @@ func TestNoSecretReachesTheJournal(t *testing.T) {
 			if strings.Contains(e, m) {
 				t.Errorf("the error %q contains %q", e, m)
 			}
+		}
+	}
+}
+
+// TestIsMachineType accepts the machine types that an entry may have.
+func TestIsMachineType(t *testing.T) {
+	for s, want := range map[string]bool{
+		machineType:    true,
+		longType:       true,
+		"!":            true,
+		"":             false,
+		"-":            false,
+		longType + "y": false,
+		"t3 medium":    false,
+		"t3.é":         false,
+		"x.qak_abc":    false,
+		"qrk_abc":      false,
+		"qecr_abc":     false,
+		"a/qecp_b":     false,
+	} {
+		if got := journal.IsMachineType(s); got != want {
+			t.Errorf("IsMachineType(%q) is %t", s, got)
 		}
 	}
 }

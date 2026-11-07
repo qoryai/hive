@@ -69,6 +69,17 @@ the answer from its standard output, in the documents of `contracts/machines/v1`
 `serve` starts, it runs `check` before it claims a dispatch, and it exits with status 1
 when `check` fails.
 
+The answer of `check` contains offers: the machines that the adapter can make, each
+with its vCPUs, memory, disk, architecture and whether it runs virtual machines.
+`serve` sends these offers in every claim. Each claimed dispatch has a machine spec,
+the least machine that its run needs, and `serve` passes the spec unchanged to `make`.
+`serve` releases a claimed dispatch that has no machine spec, with the reason "the
+machine was not made: the claim has no machine spec, so the provisioner cannot choose
+a machine". The answer of `make` contains the machine's type, such as `m7i.large`.
+`serve` keeps the type in the journal and sends it in each `dispatched` of the
+dispatch. A machine that `serve` finds by its key after a restart has no type, because
+the answer of `list` contains none, and its `dispatched` contains no type.
+
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
 cuts each line at 4096 bytes. It replaces a line with a fixed text when the line
@@ -160,7 +171,7 @@ JSON object:
   "subnet_id": "subnet-0123456789abcdef0",
   "security_group_id": "sg-0123456789abcdef0",
   "image_id": "ami-0123456789abcdef0",
-  "sizes": {"standard": "t3.medium", "large": "m7g.large"},
+  "instance_types": ["t3.medium", "m7i.large"],
   "tags": {"qory:stack": "example-stack"}
 }
 ```
@@ -168,8 +179,8 @@ JSON object:
 - `subnet_id` and `security_group_id`: the run subnet and the security group of each
   machine's network interface. Required.
 - `image_id`: the image that each machine starts from. Required.
-- `sizes`: 1 to 20 entries, each a size name of a make request set to an EC2 instance
-  type. Required.
+- `instance_types`: the EC2 instance types that the adapter may start, 1 to 64 of
+  them, each 1 to 40 characters and listed once. Required.
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
   and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
   dry run of `check` sends them too.
@@ -179,6 +190,30 @@ digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may n
 `qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
 a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
 member breaks a rule, `check` and `make` fail, and the error starts with the fix.
+
+`check` reads each instance type with `ec2:DescribeInstanceTypes`, the zone of
+`subnet_id` with `ec2:DescribeSubnets`, and the types that zone offers with
+`ec2:DescribeInstanceTypeOfferings`. It fails with the kind `defect`, and an error
+that contains the type and the region, when a type does not run the architecture of
+`image_id`, or the subnet's zone does not offer it. Otherwise its answer contains one
+offer per type, in the order of `instance_types`. Each offer has a disk of 16384 GiB,
+the largest gp3 volume, because `make` sizes the root volume to the machine spec.
+
+`make` starts the smallest type that fits the machine spec: the type with the fewest
+vCPUs, then the least memory, then the first in `instance_types`. A type fits when it
+has at least the spec's vCPUs and memory, runs the spec's architecture, has room for
+the spec's `disk_gib` of at most 16384, and, when the spec sets `virtualization`, is a
+bare metal type or has nested virtualization. For virtualization on a type that is not
+bare metal, `make` turns on nested virtualization with `CpuOptions`. The root volume
+is gp3 and encrypted, is deleted with the machine, and its size is the larger of the
+spec's `disk_gib` and the size of the root volume of `image_id`. When EC2 has no
+capacity for a type in the subnet's zone (`InsufficientInstanceCapacity`), `make`
+tries the next type that fits, and when every type fails that way, it returns the last
+error. When no type fits, `make` fails with the kind `defect`. A key gets one machine:
+each start sends a client token made of the key and the type, and before the first
+start, `make` looks for a machine with the key's tags. EC2 lists a new machine after a
+short delay, so a second `make` with the same key right after the first can start a
+second machine of another type.
 
 ### Instance role policy
 
@@ -271,7 +306,13 @@ example values before you attach it to the instance role:
     {
       "Sid": "Describe",
       "Effect": "Allow",
-      "Action": ["ec2:DescribeInstances", "ec2:DescribeImages"],
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeSubnets"
+      ],
       "Resource": "*"
     },
     {
@@ -308,15 +349,23 @@ What each statement allows, and why:
 - `TagAtLaunch` allows `ec2:CreateTags` only inside `ec2:RunInstances`, which tags the
   instance and its volume as it makes them. The adapter tags nothing after a launch.
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
-  finds a machine by its key, and `ec2:DescribeImages`, which reads the image's root
-  device name. Neither action accepts a limit to a resource, so the resource is `*`.
+  finds a machine by its key; `ec2:DescribeImages`, which reads the image's root
+  device, the size of its root volume and its architecture;
+  `ec2:DescribeInstanceTypes`, which reads the vCPUs, memory, architectures and
+  virtualization of each type in `instance_types`; `ec2:DescribeSubnets`, which reads
+  the zone of `subnet_id`; and `ec2:DescribeInstanceTypeOfferings`, which reads the
+  types that zone offers. None of these actions accepts a limit to a resource, so the
+  resource is `*`.
 - `TerminateAndReadConsole` allows `ec2:TerminateInstances` and
   `ec2:GetConsoleOutput` only on instances with the tags `qory:managed` set to `true`
   and `qory:pool` set to the node pool's id. The adapter deletes machines and reads
   their logs with these actions.
 
-`qory-machines-aws-ec2 check` sends `ec2:RunInstances` and `ec2:DescribeInstances`
-as dry runs, and a dry run needs the same permissions as the call. The dry run of
+`qory-machines-aws-ec2 check` sends `ec2:RunInstances`, once per type in
+`instance_types`, and `ec2:DescribeInstances` as dry runs, and a dry run needs the same
+permissions as the call. The policy has no condition on `ec2:InstanceType`: if you add
+one, allow every type in `instance_types`, or `check` fails with
+`UnauthorizedOperation`. The dry run of
 `ec2:RunInstances` sends the placeholder pool id `np_0000000000000000` as the
 `qory:pool` tag. Keep the `RunInstances` statements free of a condition on the value
 of `qory:pool`: if they require the node pool's id, `check` fails with

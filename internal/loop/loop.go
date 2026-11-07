@@ -4,13 +4,17 @@
 // about the run: a claim gives it a run code, which it passes to the machine in the
 // start data and never reads, logs or writes to a file.
 //
-// The loop has three parts. [Run] first runs the adapter's check and recovers the
-// journal of live dispatches after a restart. Then the claim path and the watch run in
-// parallel until the context ends:
+// The loop has three parts. [Run] first runs the adapter's check, which returns the
+// machines the adapter can make, its offers, and recovers the journal of live
+// dispatches after a restart. Then the claim path and the watch run in parallel until
+// the context ends:
 //   - The claim path claims a dispatch while the journal has fewer machines than
-//     max_machines, records it, makes its machine and sends dispatched. When the
-//     make fails, it releases the dispatch. When the release returns 204 or 409
-//     lease_expired, it then uploads the make's error as the dispatch's machine log.
+//     max_machines, with the check's offers in each claim. It records the dispatch,
+//     makes a machine that fits the claim's machine spec and sends dispatched, with
+//     the vendor's machine type that the make returned. When the claim has no machine
+//     spec or the make fails, it releases the dispatch. When the release after a make
+//     returns 204 or 409 lease_expired, it then uploads the make's error as the
+//     dispatch's machine log.
 //   - The watch lists the pool's machines every 60 seconds. It sends dispatched again
 //     for each machine, and it cleans up each machine whose dispatch ended, that
 //     stopped, or that ran longer than its lifetime and 15 minutes. It also cleans up
@@ -51,12 +55,6 @@ import (
 	"github.com/qoryai/integrations/contracts"
 )
 
-// DefaultSize is the size that the loop asks the machine adapter for when a claim
-// names no machine type. Each adapter's settings map size names to the vendor's
-// machine types, so the instance admin who sets "standard" in them sets the machine
-// of every claim that names no type.
-const DefaultSize = "standard"
-
 // The times of the loop.
 const (
 	// WatchInterval is the time between two watches. It is also the time between two
@@ -75,12 +73,13 @@ const (
 	// machine-end. For gone, it counts from the first gone of an ended entry. For
 	// deleting and delete_failed, it counts from the first failure of that state. An
 	// ended entry that the journal had at the start counts from the start of [Run], and
-	// a restart starts each count again. After it, the state is dropped and an ended entry
-	// leaves the journal, as the contract allows for a call that keeps failing.
+	// a restart starts each count again. After it, the state is dropped and an ended
+	// entry leaves the journal, as the contract allows for a call that keeps failing.
 	MachineEndLimit = 24 * time.Hour
 	// LongWait is the wait before the next claim after a make that failed with the
-	// kind limit or defect, after the start data of a claim could not be built, and
-	// after a claim for another pool than the provisioner's.
+	// kind limit or defect, after the start data of a claim could not be built, after
+	// a claim for another pool than the provisioner's, and after a claim with no
+	// machine spec.
 	LongWait = 60 * time.Second
 	// ShortWait is the wait before the next claim after a make that failed with the
 	// kind retry or other, and after a claim that failed.
@@ -117,9 +116,13 @@ type Claim struct {
 	PoolID string
 	// LeaseUntil is the time before which the first dispatched must arrive.
 	LeaseUntil time.Time
-	// Machine is the type of machine, a size name for the adapter, or "" when the
-	// claim names none.
+	// Machine is the run's machine type, a name such as standard, or "" when the
+	// claim has none.
 	Machine string
+	// MachineSpec is the spec of the run's machine type, which the make passes to the
+	// adapter unchanged, or nil when the claim has none. The loop releases a claim
+	// without one, because each claim has offers.
+	MachineSpec *contracts.MachineSpec
 	// RunCode is the run code that the machine redeems.
 	RunCode RunCode
 	// GatewayURL is the gateway's URL that the machine passes to qory run.
@@ -131,12 +134,14 @@ type Claim struct {
 // Apiary is the provisioner's client of Qory Apiary: the five requests of the
 // provisioner contract that the loop sends.
 type Apiary interface {
-	// Claim claims a request for one machine. It returns false and no error when no
-	// work could be claimed within the claim's wait.
-	Claim(ctx context.Context) (Claim, bool, error)
-	// Dispatched sends dispatched for the dispatch, whose machine is machineID. Its
-	// error wraps [ErrGone] or [ErrLeaseExpired] for those refusals.
-	Dispatched(ctx context.Context, dispatchID, machineID string) error
+	// Claim claims a request for one machine, with offers, the machines the adapter
+	// can make. It returns false and no error when no work could be claimed within the
+	// claim's wait.
+	Claim(ctx context.Context, offers []contracts.MachineSpec) (Claim, bool, error)
+	// Dispatched sends dispatched for the dispatch, whose machine is machineID, of the
+	// vendor's type machineType, or "" when the make returned none. Its error wraps
+	// [ErrGone] or [ErrLeaseExpired] for those refusals.
+	Dispatched(ctx context.Context, dispatchID, machineID, machineType string) error
 	// Release gives the dispatch back, with a reason of 1 to 200 characters. Its error
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.
 	Release(ctx context.Context, dispatchID, reason string) error
@@ -166,10 +171,12 @@ var _ Journal = (*journal.Journal)(nil)
 // Machines is the runner of the machine adapter's commands, as [adapter.Runner] runs
 // them. A failed command returns an *adapter.Error with the kind of failure.
 type Machines interface {
-	// Check shows that the adapter's rights and settings work.
-	Check(ctx context.Context) error
-	// Make makes one machine of size in pool for key and delivers startData to it.
-	Make(ctx context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error)
+	// Check shows that the adapter's rights and settings work, and returns the
+	// machines the adapter can make, its offers.
+	Check(ctx context.Context) ([]contracts.MachineSpec, error)
+	// Make makes one machine that fits spec in pool for key and delivers startData to
+	// it.
+	Make(ctx context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error)
 	// List lists the machines of pool.
 	List(ctx context.Context, pool string) (contracts.MachinesListAnswer, error)
 	// Log reads the console text of the machine id.
@@ -238,9 +245,11 @@ func Run(ctx context.Context, cfg Config) error {
 		l.Clock = systemClock{}
 	}
 	l.start = l.Clock.Now()
-	if err := l.Machines.Check(ctx); err != nil {
+	offers, err := l.Machines.Check(ctx)
+	if err != nil {
 		return fmt.Errorf("Fix the machine adapter's settings or the rights it uses, then start the provisioner again: the machine adapter's check failed: %s", shown(err, nil))
 	}
+	l.offers = offers
 	if err := l.recoverJournal(ctx); err != nil {
 		return err
 	}
@@ -248,7 +257,7 @@ func Run(ctx context.Context, cfg Config) error {
 	defer cancel()
 	var wg sync.WaitGroup
 	wg.Go(func() { l.watch(ctx) })
-	err := l.claim(ctx)
+	err = l.claim(ctx)
 	cancel()
 	wg.Wait()
 	return err
@@ -263,7 +272,10 @@ type endFailure struct {
 // loop is one run of the loop.
 type loop struct {
 	Config
-	mu sync.Mutex
+	// offers are the machines the adapter can make, from its check at the start of
+	// Run. Each claim sends them.
+	offers []contracts.MachineSpec
+	mu     sync.Mutex
 	// busy are the dispatches that the claim path works on. The watch skips them.
 	busy map[string]bool
 	// logged are the machine ids that get no more log reads in a cleanup: the read

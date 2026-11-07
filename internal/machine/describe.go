@@ -14,14 +14,33 @@ import (
 // accepts.
 const pageSize = 1000
 
-// FindByToken returns the machine whose client token is key, and false when EC2 has
+// FindByToken returns the machine whose client token is token, and false when EC2 has
 // none. A terminated machine stays visible for about one hour; when EC2 returns more
 // than one machine, FindByToken returns one that is not terminated.
-func (c *Client) FindByToken(ctx context.Context, key string) (Machine, bool, error) {
-	ms, err := c.describe(ctx, []types.Filter{filter("client-token", key)})
+func (c *Client) FindByToken(ctx context.Context, token string) (Machine, bool, error) {
+	ms, err := c.describe(ctx, []types.Filter{filter("client-token", token)})
 	if err != nil {
 		return Machine{}, false, err
 	}
+	return pick(ms)
+}
+
+// FindByKey returns the machine of the pool poolID whose qory:key tag is key, in any
+// state, and false when EC2 has none. A terminated machine stays visible for about
+// one hour; when EC2 returns more than one machine, FindByKey returns one that is not
+// terminated. The tags are set at launch, so it also finds a machine whose client
+// token is of another instance type than the one tried first.
+func (c *Client) FindByKey(ctx context.Context, poolID, key string) (Machine, bool, error) {
+	ms, err := c.describe(ctx, []types.Filter{filter("tag:"+TagManaged, "true"), filter("tag:"+TagPool, poolID), filter("tag:"+TagKey, key)})
+	if err != nil {
+		return Machine{}, false, err
+	}
+	return pick(ms)
+}
+
+// pick returns a machine of ms that is not terminated, or else the first one, and
+// false when ms is empty.
+func pick(ms []Machine) (Machine, bool, error) {
 	if len(ms) == 0 {
 		return Machine{}, false, nil
 	}

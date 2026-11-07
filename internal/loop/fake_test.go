@@ -32,7 +32,18 @@ const (
 	runCode    = "qecr_MARKER00000000000000000000.MARKERruncode000000000"
 	gatewayURL = "https://gateway.example.com:8443"
 	lifetime   = 60
+	// madeType is the machine type of each machine that the fake adapter makes.
+	madeType = "m7i.large"
 )
+
+// testOffers are the offers of the fake adapter's check.
+var testOffers = []contracts.MachineSpec{
+	{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 16384, Arch: "amd64"},
+	{VCPUs: 8, MemoryMiB: 32768, DiskGiB: 16384, Arch: "amd64", Virtualization: true},
+}
+
+// testSpec is the machine spec of each claim of newClaim.
+var testSpec = contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 40, Arch: "amd64"}
 
 // patience bounds each wait of a test for the loop, in real time. A correct loop
 // never makes a test wait this long.
@@ -143,10 +154,12 @@ type upload struct {
 // fakeApiary is Qory Apiary. Claim takes each answer from claims, which has no buffer,
 // so a test's send returns once the loop asks for a claim.
 type fakeApiary struct {
-	claims     chan claimResult
-	mu         sync.Mutex
-	calls      []string
-	claimed    int
+	claims  chan claimResult
+	mu      sync.Mutex
+	calls   []string
+	claimed int
+	// offers are the offers of each claim, in order.
+	offers     [][]contracts.MachineSpec
 	dispatched map[string]error
 	releaseErr error
 	logErr     error
@@ -161,9 +174,10 @@ func newApiary() *fakeApiary {
 	return &fakeApiary{claims: make(chan claimResult), dispatched: map[string]error{}, endErr: map[string]error{}}
 }
 
-func (a *fakeApiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
+func (a *fakeApiary) Claim(ctx context.Context, offers []contracts.MachineSpec) (loop.Claim, bool, error) {
 	a.mu.Lock()
 	a.claimed++
+	a.offers = append(a.offers, slices.Clone(offers))
 	a.mu.Unlock()
 	select {
 	case r := <-a.claims:
@@ -176,10 +190,15 @@ func (a *fakeApiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
 	}
 }
 
-func (a *fakeApiary) Dispatched(_ context.Context, dispatchID, machineID string) error {
+// Dispatched records "dispatched <dispatch id> <machine id> <machine type>", with -
+// for no machine type.
+func (a *fakeApiary) Dispatched(_ context.Context, dispatchID, machineID, machineType string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.calls = append(a.calls, "dispatched "+dispatchID+" "+machineID)
+	if machineType == "" {
+		machineType = "-"
+	}
+	a.calls = append(a.calls, "dispatched "+dispatchID+" "+machineID+" "+machineType)
 	return a.dispatched[dispatchID]
 }
 
@@ -254,6 +273,15 @@ func (a *fakeApiary) takeUploads() []upload {
 	return out
 }
 
+// takeOffers returns the offers of each claim since the last takeOffers.
+func (a *fakeApiary) takeOffers() [][]contracts.MachineSpec {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.offers
+	a.offers = nil
+	return out
+}
+
 // claimCount is the number of calls of Claim.
 func (a *fakeApiary) claimCount() int {
 	a.mu.Lock()
@@ -275,6 +303,11 @@ type fakeMachines struct {
 	deleteErr []error
 	logText   string
 	startData []byte
+	// specs are the machine specs of each make, in order.
+	specs []contracts.MachineSpec
+	// otherType, when set, is the machine type of each make answer in place of
+	// madeType.
+	otherType *string
 	// lingering makes delete answer deleting while the list has the machine, as a
 	// machine does that the vendor is still shutting down. Otherwise delete takes the
 	// machine out of the list and answers gone.
@@ -285,21 +318,25 @@ type fakeMachines struct {
 	makeGate    chan struct{}
 }
 
-func (m *fakeMachines) Check(context.Context) error {
+func (m *fakeMachines) Check(context.Context) ([]contracts.MachineSpec, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, "check")
-	return m.checkErr
+	if m.checkErr != nil {
+		return nil, m.checkErr
+	}
+	return slices.Clone(testOffers), nil
 }
 
-func (m *fakeMachines) Make(_ context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error) {
+func (m *fakeMachines) Make(_ context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	if m.makeStarted != nil {
 		m.makeStarted <- struct{}{}
 		<-m.makeGate
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls = append(m.calls, "make "+key+" "+pool+" "+size)
+	m.calls = append(m.calls, "make "+key+" "+pool)
+	m.specs = append(m.specs, spec)
 	m.startData = bytes.Clone(startData)
 	if m.makeErr != nil {
 		return contracts.MachinesMakeAnswer{}, m.makeErr
@@ -307,13 +344,16 @@ func (m *fakeMachines) Make(_ context.Context, key, pool, size string, startData
 	// One key makes at most one machine.
 	for _, x := range m.machines {
 		if x.Key == key {
-			return contracts.MachinesMakeAnswer{ID: x.ID}, nil
+			return contracts.MachinesMakeAnswer{ID: x.ID, MachineType: madeType}, nil
 		}
 	}
 	m.made++
 	id := machineID(m.made)
 	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
-	return contracts.MachinesMakeAnswer{ID: id}, nil
+	if m.otherType != nil {
+		return contracts.MachinesMakeAnswer{ID: id, MachineType: *m.otherType}, nil
+	}
+	return contracts.MachinesMakeAnswer{ID: id, MachineType: madeType}, nil
 }
 
 func (m *fakeMachines) List(_ context.Context, p string) (contracts.MachinesListAnswer, error) {
@@ -611,11 +651,15 @@ func (h *harness) find(msg string) []logLine {
 	return out
 }
 
-// newClaim is a claim for the dispatch id in the pool, with no machine type.
+// newClaim is a claim for the dispatch id in the pool, with the machine spec
+// testSpec.
 func newClaim(id string) loop.Claim {
+	spec := testSpec
 	return loop.Claim{
 		DispatchID:         id,
 		PoolID:             pool,
+		Machine:            "standard",
+		MachineSpec:        &spec,
 		LeaseUntil:         epoch.Add(5 * time.Minute),
 		RunCode:            loop.NewRunCode(runCode),
 		GatewayURL:         gatewayURL,
@@ -710,4 +754,13 @@ func (j *syncFailure) Remove(id string) error {
 		return errors.New("check the state folder: the journal of live dispatches is written, but syncing its folder failed: input/output error")
 	}
 	return nil
+}
+
+// takeSpecs returns the machine specs of each make since the last takeSpecs.
+func (m *fakeMachines) takeSpecs() []contracts.MachineSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.specs
+	m.specs = nil
+	return out
 }

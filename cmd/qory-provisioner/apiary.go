@@ -7,6 +7,7 @@ import (
 
 	"github.com/qoryai/hive/internal/loop"
 	"github.com/qoryai/hive/internal/provisioner"
+	"github.com/qoryai/integrations/contracts"
 )
 
 // claimWait is the wait_seconds of every claim: the most that claim.schema.json of
@@ -24,10 +25,11 @@ type apiary struct {
 
 var _ loop.Apiary = apiary{}
 
-// Claim claims a request for one machine, with a wait of [claimWait]. It copies the
-// run code into the loop's claim and clears the client's copy.
-func (a apiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
-	c, ok, err := a.client.Claim(ctx, claimWait)
+// Claim claims a request for one machine, with a wait of [claimWait] and offers, the
+// machines the adapter can make. It copies the run code into the loop's claim and
+// clears the client's copy.
+func (a apiary) Claim(ctx context.Context, offers []contracts.MachineSpec) (loop.Claim, bool, error) {
+	c, ok, err := a.client.Claim(ctx, claimWait, offers)
 	if err != nil || !ok {
 		return loop.Claim{}, false, toLoop(err)
 	}
@@ -41,17 +43,18 @@ func (a apiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
 		PoolID:             c.PoolID,
 		LeaseUntil:         c.LeaseUntil,
 		Machine:            c.Machine,
+		MachineSpec:        c.MachineSpec,
 		RunCode:            loop.NewRunCode(code.String()),
 		GatewayURL:         c.GatewayURL,
 		MaxLifetimeMinutes: c.MaxLifetimeMinutes,
 	}, true, nil
 }
 
-// Dispatched sends dispatched for the dispatch with no external. The contract's
-// external needs the job's system, its ref and its https page together, and the
-// machine adapter returns a machine id alone, so the machine id is not sent.
-func (a apiary) Dispatched(ctx context.Context, dispatchID, _ string) error {
-	return toLoop(a.client.Dispatched(ctx, dispatchID, nil))
+// Dispatched sends dispatched for the dispatch with machineType and no external. The
+// contract's external needs the job's system, its ref and its https page together,
+// and the machine adapter returns a machine id alone, so the machine id is not sent.
+func (a apiary) Dispatched(ctx context.Context, dispatchID, _, machineType string) error {
+	return toLoop(a.client.Dispatched(ctx, dispatchID, nil, machineType))
 }
 
 // Release gives the dispatch back with reason.

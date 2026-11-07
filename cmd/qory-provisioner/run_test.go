@@ -171,12 +171,17 @@ func (f *provisionerFixture) checkNoLeak(t *testing.T, stderr string) {
 }
 
 // TestServeRuns runs serve against the fake Qory Apiary and the fake adapter: it
-// claims the one work, makes its machine with the start data, sends dispatched, and
-// on SIGTERM stops with exit status 0 and leaves the machine. A restart then resumes
-// the dispatch from the journal and makes no machine.
+// claims the one work with the check's offers, makes its machine with the claim's
+// machine spec and the start data, sends dispatched with the machine type, and on
+// SIGTERM stops with exit status 0 and leaves the machine. A restart then resumes the
+// dispatch from the journal and makes no machine.
 func TestServeRuns(t *testing.T) {
 	f := newProvisionerFixture(t)
-	work := f.srv.Offer(provisionertest.Work{RunCode: markerRunCode, GatewayURL: "https://gateway.example.com:8443", MaxLifetimeMinutes: 60})[0]
+	spec := contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 40, Arch: "amd64"}
+	work := f.srv.Offer(provisionertest.Work{
+		RunCode: markerRunCode, GatewayURL: "https://gateway.example.com:8443", MaxLifetimeMinutes: 60,
+		Machine: "standard", MachineSpec: &spec,
+	})[0]
 
 	s := f.start()
 	// The loop logs sent dispatched after the client got the 204 and the journal
@@ -195,6 +200,12 @@ func TestServeRuns(t *testing.T) {
 	if d.External != nil {
 		t.Errorf("dispatched sent the external %+v, want none", *d.External)
 	}
+	if d.MachineType != fakeType {
+		t.Errorf("dispatched sent the machine type %q, want %q", d.MachineType, fakeType)
+	}
+	if !slices.Equal(d.Offers, fakeOffers) {
+		t.Errorf("the claim sent the offers %+v, want %+v", d.Offers, fakeOffers)
+	}
 	if got, want := f.commands(t), []string{"check", "list", "make"}; !slices.Equal(got, want) {
 		t.Errorf("the adapter ran %q, want %q", got, want)
 	}
@@ -208,7 +219,7 @@ func TestServeRuns(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(work.RunCode))
 	want := made{
-		Key: d.ID, Pool: provisionertest.PoolID, Size: loop.DefaultSize, RunCodeSHA256: hex.EncodeToString(sum[:]),
+		Key: d.ID, Pool: provisionertest.PoolID, MachineSpec: spec, RunCodeSHA256: hex.EncodeToString(sum[:]),
 		GatewayURL: "https://gateway.example.com:8443", GatewayAddress: "10.0.1.5", MaxLifetimeMinutes: 60,
 	}
 	if m != want {
@@ -232,7 +243,7 @@ func TestServeRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := d.ID + " dispatched i-00000000000000001 60\n"; string(journal) != want {
+	if want := d.ID + " dispatched i-00000000000000001 60 " + fakeType + "\n"; string(journal) != want {
 		t.Errorf("the journal is %q, want %q", journal, want)
 	}
 
@@ -361,7 +372,7 @@ func TestApiaryMachineEnd(t *testing.T) {
 	a := apiary{client: srv.Client()}
 	ctx := context.Background()
 	srv.Offer(provisionertest.Work{})
-	c, ok, err := a.Claim(ctx)
+	c, ok, err := a.Claim(ctx, fakeOffers)
 	if !ok || err != nil {
 		t.Fatalf("claim: %v, %v", ok, err)
 	}
@@ -394,13 +405,13 @@ func TestApiaryRefusals(t *testing.T) {
 	srv.Hold = 10 * time.Millisecond
 	a := apiary{client: srv.Client()}
 	ctx := context.Background()
-	if _, ok, err := a.Claim(ctx); ok || err != nil {
+	if _, ok, err := a.Claim(ctx, fakeOffers); ok || err != nil {
 		t.Fatalf("a claim with no work: %v, %v, want false and no error", ok, err)
 	}
 	srv.Offer(provisionertest.Work{RunCode: markerRunCode}, provisionertest.Work{}, provisionertest.Work{}, provisionertest.Work{})
 	var ids []string
 	for range 4 {
-		c, ok, err := a.Claim(ctx)
+		c, ok, err := a.Claim(ctx, fakeOffers)
 		if !ok || err != nil {
 			t.Fatalf("claim: %v, %v", ok, err)
 		}
@@ -415,19 +426,22 @@ func TestApiaryRefusals(t *testing.T) {
 	const machine = "i-0123456789abcdef0"
 	srv.End(ids[0])
 	srv.Expire(ids[1])
-	if err := a.Dispatched(ctx, ids[2], machine); err != nil {
+	if err := a.Dispatched(ctx, ids[2], machine, fakeType); err != nil {
 		t.Fatal(err)
+	}
+	if d, _ := srv.Dispatch(ids[2]); d.MachineType != fakeType || !slices.Equal(d.Offers, fakeOffers) {
+		t.Errorf("the dispatch has the machine type %q and the offers %+v", d.MachineType, d.Offers)
 	}
 	for name, c := range map[string]struct {
 		err  error
 		want error
 	}{
-		"dispatched of an ended dispatch":   {a.Dispatched(ctx, ids[0], machine), loop.ErrGone},
-		"dispatched of a stale dispatch":    {a.Dispatched(ctx, ids[1], machine), loop.ErrLeaseExpired},
+		"dispatched of an ended dispatch":   {a.Dispatched(ctx, ids[0], machine, ""), loop.ErrGone},
+		"dispatched of a stale dispatch":    {a.Dispatched(ctx, ids[1], machine, fakeType), loop.ErrLeaseExpired},
 		"release after dispatched":          {a.Release(ctx, ids[2], "the machine was not made"), loop.ErrMachineExists},
 		"release of an ended dispatch":      {a.Release(ctx, ids[0], "the machine was not made"), loop.ErrGone},
 		"release of a stale dispatch":       {a.Release(ctx, ids[1], "the machine was not made"), loop.ErrLeaseExpired},
-		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine), provisioner.ErrForbidden},
+		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine, fakeType), provisioner.ErrForbidden},
 	} {
 		if !errors.Is(c.err, c.want) {
 			t.Errorf("%s: %v, want %v", name, c.err, c.want)

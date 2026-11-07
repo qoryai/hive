@@ -48,21 +48,42 @@ type API interface {
 	GetConsoleOutput(ctx context.Context, in *ec2.GetConsoleOutputInput, optFns ...func(*ec2.Options)) (*ec2.GetConsoleOutputOutput, error)
 	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
 	DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
+	DescribeSubnets(ctx context.Context, in *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
+	DescribeInstanceTypes(ctx context.Context, in *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
+	DescribeInstanceTypeOfferings(ctx context.Context, in *ec2.DescribeInstanceTypeOfferingsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypeOfferingsOutput, error)
 }
 
 // Client makes, lists, reads and terminates machines through an API.
 type Client struct {
 	api API
+	// region is the AWS region of the calls, for error messages; "" when unknown.
+	region string
 }
 
-// New returns a Client that calls api.
+// New returns a Client that calls api, in a region that its error messages leave out.
 func New(api API) *Client {
 	return &Client{api: api}
 }
 
-// NewFromConfig returns a Client that calls EC2 with the SDK's client built from cfg.
+// NewInRegion returns a Client that calls api in region, such as eu-west-1, which its
+// error messages contain.
+func NewInRegion(api API, region string) *Client {
+	return &Client{api: api, region: region}
+}
+
+// NewFromConfig returns a Client that calls EC2 with the SDK's client built from cfg,
+// in cfg's region.
 func NewFromConfig(cfg aws.Config) *Client {
-	return New(ec2.NewFromConfig(cfg))
+	return NewInRegion(ec2.NewFromConfig(cfg), cfg.Region)
+}
+
+// Region returns the AWS region of the calls, or "this region" when it is unknown, so
+// that an error message reads the same either way.
+func (c *Client) Region() string {
+	if c.region == "" {
+		return "this region"
+	}
+	return c.region
 }
 
 // The reasons of the refusals of [refusedVariables].
@@ -198,6 +219,9 @@ type Machine struct {
 	State string
 	// Key is the value of the qory:key tag.
 	Key string
+	// InstanceType is the EC2 instance type, such as t3.medium; "" when EC2 returned
+	// none.
+	InstanceType string
 	// LaunchTime is the time EC2 started the instance; zero when EC2 returned none.
 	LaunchTime time.Time
 }
@@ -205,8 +229,9 @@ type Machine struct {
 // fromInstance converts one EC2 instance.
 func fromInstance(in types.Instance) Machine {
 	m := Machine{
-		ID:         aws.ToString(in.InstanceId),
-		LaunchTime: aws.ToTime(in.LaunchTime),
+		ID:           aws.ToString(in.InstanceId),
+		InstanceType: string(in.InstanceType),
+		LaunchTime:   aws.ToTime(in.LaunchTime),
 	}
 	if in.State != nil {
 		m.State = string(in.State.Name)

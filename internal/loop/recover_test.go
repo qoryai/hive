@@ -35,9 +35,9 @@ func TestRestartRecovery(t *testing.T) {
 	h.start()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"release " + dispatchA + " " + journal.ReasonRestarted,
-		"dispatched " + dispatchB + " i-b",
-		"dispatched " + dispatchC + " i-c",
-		"dispatched " + dispatchE + " i-e",
+		"dispatched " + dispatchB + " i-b -",
+		"dispatched " + dispatchC + " i-c -",
+		"dispatched " + dispatchE + " i-e -",
 	})
 	h.machines.mu.Lock()
 	equal(t, "the adapter's calls", h.machines.calls, []string{"check", "list " + pool})
@@ -72,7 +72,7 @@ func TestARecoveredDispatchThatEndedIsCleanedUp(t *testing.T) {
 	h.apiary.setDispatched(dispatchA, loop.ErrGone)
 	h.start()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-		"dispatched " + dispatchA + " i-a",
+		"dispatched " + dispatchA + " i-a -",
 		"machine-log " + dispatchA + " false",
 		"machine-end " + dispatchA + " gone",
 	})
@@ -113,4 +113,26 @@ func TestAFailedListAtTheStartStopsTheLoop(t *testing.T) {
 	}
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
+}
+
+// TestARecoveredDispatchKeepsItsMachineType sends dispatched with the machine type of
+// the journal's entry after a restart, and again at each watch.
+func TestARecoveredDispatchKeepsItsMachineType(t *testing.T) {
+	h := newHarness(t)
+	made := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseMade, MachineID: "i-a", MaxLifetimeMinutes: lifetime, MachineType: "t3.medium"}
+	h.setEntries(made, journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseDispatched, MachineID: "i-b", MaxLifetimeMinutes: lifetime, MachineType: "c7g.xlarge"})
+	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
+	h.machines.add("i-b", dispatchB, contracts.MachineRunning, epoch)
+	h.start()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-a t3.medium"})
+	made.Phase = journal.PhaseDispatched
+	equal(t, "the journal", h.entries()[:1], []journal.Entry{made})
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
+		"dispatched " + dispatchA + " i-a t3.medium",
+		"dispatched " + dispatchB + " i-b c7g.xlarge",
+	})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
 }

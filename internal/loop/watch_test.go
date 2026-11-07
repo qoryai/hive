@@ -20,6 +20,12 @@ func dispatched(id, machine string) journal.Entry {
 	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: lifetime}
 }
 
+// typed is e with the machine type of the fake adapter's machines.
+func typed(e journal.Entry) journal.Entry {
+	e.MachineType = madeType
+	return e
+}
+
 // deleting is the entry of the dispatch id in the phase deleting, with the machine id.
 func deleting(id, machine string) journal.Entry {
 	return journal.Entry{DispatchID: id, Phase: journal.PhaseDeleting, MachineID: machine, MaxLifetimeMinutes: lifetime}
@@ -37,11 +43,11 @@ func TestTheWatchSendsDispatchedAgain(t *testing.T) {
 	for range 2 {
 		h.tick()
 		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-			"dispatched " + dispatchA + " " + machineID(1),
-			"dispatched " + dispatchB + " " + machineID(2),
+			"dispatched " + dispatchA + " " + machineID(1) + " " + madeType,
+			"dispatched " + dispatchB + " " + machineID(2) + " " + madeType,
 		})
 		equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
-		equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1)), dispatched(dispatchB, machineID(2))})
+		equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchA, machineID(1))), typed(dispatched(dispatchB, machineID(2)))})
 	}
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -60,13 +66,13 @@ func TestA410OnTheRepeatCleansUp(t *testing.T) {
 	h.apiary.setDispatched(dispatchA, fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone))
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-		"dispatched " + dispatchA + " " + machineID(1),
+		"dispatched " + dispatchA + " " + machineID(1) + " " + madeType,
 		"machine-log " + dispatchA + " false",
 		"machine-end " + dispatchA + " gone",
-		"dispatched " + dispatchB + " " + machineID(2),
+		"dispatched " + dispatchB + " " + machineID(2) + " " + madeType,
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchB, machineID(2))})
+	equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchB, machineID(2)))})
 	if len(h.find("the dispatch ended")) != 1 {
 		t.Error("the log has no line for the ended dispatch")
 	}
@@ -135,9 +141,9 @@ func TestANotListedMachineIsKeptInsideTheGrace(t *testing.T) {
 	h.machines.takeCalls()
 	for range ticksInGrace {
 		h.tick()
-		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " " + madeType})
 		equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
-		equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+		equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchA, machineID(1)))})
 	}
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -157,7 +163,7 @@ func TestANotListedMachineIsCleanedUpAfterTheGrace(t *testing.T) {
 	for range ticksInGrace {
 		h.tick()
 	}
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchB, "i-b"), dispatched(dispatchA, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchB, "i-b"), typed(dispatched(dispatchA, machineID(1)))})
 	h.apiary.takeCalls()
 	h.machines.takeCalls()
 	h.tick()
@@ -190,10 +196,10 @@ func TestAMachineListedLateIsNotAStray(t *testing.T) {
 	}
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	calls := h.apiary.takeCalls()
-	if len(calls) != ticksInGrace+3 || slices.ContainsFunc(calls, func(c string) bool { return c != "dispatched "+dispatchA+" "+machineID(1) }) {
+	if len(calls) != ticksInGrace+3 || slices.ContainsFunc(calls, func(c string) bool { return c != "dispatched "+dispatchA+" "+machineID(1)+" "+madeType }) {
 		t.Errorf("Qory Apiary's calls are %q", calls)
 	}
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchA, machineID(1)))})
 	if n := len(h.find("found a machine with no journal entry")); n != 0 {
 		t.Errorf("the log has %d lines for a stray", n)
 	}
@@ -219,7 +225,7 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"machine-log " + dispatchA + " false",
 		"machine-end " + dispatchA + " gone",
-		"dispatched " + dispatchB + " i-b",
+		"dispatched " + dispatchB + " i-b -",
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-a", "delete i-a"})
 	equal(t, "the journal", h.entries(), []journal.Entry{short(dispatched(dispatchB, "i-b"))})
@@ -277,7 +283,7 @@ func TestAMachineInFlightIsNotAStray(t *testing.T) {
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check"})
 	close(h.machines.makeGate)
 	h.idle()
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, "i-early")})
+	equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchA, "i-early"))})
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
@@ -296,7 +302,7 @@ func TestAFailedDeleteIsTriedAgain(t *testing.T) {
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log " + machineID(1), "delete " + machineID(1)})
-	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{typed(deleting(dispatchA, machineID(1)))})
 	lines := h.find("deleting a machine failed")
 	if len(lines) != 1 || !strings.HasPrefix(lines[0]["error"].(string), "Try again later") {
 		t.Errorf("the log lines are %v", lines)
@@ -339,7 +345,7 @@ func TestEachCleanupStepRunsAfterAFailure(t *testing.T) {
 			}
 			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{
 				"check",
-				"make " + dispatchA + " " + pool + " standard",
+				"make " + dispatchA + " " + pool,
 				"log " + machineID(1),
 				"delete " + machineID(1),
 			})
@@ -393,7 +399,7 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	h.machines.mu.Unlock()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{typed(dispatched(dispatchA, machineID(1)))})
 	if len(h.find("listing the pool's machines failed")) != 1 {
 		t.Error("the log has no line for the failed list")
 	}
@@ -401,7 +407,7 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	h.machines.listErr = nil
 	h.machines.mu.Unlock()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " " + madeType})
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
@@ -420,7 +426,7 @@ func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
 	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 	sent := func() int {
 		return len(slices.DeleteFunc(h.apiary.takeCallsKeep(), func(c string) bool {
-			return c != "dispatched "+dispatchA+" "+machineID(1)
+			return c != "dispatched "+dispatchA+" "+machineID(1)+" "+madeType
 		}))
 	}
 	// The fake clock stands still until the claim path has logged "sent dispatched",
@@ -484,7 +490,7 @@ func TestAMakeFailureWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	h.clock.Advance(loop.ShortWait)
 	h.idle()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late -"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, "i-late")})
 	lines := h.find("adopted the machine of a claimed dispatch")
@@ -517,7 +523,7 @@ func TestARestartReleaseWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	h.machines.add("i-late", dispatchA, contracts.MachineRunning, epoch)
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " i-late -"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
 	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchA, "i-late")})
 	if len(h.find("found a machine with no journal entry")) != 0 {
