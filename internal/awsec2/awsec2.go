@@ -7,13 +7,14 @@
 package awsec2
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"slices"
+	"sync"
 
 	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/hive/internal/machine"
@@ -56,11 +57,16 @@ func loadClient(ctx context.Context) (*machine.Client, error) {
 	return machine.NewFromConfig(cfg), nil
 }
 
-// Check reads the settings, checks the credentials, reads the image's root device,
-// sends one RunInstances dry run for each instance type of sizes, in sorted order and
-// each type once, and sends one DescribeInstances dry run, the call of list. It makes
-// no machine. It checks no right of TerminateInstances or GetConsoleOutput, because
-// their calls need the id of an instance that exists.
+// Check reads the settings, checks the credentials, and reads from EC2 the image, the
+// zone of the subnet, each instance type of instance_types, and which of those types
+// the zone offers. It fails with the kind defect for an instance type that does not
+// run the image's architecture, that the zone does not offer, or whose size is outside
+// the bounds of an offer. It then sends one RunInstances dry run per instance type, at
+// most 8 at once, and returns the error of the first type in the order of
+// instance_types whose dry run fails. Then it sends one DescribeInstances dry run, the
+// call of list. It makes no machine. It checks no right of TerminateInstances or
+// GetConsoleOutput, because their calls need the id of an instance that exists. The
+// answer has one offer per instance type, in the order of instance_types.
 func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
@@ -70,67 +76,219 @@ func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCh
 	if err != nil {
 		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
-	root, err := c.RootDevice(ctx, s.ImageID)
+	img, err := c.Image(ctx, s.ImageID)
 	if err != nil {
 		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
-	instanceTypes := slices.Compact(slices.Sorted(maps.Values(s.Sizes)))
-	for _, t := range instanceTypes {
-		if err := c.CheckRights(ctx, spec(s, t, root, checkPool, checkKey, nil)); err != nil {
-			return contracts.MachinesCheckAnswer{}, failure(err)
+	zone, err := c.SubnetZone(ctx, s.SubnetID)
+	if err != nil {
+		return contracts.MachinesCheckAnswer{}, failure(err)
+	}
+	infos, err := c.InstanceTypes(ctx, s.InstanceTypes)
+	if err != nil {
+		return contracts.MachinesCheckAnswer{}, failure(err)
+	}
+	offered, err := c.Offered(ctx, zone, s.InstanceTypes)
+	if err != nil {
+		return contracts.MachinesCheckAnswer{}, failure(err)
+	}
+	offers := make([]contracts.MachineSpec, 0, len(s.InstanceTypes))
+	for _, name := range s.InstanceTypes {
+		t := infos[name]
+		switch {
+		case !slices.Contains(t.Archs, img.Arch):
+			return contracts.MachinesCheckAnswer{}, defect(fmt.Sprintf("Remove %s from instance_types in %s, or set image_id to an image it runs: in %s, it does not run the image's architecture, %s", name, settingsFile, c.Region(), img.Arch))
+		case !offered[name]:
+			return contracts.MachinesCheckAnswer{}, defect(fmt.Sprintf("Remove %s from instance_types in %s, or set subnet_id to a subnet in a zone that offers it: in %s, zone %s does not offer it", name, settingsFile, c.Region(), zone))
 		}
+		o := offer(t, img)
+		if !inBounds(o) {
+			return contracts.MachinesCheckAnswer{}, defect(fmt.Sprintf("Remove %s from instance_types in %s: in %s, it has %d vCPUs and %d MiB, and an offer has 1 to 1024 vCPUs and 512 to 8388608 MiB", name, settingsFile, c.Region(), o.VCPUs, o.MemoryMiB))
+		}
+		offers = append(offers, o)
+	}
+	if err := checkRights(ctx, c, s, infos, img); err != nil {
+		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
 	if err := c.CheckListRights(ctx); err != nil {
 		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
-	return contracts.MachinesCheckAnswer{}, nil
+	return contracts.MachinesCheckAnswer{Offers: offers}, nil
 }
 
-// Make makes one machine of the size's instance type, with the start data as its user
-// data and the key as the client token. A second make with the same key returns the
-// first machine's id, also when that machine is terminated and EC2 still returns it.
+// maxDryRuns is the most RunInstances dry runs that check sends at once.
+const maxDryRuns = 8
+
+// checkRights sends one RunInstances dry run per type of s.InstanceTypes, at most
+// [maxDryRuns] at once, so that check ends within the command's time limit also for
+// 64 types. It returns the error of the first type in the order of instance_types whose
+// dry run failed, or nil.
+func checkRights(ctx context.Context, c *machine.Client, s Settings, infos map[string]machine.InstanceType, img machine.Image) error {
+	errs := make([]error, len(s.InstanceTypes))
+	slots := make(chan struct{}, maxDryRuns)
+	var wg sync.WaitGroup
+	for i, name := range s.InstanceTypes {
+		sp := spec(s, name, img, img.RootSizeGiB, checkPool, checkKey, nil)
+		sp.NestedVirtualization = infos[name].NestedCPUOptions()
+		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			errs[i] = c.CheckRights(ctx, sp)
+		})
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// offer is the machine that the adapter offers for the instance type t and the image
+// img: t's vCPUs and memory, the largest gp3 root volume, img's architecture, and
+// virtualization when t is bare metal or has nested virtualization.
+func offer(t machine.InstanceType, img machine.Image) contracts.MachineSpec {
+	return contracts.MachineSpec{
+		VCPUs:          t.VCPUs,
+		MemoryMiB:      t.MemoryMiB,
+		DiskGiB:        machine.MaxRootGiB,
+		Arch:           img.Arch,
+		Virtualization: t.Virtualization(),
+	}
+}
+
+// The bounds of an offer's vCPUs and memory, the bounds of machine_spec in the
+// provisioner contract.
+const (
+	minVCPUs     = 1
+	maxVCPUs     = 1024
+	minMemoryMiB = 512
+	maxMemoryMiB = 8388608
+)
+
+// inBounds reports whether the vCPUs and the memory of o are within the bounds of an
+// offer.
+func inBounds(o contracts.MachineSpec) bool {
+	return o.VCPUs >= minVCPUs && o.VCPUs <= maxVCPUs && o.MemoryMiB >= minMemoryMiB && o.MemoryMiB <= maxMemoryMiB
+}
+
+// fitting returns the instance types of names whose offer fits want, smallest first:
+// by vCPUs, then by memory, a tie going to the order of names. A type that does not
+// run img's architecture is left out.
+func fitting(names []string, infos map[string]machine.InstanceType, img machine.Image, want contracts.MachineSpec) []machine.InstanceType {
+	var out []machine.InstanceType
+	for _, name := range names {
+		t := infos[name]
+		if slices.Contains(t.Archs, img.Arch) && offer(t, img).Fits(want) {
+			out = append(out, t)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b machine.InstanceType) int {
+		return cmp.Or(cmp.Compare(a.VCPUs, b.VCPUs), cmp.Compare(a.MemoryMiB, b.MemoryMiB))
+	})
+	return out
+}
+
+// Make makes one machine of the smallest instance type of instance_types that fits
+// the request's machine spec, by vCPUs, then memory, then the order of
+// instance_types. It passes the start data as the user data, sends
+// [machine.ClientToken] of the key and the type as the client token, and sizes the
+// root volume to the larger of the spec's disk and the image's root volume. When the
+// spec sets virtualization and the type has nested virtualization and is not bare
+// metal, it turns that on. When EC2 has no capacity for the type, make tries the next
+// type that fits, in the same order, and when every type fails for lack of capacity,
+// it returns the last failure. When no type fits, make fails with the kind defect.
+//
+// Before the first try, make looks up a machine of the pool with the key in its qory:key
+// tag. When there is one, in any state, make returns its id and makes no machine, so a
+// second make with the same key returns the first machine also when that machine is of
+// another type than the first that fits, once DescribeInstances lists the first machine:
+// EC2 lists a new machine after a short delay. A try whose client token EC2 reports as
+// terminated returns the id of the machine with that token.
 func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, err
 	}
-	instanceType, ok := s.Sizes[req.Size]
-	if !ok {
-		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: fmt.Sprintf("Add the size %s to sizes in %s: the make request has a size that sizes does not contain", req.Size, settingsFile)}
-	}
 	c, err := h.client(ctx)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	root, err := c.RootDevice(ctx, s.ImageID)
+	img, err := c.Image(ctx, s.ImageID)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	m, err := c.Create(ctx, spec(s, instanceType, root, req.Pool, req.Key, startData))
-	if machine.TokenTerminated(err) {
-		found, ok, findErr := c.FindByToken(ctx, req.Key)
-		if findErr != nil {
-			return contracts.MachinesMakeAnswer{}, failure(findErr)
-		}
-		if ok {
-			return contracts.MachinesMakeAnswer{ID: found.ID}, nil
-		}
-	}
+	infos, err := c.InstanceTypes(ctx, s.InstanceTypes)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	return contracts.MachinesMakeAnswer{ID: m.ID}, nil
+	want := req.MachineSpec
+	fits := fitting(s.InstanceTypes, infos, img, want)
+	if len(fits) == 0 {
+		virt := ""
+		if want.Virtualization {
+			virt = ", with virtualization"
+		}
+		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Add an instance type that fits the machine spec to instance_types in %s: in %s, no type fits %d vCPUs, %d MiB, %d GiB, %s%s", settingsFile, c.Region(), want.VCPUs, want.MemoryMiB, want.DiskGiB, want.Arch, virt))
+	}
+	found, ok, err := c.FindByKey(ctx, req.Pool, req.Key)
+	if err != nil {
+		return contracts.MachinesMakeAnswer{}, failure(err)
+	}
+	if ok {
+		return answer(found, ""), nil
+	}
+	root := max(want.DiskGiB, img.RootSizeGiB)
+	var last error
+	for i, t := range fits {
+		sp := spec(s, t.Name, img, root, req.Pool, req.Key, startData)
+		sp.NestedVirtualization = want.Virtualization && t.NestedCPUOptions()
+		m, err := c.Create(ctx, sp)
+		if machine.TokenTerminated(err) {
+			found, ok, findErr := c.FindByToken(ctx, machine.ClientToken(req.Key, t.Name))
+			if findErr != nil {
+				return contracts.MachinesMakeAnswer{}, failure(findErr)
+			}
+			if ok {
+				return answer(found, t.Name), nil
+			}
+		}
+		if machine.NoCapacity(err) {
+			last = err
+			if i+1 < len(fits) {
+				h.log.Warn("EC2 has no capacity for the instance type in the subnet's zone, so make tries the next type that fits", "instance_type", t.Name, "next", fits[i+1].Name)
+			}
+			continue
+		}
+		if err != nil {
+			return contracts.MachinesMakeAnswer{}, failure(err)
+		}
+		return answer(m, t.Name), nil
+	}
+	return contracts.MachinesMakeAnswer{}, failure(last)
+}
+
+// answer is the make answer of the machine m: its id, and its instance type, or else
+// instanceType.
+func answer(m machine.Machine, instanceType string) contracts.MachinesMakeAnswer {
+	t := m.InstanceType
+	if t == "" {
+		t = instanceType
+	}
+	return contracts.MachinesMakeAnswer{ID: m.ID, MachineType: t}
 }
 
 // spec is the machine spec of the settings s, with their tags, and the instance type,
-// the image's root device, the pool, the key and the user data.
-func spec(s Settings, instanceType, root, pool, key string, userData []byte) machine.Spec {
+// the image's root device, the root volume size, the pool, the key and the user data.
+func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool, key string, userData []byte) machine.Spec {
 	return machine.Spec{
 		Key:             key,
 		PoolID:          pool,
 		InstanceType:    instanceType,
 		ImageID:         s.ImageID,
-		RootDevice:      root,
+		RootDevice:      img.RootDevice,
+		RootSizeGiB:     rootGiB,
 		SubnetID:        s.SubnetID,
 		SecurityGroupID: s.SecurityGroupID,
 		UserData:        userData,
@@ -216,6 +374,11 @@ func (h *Handler) Delete(ctx context.Context, _ string, req contracts.MachinesDe
 		return contracts.MachinesDeleteAnswer{State: contracts.MachineGone}, nil
 	}
 	return contracts.MachinesDeleteAnswer{State: contracts.MachineDeleting}, nil
+}
+
+// defect returns a failure of the kind defect with message.
+func defect(message string) error {
+	return &adapterio.Failure{Kind: contracts.FailureDefect, Message: message}
 }
 
 // failure returns err as a *adapterio.Failure: a *adapterio.Failure unchanged, a

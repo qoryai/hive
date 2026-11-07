@@ -24,6 +24,8 @@ const (
 	ReasonOther = "the machine was not made: the machine adapter failed"
 	// ReasonStartData is the reason of a claim whose start data could not be built.
 	ReasonStartData = "the machine was not made: the claim's run code, gateway URL or lifetime does not fit in the start data"
+	// ReasonNoSpec is the reason of a claim with no machine spec.
+	ReasonNoSpec = "the machine was not made: the claim has no machine spec, so the provisioner cannot choose a machine"
 	// ReasonPool is the reason of a claim for another pool than the provisioner's.
 	ReasonPool = "the machine was not made: the claim's pool is not the provisioner's pool"
 	// ReasonJournal is the reason of a claim that the journal could not record.
@@ -72,7 +74,7 @@ func (l *loop) claim(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		c, ok, err := l.Apiary.Claim(ctx)
+		c, ok, err := l.Apiary.Claim(ctx, l.offers)
 		switch {
 		case ok:
 			if err := l.handle(ctx, c); err != nil {
@@ -99,10 +101,11 @@ func (l *loop) machines() int {
 	return n
 }
 
-// handle makes the machine of the claim c and sends dispatched. When the make fails,
-// it releases the dispatch. When the release returns 204 or 409 lease_expired, it then
-// uploads the make's error as the dispatch's machine log. It returns an error only
-// when the journal cannot be written before or after the make.
+// handle makes the machine of the claim c and sends dispatched. When the claim has no
+// machine spec or the make fails, it releases the dispatch. When the release after a
+// make returns 204 or 409 lease_expired, it then uploads the make's error as the
+// dispatch's machine log. It returns an error only when the journal cannot be written
+// before or after the make.
 func (l *loop) handle(ctx context.Context, c Claim) error {
 	id := c.DispatchID
 	l.Log.Info("claimed a dispatch", slog.String("dispatch_id", id))
@@ -113,6 +116,12 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 	if c.PoolID != l.PoolID {
 		l.Log.Error("the claim's pool is not the provisioner's pool", slog.String("dispatch_id", id))
 		l.release(ctx, id, ReasonPool)
+		l.wait(ctx, LongWait)
+		return nil
+	}
+	if c.MachineSpec == nil {
+		l.Log.Error("the claim has no machine spec, though the claim had offers", slog.String("dispatch_id", id))
+		l.release(ctx, id, ReasonNoSpec)
 		l.wait(ctx, LongWait)
 		return nil
 	}
@@ -136,12 +145,8 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		l.releaseEntry(ctx, id, ReasonStopped)
 		return nil
 	}
-	size := c.Machine
-	if size == "" {
-		size = DefaultSize
-	}
 	// A make in flight finishes after ctx ends, so that its machine is recorded.
-	made, err := l.Machines.Make(context.WithoutCancel(ctx), id, c.PoolID, size, data)
+	made, err := l.Machines.Make(context.WithoutCancel(ctx), id, c.PoolID, *c.MachineSpec, data)
 	madeAt := l.Clock.Now()
 	if err != nil {
 		kind := kindOf(err)
@@ -158,7 +163,15 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		l.wait(ctx, wait)
 		return nil
 	}
-	e := journal.Entry{DispatchID: id, Phase: journal.PhaseMade, MachineID: made.ID, MaxLifetimeMinutes: c.MaxLifetimeMinutes}
+	machineType := made.MachineType
+	if machineType != "" && !journal.IsMachineType(machineType) {
+		// The contract allows a type that the journal cannot keep, such as - or one
+		// with the start of a secret. The log line leaves the type out.
+		l.Log.Warn("the machine type from make is - or contains the start of a secret, so the journal keeps no type and dispatched sends none",
+			slog.String("dispatch_id", id), slog.String("machine_id", made.ID))
+		machineType = ""
+	}
+	e := journal.Entry{DispatchID: id, Phase: journal.PhaseMade, MachineID: made.ID, MaxLifetimeMinutes: c.MaxLifetimeMinutes, MachineType: machineType}
 	if err := l.Journal.Set(e); err != nil {
 		// The journal has the claimed entry, so a restart finds the machine by its key.
 		l.Log.Error("writing the journal failed", slog.String("dispatch_id", id), slog.String("machine_id", made.ID), errorAttr(err, nil))
@@ -190,12 +203,13 @@ func (l *loop) uploadMakeError(ctx context.Context, id, text string, startData [
 	l.Log.Info("uploaded the make's error as the machine log", slog.String("dispatch_id", id))
 }
 
-// dispatched sends dispatched for the entry e, which is made or dispatched. On 204, a
-// made entry becomes dispatched. On 410 gone or 409 lease_expired, the machine is
-// cleaned up. Any other failure is logged, and the next watch sends dispatched again.
+// dispatched sends dispatched for the entry e, which is made or dispatched, with the
+// entry's machine type. On 204, a made entry becomes dispatched. On 410 gone or 409
+// lease_expired, the machine is cleaned up. Any other failure is logged, and the next
+// watch sends dispatched again.
 func (l *loop) dispatched(ctx context.Context, e journal.Entry) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
-	err := l.Apiary.Dispatched(ctx, e.DispatchID, e.MachineID)
+	err := l.Apiary.Dispatched(ctx, e.DispatchID, e.MachineID, e.MachineType)
 	switch {
 	case err == nil && e.Phase == journal.PhaseMade:
 		e.Phase = journal.PhaseDispatched

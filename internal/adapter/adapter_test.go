@@ -30,6 +30,13 @@ const (
 	marker = "qecr_MARKERc0ffee7a1b"
 )
 
+// testSpec is the machine spec of the make requests: the fake adapter's one machine
+// fits it.
+var testSpec = contracts.MachineSpec{VCPUs: 2, MemoryMiB: 2048, DiskGiB: 30, Arch: "amd64"}
+
+// checkErr is the error of a check, without its offers.
+func checkErr(_ []contracts.MachineSpec, err error) error { return err }
+
 // startData is start data that contains the marker.
 var startData = []byte(`{"version":1,"run_code":"` + marker + `","gateway":{"url":"https://gateway.example.com:8443","address":"10.0.1.5"}}`)
 
@@ -214,11 +221,15 @@ func TestCommands(t *testing.T) {
 		}
 	}
 
-	check("check", f.r.Check(ctx))
+	offers, err := f.r.Check(ctx)
+	check("check", err)
+	if !slices.Equal(offers, []contracts.MachineSpec{fakeOffer}) {
+		t.Errorf("check: the offers are %+v", offers)
+	}
 
-	made, err := f.r.Make(ctx, testKey, testPool, "standard", startData)
+	made, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
 	check("make", err)
-	if made.ID != "i-00000000000000001" || !f.report(t).StartDataMatch {
+	if made.ID != "i-00000000000000001" || made.MachineType != "example-type" || !f.report(t).StartDataMatch {
 		t.Errorf("make: the answer is %+v, the start data arrived intact: %v", made, f.report(t).StartDataMatch)
 	}
 
@@ -255,7 +266,7 @@ func TestCommands(t *testing.T) {
 // a line feed.
 func TestStderrFiltered(t *testing.T) {
 	f := newFixture(t, config{Mode: "stderr"})
-	if _, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData); err != nil {
+	if _, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData); err != nil {
 		t.Fatal(err)
 	}
 	want := "fake adapter: make ran\n" +
@@ -275,7 +286,7 @@ func TestStderrFiltered(t *testing.T) {
 
 func TestErrorDocument(t *testing.T) {
 	f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."})
-	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 	var e *Error
 	if !errors.As(err, &e) || *e != (Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."}) {
 		t.Fatalf("the error is %v", err)
@@ -289,7 +300,7 @@ func TestErrorMessageWithSecret(t *testing.T) {
 	// The fake adapter's Serve replaces such a message before the runner reads it.
 	for _, msg := range []string{"echo", "echo64", "Check the code qecr_abc"} {
 		f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureOther, Message: msg})
-		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the machine adapter wrote this message in its place")
 	}
 	// The runner replaces it when the adapter writes it: the start data, raw (as a
@@ -301,7 +312,7 @@ func TestErrorMessageWithSecret(t *testing.T) {
 	enc := base64.StdEncoding.EncodeToString(startData)
 	for _, part := range []string{string(raw[1 : len(raw)-1]), enc, "QECR_abc", enc[:80], enc[1:60], enc[2:50], enc[3:45], enc[21:52], enc[100:116], "MARKERc0ffee7a1b"} {
 		f := newFixture(t, config{Mode: "raw", Status: 1, Stdout: `{"error": {"kind": "other", "message": "Check the start data ` + part + `"}}`})
-		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 		defect(t, err, "make", want)
 	}
 }
@@ -332,25 +343,25 @@ func TestDefects(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := newFixture(t, config{Mode: "raw", Stdout: c.stdout, Status: c.status})
-		_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 		defect(t, err, "make", c.prefix)
 	}
 }
 
 func TestSignal(t *testing.T) {
 	f := newFixture(t, config{Mode: "signal"})
-	defect(t, f.r.Check(context.Background()), "check", "Fix the machine adapter: it ended on the signal killed during check")
+	defect(t, checkErr(f.r.Check(context.Background())), "check", "Fix the machine adapter: it ended on the signal killed during check")
 }
 
 func TestNotStarted(t *testing.T) {
 	r := New(filepath.Join(t.TempDir(), "missing"), "adapter.json", &buffer{})
-	defect(t, r.Check(context.Background()), "check", "Fix adapter.command in the provisioner's settings: the machine adapter did not start: ")
+	defect(t, checkErr(r.Check(context.Background())), "check", "Fix adapter.command in the provisioner's settings: the machine adapter did not start: ")
 }
 
 func TestOutputBound(t *testing.T) {
 	f := newFixture(t, config{Mode: "flood"})
 	start := time.Now()
-	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 	defect(t, err, "make", "Fix the machine adapter: it wrote more than 1048576 bytes on standard output for make, so the provisioner killed its process group")
 	if time.Since(start) > 30*time.Second {
 		t.Errorf("the runner took %s to stop the adapter", time.Since(start))
@@ -371,7 +382,7 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 	f := newFixture(t, config{Mode: "hang"})
 	// The limit leaves the fake adapter time to start its child under load.
 	f.r.timeout = func(string) time.Duration { return 2 * time.Second }
-	_, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 	defect(t, err, "make", "Fix the machine adapter: make ran longer than its time limit of 2s, so the provisioner killed its process group")
 	f.gone(t)
 }
@@ -402,13 +413,13 @@ func TestCancelKillsProcessGroup(t *testing.T) {
 func TestOutputLeftOpen(t *testing.T) {
 	f := newFixture(t, config{Mode: "daemon", Stdout: ""})
 	f.r.waitDelay = 300 * time.Millisecond
-	defect(t, f.r.Check(context.Background()), "check", "Fix the machine adapter: a process that it started kept its standard output or standard error open after check exited")
+	defect(t, checkErr(f.r.Check(context.Background())), "check", "Fix the machine adapter: a process that it started kept its standard output or standard error open after check exited")
 	f.gone(t)
 }
 
 func TestChildOutlivesSuccess(t *testing.T) {
-	f := newFixture(t, config{Mode: "orphan", Stdout: "{}\n"})
-	if err := f.r.Check(context.Background()); err != nil {
+	f := newFixture(t, config{Mode: "orphan", Stdout: `{"offers":[{"vcpus":2,"memory_mib":4096,"disk_gib":100,"arch":"amd64","virtualization":false}]}` + "\n"})
+	if _, err := f.r.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f.gone(t)
@@ -419,7 +430,7 @@ func TestChildOutlivesSuccess(t *testing.T) {
 func TestAnswerWithOutputLeftOpen(t *testing.T) {
 	f := newFixture(t, config{Mode: "daemon", Stdout: `{"id": "i-0123456789abcdef0"}`})
 	f.r.waitDelay = 300 * time.Millisecond
-	made, err := f.r.Make(context.Background(), testKey, testPool, "standard", startData)
+	made, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
 	if err != nil || made.ID != "i-0123456789abcdef0" {
 		t.Errorf("make returned %+v, %v", made, err)
 	}
@@ -428,7 +439,7 @@ func TestAnswerWithOutputLeftOpen(t *testing.T) {
 
 func TestInvalidRequest(t *testing.T) {
 	f := newFixture(t, config{Mode: "serve"})
-	_, err := f.r.Make(context.Background(), "d-1", testPool, "standard", startData)
+	_, err := f.r.Make(context.Background(), "d-1", testPool, testSpec, startData)
 	var e *Error
 	if err == nil || errors.As(err, &e) || leaks(err.Error()) {
 		t.Fatalf("the error is %v", err)
@@ -439,7 +450,7 @@ func TestInvalidRequest(t *testing.T) {
 	if _, err := os.Stat(f.cfg.Report); err == nil {
 		t.Error("the runner started the adapter with an invalid request")
 	}
-	_, err = f.r.Make(context.Background(), testKey, testPool, "standard", make([]byte, contracts.MaxStartData+1))
+	_, err = f.r.Make(context.Background(), testKey, testPool, testSpec, make([]byte, contracts.MaxStartData+1))
 	if err == nil || !strings.HasSuffix(err.Error(), "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero") {
 		t.Errorf("the error is %v", err)
 	}
@@ -449,26 +460,26 @@ func TestCancelledBeforeStart(t *testing.T) {
 	f := newFixture(t, config{Mode: "serve"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := f.r.Check(ctx)
+	_, err := f.r.Check(ctx)
 	if !errors.Is(err, context.Canceled) || err.Error() != "the provisioner cancelled the machine adapter's check before it started: context canceled" {
 		t.Errorf("the error is %v", err)
 	}
 }
 
 // TestFakeRules checks the rules of the protocol that the fake adapter follows: one
-// machine per key, gone for an unknown id, and defect for an unknown size.
+// machine per key, gone for an unknown id, and defect for a spec that nothing fits.
 func TestFakeRules(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, config{Mode: "serve"})
-	first, err := f.r.Make(ctx, testKey, testPool, "standard", startData)
+	first, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := f.r.Make(ctx, testKey, testPool, "standard", startData)
+	again, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
 	if err != nil || again != first {
 		t.Errorf("a second make with the same key returned %+v, %v; want %+v", again, err, first)
 	}
-	other, err := f.r.Make(ctx, "dp_0123456789abcdeg", testPool, "standard", startData)
+	other, err := f.r.Make(ctx, "dp_0123456789abcdeg", testPool, testSpec, startData)
 	if err != nil || other == first {
 		t.Errorf("a make with another key returned %+v, %v", other, err)
 	}
@@ -476,9 +487,9 @@ func TestFakeRules(t *testing.T) {
 	if err != nil || del.State != contracts.MachineGone {
 		t.Errorf("the delete of an unknown id returned %+v, %v", del, err)
 	}
-	_, err = f.r.Make(ctx, testKey, testPool, "huge", startData)
+	_, err = f.r.Make(ctx, "dp_0123456789abcdeh", testPool, contracts.MachineSpec{VCPUs: 4, MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64"}, startData)
 	var e *Error
-	if !errors.As(err, &e) || e.Kind != contracts.FailureDefect || e.Message != "Add the size to the adapter's settings: the adapter has no size of this name" {
-		t.Errorf("a make with an unknown size returned %v", err)
+	if !errors.As(err, &e) || e.Kind != contracts.FailureDefect || e.Message != "Add a machine that fits the machine spec to the adapter's settings: none fits" {
+		t.Errorf("a make with a spec that nothing fits returned %v", err)
 	}
 }

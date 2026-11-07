@@ -489,7 +489,7 @@ func TestAFailedGoneFreesTheSlot(t *testing.T) {
 			t.Fatal("the claim path did not log sent dispatched")
 		}
 	}
-	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a"), dispatched(dispatchB, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a"), typed(dispatched(dispatchB, machineID(1)))})
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
@@ -644,7 +644,7 @@ func TestOneFailedPostPerWatch(t *testing.T) {
 		h.tick()
 		equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{
 			"machine-end " + dispatchA + " deleting",
-			"dispatched " + dispatchD + " i-d",
+			"dispatched " + dispatchD + " i-d -",
 		})
 		if n := h.apiary.takeEndTries(); n != 1 {
 			t.Errorf("%d tries in one watch", n)
@@ -662,7 +662,7 @@ func TestOneFailedPostPerWatch(t *testing.T) {
 		"machine-end " + dispatchA + " deleting",
 		"machine-end " + dispatchB + " deleting",
 		"machine-end " + dispatchC + " deleting",
-		"dispatched " + dispatchD + " i-d",
+		"dispatched " + dispatchD + " i-d -",
 	})
 	if err := h.stop(); err != nil {
 		t.Error(err)
@@ -705,7 +705,7 @@ func TestThePauseCoversTheClaimPath(t *testing.T) {
 	h.machines.setLingering(false)
 	h.apiary.setDispatched(dispatchB, loop.ErrGone)
 	h.claim(newClaim(dispatchB))
-	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a"), ended(dispatchB, machineID(1))})
+	equal(t, "the journal", h.entries(), []journal.Entry{deleting(dispatchA, "i-a"), typed(ended(dispatchB, machineID(1)))})
 	if calls := h.apiary.takeCalls(); slices.Contains(calls, "machine-end "+dispatchB+" gone") {
 		t.Errorf("Qory Apiary's calls are %q", calls)
 	}
@@ -953,7 +953,7 @@ func TestAWatchStopsPostingAtTheFirstFailure(t *testing.T) {
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"machine-end " + dispatchA + " gone",
-		"dispatched " + dispatchC + " i-c",
+		"dispatched " + dispatchC + " i-c -",
 	})
 	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a"), ended(dispatchB, "i-b"), dispatched(dispatchC, "i-c")})
 	h.apiary.setEnd("gone", nil)
@@ -961,7 +961,7 @@ func TestAWatchStopsPostingAtTheFirstFailure(t *testing.T) {
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
 		"machine-end " + dispatchA + " gone",
 		"machine-end " + dispatchB + " gone",
-		"dispatched " + dispatchC + " i-c",
+		"dispatched " + dispatchC + " i-c -",
 	})
 	equal(t, "the journal", h.entries(), []journal.Entry{dispatched(dispatchC, "i-c")})
 	if err := h.stop(); err != nil {

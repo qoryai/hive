@@ -50,8 +50,10 @@ func instance(id, state, token string) types.Instance {
 }
 
 // TestCreateInput pins every field of the RunInstances input that Create sends: the
-// subnet and the security group only on the network interface, which has no public
-// address, the IMDSv2 options, the stop on shutdown, the encrypted root volume, and
+// client token of the key and the instance type, the subnet and the security group
+// only on the network interface, which has no public address, the IMDSv2 options, the
+// stop on shutdown, the encrypted gp3 root volume of the spec's size, no CpuOptions,
+// and
 // only the tags qory:managed, qory:pool and qory:key on the instance and its volume
 // when the spec has no more tags.
 func TestCreateInput(t *testing.T) {
@@ -73,7 +75,7 @@ func TestCreateInput(t *testing.T) {
 		{Key: aws.String("qory:key"), Value: aws.String("dp_0123456789abcdef")},
 	}
 	wantIn := &ec2.RunInstancesInput{
-		ClientToken:  aws.String("dp_0123456789abcdef"),
+		ClientToken:  aws.String("dp_0123456789abcdef.m7g.large"),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
 		ImageId:      aws.String("ami-0123456789abcdef0"),
@@ -92,7 +94,12 @@ func TestCreateInput(t *testing.T) {
 		},
 		BlockDeviceMappings: []types.BlockDeviceMapping{{
 			DeviceName: aws.String("/dev/sda1"),
-			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(true)},
+			Ebs: &types.EbsBlockDevice{
+				Encrypted:           aws.Bool(true),
+				DeleteOnTermination: aws.Bool(true),
+				VolumeSize:          aws.Int32(30),
+				VolumeType:          types.VolumeTypeGp3,
+			},
 		}},
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},
@@ -212,9 +219,11 @@ func TestCreateRefusesSpec(t *testing.T) {
 		edit func(*Spec)
 		want string
 	}{
-		{func(s *Spec) { s.Key = "" }, "Report this defect in the provisioner: the key has 0 bytes, and a client token has 1 to 64 characters"},
-		{func(s *Spec) { s.Key = strings.Repeat("d", 65) }, "Report this defect in the provisioner: the key has 65 bytes, and a client token has 1 to 64 characters"},
-		{func(s *Spec) { s.Key = "dp_ 1" }, "Report this defect in the provisioner: byte 3 of the key is 0x20, and a client token has only ASCII letters, digits and punctuation"},
+		{func(s *Spec) { s.Key = "" }, "Fix the EC2 machine adapter: the machine spec has no key"},
+		{func(s *Spec) { s.Key = strings.Repeat("d", 55) }, "Report this defect in the provisioner: the client token of the key has 65 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.Key = "dp_ 1" }, "Report this defect in the provisioner: byte 3 of the client token of the key is 0x20, and a client token has only ASCII letters, digits and punctuation"},
+		{func(s *Spec) { s.RootSizeGiB = 0 }, "Fix the EC2 machine adapter: the root volume size is 0 GiB, and a gp3 volume has 1 to 16384 GiB"},
+		{func(s *Spec) { s.RootSizeGiB = 16385 }, "Fix the EC2 machine adapter: the root volume size is 16385 GiB, and a gp3 volume has 1 to 16384 GiB"},
 		{func(s *Spec) { s.PoolID = "" }, "Fix the EC2 machine adapter: the machine spec has no pool id"},
 		{func(s *Spec) { s.InstanceType = "" }, "Fix the EC2 machine adapter: the machine spec has no instance type"},
 		{func(s *Spec) { s.ImageID = "" }, "Fix the EC2 machine adapter: the machine spec has no image id"},
@@ -235,11 +244,11 @@ func TestCreateRefusesSpec(t *testing.T) {
 		}
 	}
 	spec := testSpec()
-	spec.Key = strings.Repeat("d", 64)
+	spec.Key = strings.Repeat("d", 54)
 	if _, err := New(&fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return &ec2.RunInstancesOutput{Instances: []types.Instance{{}}}, nil
 	}}).Create(context.Background(), spec); err != nil {
-		t.Errorf("a 64-character key: %v", err)
+		t.Errorf("a key whose client token has 64 characters: %v", err)
 	}
 }
 
@@ -263,7 +272,7 @@ func TestCreateErrorKinds(t *testing.T) {
 	}{
 		{apiError("InstanceLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with InstanceLimitExceeded: api error InstanceLimitExceeded: test message for InstanceLimitExceeded"},
 		{apiError("VcpuLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
-		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit, "Wait, or map the size to another instance type in aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity in the subnet's zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
+		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit, "Wait, or add a type that fits to instance_types in aws-ec2.json: RunInstances failed with InsufficientInstanceCapacity in the subnet's zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
 		{apiError("InsufficientFreeAddressesInSubnet"), contracts.FailureLimit, "Wait until machines end, or set subnet_id in aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
 		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report a provisioner defect, unless aws-ec2.json changed since the first make: RunInstances reused a key with other parameters (IdempotentParameterMismatch): api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
 		{apiError("IdempotentInstanceTerminated"), contracts.FailureOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
@@ -623,48 +632,74 @@ func TestConsoleNotNitro(t *testing.T) {
 	}
 }
 
-// TestRootDevice pins the DescribeImages input, the root device name, and the errors
-// for an empty id, a missing image and an image with no root device name.
-func TestRootDevice(t *testing.T) {
+// testImage returns a DescribeImages answer with the image id, its root device
+// /dev/sda1 with a volume of 30 GiB, and the architecture arch.
+func testImage(id, arch string) *ec2.DescribeImagesOutput {
+	return &ec2.DescribeImagesOutput{Images: []types.Image{{
+		ImageId:        aws.String(id),
+		RootDeviceName: aws.String("/dev/sda1"),
+		Architecture:   types.ArchitectureValues(arch),
+		BlockDeviceMappings: []types.BlockDeviceMapping{
+			{DeviceName: aws.String("/dev/sdb"), Ebs: &types.EbsBlockDevice{VolumeSize: aws.Int32(100)}},
+			{DeviceName: aws.String("/dev/sda1"), Ebs: &types.EbsBlockDevice{VolumeSize: aws.Int32(30)}},
+		},
+	}}}
+}
+
+// TestImage pins the DescribeImages input, the root device name, the root volume size
+// and the architecture, and the errors for an empty id, a missing image, and an image
+// with no root device name, another architecture or no EBS root volume.
+func TestImage(t *testing.T) {
 	const id = "ami-0123456789abcdef0"
 	var reply *ec2.DescribeImagesOutput
 	var replyErr error
 	f := &fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) { return reply, replyErr }}
-	c := New(f)
+	c := NewInRegion(f, "eu-west-1")
 
-	reply = &ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id), RootDeviceName: aws.String("/dev/sda1")}}}
-	name, err := c.RootDevice(context.Background(), id)
-	if err != nil || name != "/dev/sda1" {
-		t.Errorf("name %q, error %v", name, err)
+	for arch, want := range map[string]string{"x86_64": ArchAMD64, "arm64": ArchARM64} {
+		reply = testImage(id, arch)
+		img, err := c.Image(context.Background(), id)
+		if err != nil || img != (Image{RootDevice: "/dev/sda1", RootSizeGiB: 30, Arch: want}) {
+			t.Errorf("%s: image %+v, error %v", arch, img, err)
+		}
 	}
 	if want := (&ec2.DescribeImagesInput{ImageIds: []string{id}}); !reflect.DeepEqual(f.images[0], want) {
 		t.Errorf("input %+v, want %+v", f.images[0], want)
 	}
 
+	noEBS := testImage(id, "x86_64")
+	noEBS.Images[0].BlockDeviceMappings = noEBS.Images[0].BlockDeviceMappings[:1]
 	cases := []struct {
 		reply *ec2.DescribeImagesOutput
 		err   error
 		want  string
 	}{
-		{&ec2.DescribeImagesOutput{}, nil, "Set image_id in aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
-		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String("ami-0fedcba9876543210"), RootDeviceName: aws.String("/dev/xvda")}}}, nil, "Set image_id in aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0"},
-		{nil, apiError("InvalidAMIID.NotFound"), "Set image_id in aws-ec2.json to an image that exists in this region: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
-		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id)}}}, nil, "Set image_id in aws-ec2.json to an image with a root device: image ami-0123456789abcdef0 has no root device name"},
+		{&ec2.DescribeImagesOutput{}, nil, "Set image_id in aws-ec2.json to an image that exists in eu-west-1: DescribeImages returned no image ami-0123456789abcdef0"},
+		{testImage("ami-0fedcba9876543210", "x86_64"), nil, "Set image_id in aws-ec2.json to an image that exists in eu-west-1: DescribeImages returned no image ami-0123456789abcdef0"},
+		{nil, apiError("InvalidAMIID.NotFound"), "Set image_id in aws-ec2.json to an image that exists in eu-west-1: DescribeImages returned no image ami-0123456789abcdef0: api error InvalidAMIID.NotFound: test message for InvalidAMIID.NotFound"},
+		{&ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(id), Architecture: types.ArchitectureValuesX8664}}}, nil, "Set image_id in aws-ec2.json to an image with a root device: image ami-0123456789abcdef0 has no root device name"},
+		{testImage(id, "i386"), nil, `Set image_id in aws-ec2.json to an x86_64 or arm64 image: image ami-0123456789abcdef0 has the architecture "i386"`},
+		{noEBS, nil, "Set image_id in aws-ec2.json to an image with an EBS root volume: image ami-0123456789abcdef0 has no EBS volume of a known size on its root device"},
 		{nil, apiError("UnauthorizedOperation"), "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeImages failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"},
 	}
 	for _, tc := range cases {
 		reply, replyErr = tc.reply, tc.err
-		_, err := c.RootDevice(context.Background(), id)
+		_, err := c.Image(context.Background(), id)
 		if err == nil || err.Error() != tc.want || kindOf(err) != contracts.FailureDefect {
 			t.Errorf("error %v, want %q of kind defect", err, tc.want)
 		}
 	}
 
 	n := len(f.images)
-	_, err = c.RootDevice(context.Background(), "")
-	const wantEmpty = "Fix the EC2 machine adapter: the root device lookup has no image id"
+	_, err := c.Image(context.Background(), "")
+	const wantEmpty = "Fix the EC2 machine adapter: the image lookup has no image id"
 	if err == nil || err.Error() != wantEmpty || len(f.images) != n {
 		t.Errorf("empty id: error %v, want %q with no call", err, wantEmpty)
+	}
+
+	reply, replyErr = &ec2.DescribeImagesOutput{}, nil
+	if _, err := New(f).Image(context.Background(), id); err == nil || !strings.Contains(err.Error(), "exists in this region") {
+		t.Errorf("no region: error %v, want one with this region", err)
 	}
 }
 

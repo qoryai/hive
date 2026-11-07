@@ -7,6 +7,25 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Added
 
+- The provisioner sends the machine adapter's offers in every claim, and passes the
+  claim's `machine_spec` unchanged to `make`. The offers come from the answer of
+  `check`, and the provisioner claims nothing before a `check` that succeeds. The
+  answer of `make` contains `machine_type`, which the provisioner keeps in the journal
+  and sends in each `dispatched` of the dispatch, also in the repeats of each watch
+  and after a restart. A machine found by its key after a restart has no type, because
+  the answer of `list` contains none. The provisioner releases a claim with no
+  `machine_spec`, with the reason "the machine was not made: the claim has no machine
+  spec, so the provisioner cannot choose a machine".
+- The AWS EC2 adapter chooses the instance type by the machine spec. The answer of
+  `check` contains one offer per type in `instance_types`, in that order, each with a
+  disk of 16384 GiB. `make` starts the smallest type that fits: by vCPUs, then memory,
+  then the order of `instance_types`. For a spec with `virtualization` on a type that
+  is not bare metal, it turns on nested virtualization with `CpuOptions`. The root
+  volume is gp3, encrypted and deleted with the machine, and its size is the larger of
+  `disk_gib` and the size of the image's root volume. When EC2 has no capacity for a
+  type in the subnet's zone, `make` tries the next type that fits, and when every type
+  fails that way, it returns the last error. The answer of `make` contains the type it
+  started.
 - The machine's start script writes the steps of the machine's start to
   `/var/lib/qory-machine/steps.jsonl` just before it runs `qory run`: one JSON object
   per line with the step's name and its start and end in UTC to the millisecond, for
@@ -51,6 +70,21 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
+- `aws-ec2.json` has `instance_types`, a list of 1 to 64 EC2 instance types, each
+  listed once, in place of `sizes`. Before, `sizes` set each size name of a make
+  request, such as `standard`, to an instance type, and the provisioner made the size
+  `standard` for a claim with no machine type.
+- `check` of the AWS EC2 adapter reads the instance types, the subnet's zone and the
+  types that zone offers, and fails with the kind `defect` when a type does not run the
+  image's architecture or the zone does not offer it. The error contains the type and
+  the region. It sends one `RunInstances` dry run per type, at most 8 at once.
+- The error of `InsufficientInstanceCapacity` starts with "Wait, or add a type that
+  fits to instance_types in aws-ec2.json". Before, it started with "Wait, or map the
+  size to another instance type in aws-ec2.json".
+- A line of the journal of live dispatches has a fifth field, the machine type, or `-`
+  for none: "dispatch_id phase machine_id max_lifetime_minutes machine_type". `serve`
+  reads a line of four fields, which an earlier version wrote, as an entry with no
+  machine type.
 - The start script, `qory-machine-start`, reads the start data from the file
   `/run/qory-machine-start/start-data`, which a start-data unit for the machine's vendor
   writes, and deletes the file after the read. The script fails when the folder path is
@@ -116,6 +150,15 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Upgrading
 
+- In `aws-ec2.json`, replace `sizes` with `instance_types`, a list of the instance
+  types that `sizes` had. Without it, `check` fails, and the error starts with the fix.
+- Add `ec2:DescribeInstanceTypes`, `ec2:DescribeInstanceTypeOfferings` and
+  `ec2:DescribeSubnets` to the `Describe` statement of the instance role policy, as the
+  README section "Instance role policy" lists. Without them, `check` fails with an
+  error that starts with "Give the instance role the EC2 rights that the EC2 machine
+  adapter needs".
+- Run this version with a Qory Apiary that sends `machine_spec` in each claim. The
+  provisioner releases each claim without one.
 - In a machine image for EC2, install and enable `qory-machine-data-aws-ec2.service`
   and its script, as the README section "The machine image" lists. Without the unit,
   the start script prints "Install the start-data unit for this machine's vendor.

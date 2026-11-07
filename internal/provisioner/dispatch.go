@@ -12,24 +12,25 @@ import (
 )
 
 // Dispatched sends POST /v1/dispatches/<dispatchID>/dispatched, dispatched.schema.json:
-// the machine for the dispatch exists and has the run code and the gateway URL.
-// external is the job at the provider, or nil to send none. The provisioner sends the
-// first dispatched before the claim's LeaseUntil, then again every 60 seconds with the
-// same external while the machine exists; each one is built anew. The answer is a
-// signed 204 while the dispatch lives. A refusal is a [*Refusal]: [ErrForbidden], a
+// the machine for the dispatch exists and has the run code and the gateway URL. external
+// is the job at the provider, or nil to send none. machineType is the vendor's type of
+// the machine, such as t3.medium, or "" to send none. The provisioner sends the first
+// dispatched before the claim's LeaseUntil, then again every 60 seconds with the same
+// external and machine type while the machine exists; each one is built anew. The answer
+// is a signed 204 while the dispatch lives. A refusal is a [*Refusal]: [ErrForbidden], a
 // dispatch that is unknown or of another node pool; [ErrGone], a dispatch that ended,
 // after which the contract requires the provisioner to send the machine log and delete
 // the machine; [ErrLeaseExpired], only for the first dispatched of a stale dispatch,
 // sent at or after the lease's end with no redemption of the run code before it, after
 // which the contract requires the provisioner to stop the machine; [ErrNotFound]; or
 // [ErrRateLimited].
-func (c *Client) Dispatched(ctx context.Context, dispatchID string, external *contracts.External) error {
+func (c *Client) Dispatched(ctx context.Context, dispatchID string, external *contracts.External, machineType string) error {
 	what, err := ofDispatch("dispatched for ", dispatchID)
 	if err != nil {
 		return err
 	}
 	return c.toDispatch(ctx, what, kindDispatched, dispatchID, "dispatched", "dispatched.schema.json", func(t string) any {
-		return contracts.Dispatched{Version: 1, Time: t, External: external}
+		return contracts.Dispatched{Version: 1, Time: t, External: external, MachineType: machineType}
 	})
 }
 

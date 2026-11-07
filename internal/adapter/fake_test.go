@@ -223,8 +223,11 @@ func (h *handler) err(req []byte) error {
 	return &adapterio.Failure{Kind: h.cfg.Kind, Message: msg}
 }
 
+// fakeOffer is the one machine that the fake adapter makes.
+var fakeOffer = contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 100, Arch: "amd64"}
+
 func (h *handler) Check(context.Context, string, contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error) {
-	return contracts.MachinesCheckAnswer{}, h.err(nil)
+	return contracts.MachinesCheckAnswer{Offers: []contracts.MachineSpec{fakeOffer}}, h.err(nil)
 }
 
 // machines reads the fake's machines, by key, from the file beside its report.
@@ -236,17 +239,18 @@ func (h *handler) machines() map[string]string {
 	return m
 }
 
-// Make makes at most one machine per key, and knows the one size standard.
+// Make makes at most one machine per key, of the one machine fakeOffer, the type
+// example-type, for a machine spec that fakeOffer fits.
 func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	if err := h.err(startData); err != nil {
 		return contracts.MachinesMakeAnswer{}, err
 	}
-	if req.Size != "standard" {
-		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Add the size to the adapter's settings: the adapter has no size of this name"}
+	if !fakeOffer.Fits(req.MachineSpec) {
+		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Add a machine that fits the machine spec to the adapter's settings: none fits"}
 	}
 	m := h.machines()
 	if id, ok := m[req.Key]; ok {
-		return contracts.MachinesMakeAnswer{ID: id}, nil
+		return contracts.MachinesMakeAnswer{ID: id, MachineType: "example-type"}, nil
 	}
 	id := fmt.Sprintf("i-%017x", len(m)+1)
 	m[req.Key] = id
@@ -254,7 +258,7 @@ func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, 
 	if err := os.WriteFile(h.cfg.Report+".machines", b, 0o600); err != nil {
 		return contracts.MachinesMakeAnswer{}, err
 	}
-	return contracts.MachinesMakeAnswer{ID: id}, nil
+	return contracts.MachinesMakeAnswer{ID: id, MachineType: "example-type"}, nil
 }
 
 func (h *handler) List(_ context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
