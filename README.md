@@ -1,4 +1,6 @@
-# Hive
+# Qory Hive
+
+This repository is part of [Qory](https://github.com/qoryai/qory). Its README lists every part and how to install Qory.
 
 Hive makes and deletes the machines of Qory Apiary's node pools. A node pool is a
 group of machines in Qory Apiary, and one provisioner serves it. Hive is
