@@ -127,7 +127,7 @@ func rootFits(s Settings, img machine.Image) error {
 	if img.RootSizeGiB <= s.MaxRootGiB {
 		return nil
 	}
-	return defect(fmt.Sprintf("Raise max_root_gib in %s to at least the size of the image's root volume: the image's root volume has %d GiB, and max_root_gib is %d GiB", settingsFile, img.RootSizeGiB, s.MaxRootGiB))
+	return defect(fmt.Sprintf("Raise max_root_gib in %s. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The image's root volume has %d GiB, above max_root_gib %d GiB", settingsFile, img.RootSizeGiB, s.MaxRootGiB))
 }
 
 // maxDryRuns is the most RunInstances dry runs that check sends at once.
@@ -235,7 +235,7 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Report this defect in the provisioner: the machine spec has disk_gib %d GiB, and a gp3 volume has at most %d GiB", want.DiskGiB, machine.MaxRootGiB))
 	}
 	if want.DiskGiB > s.MaxRootGiB {
-		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Raise max_root_gib in %s, set from the deploy setting MaxRootVolumeGiB: the machine spec has disk_gib %d GiB, above max_root_gib %d GiB", settingsFile, want.DiskGiB, s.MaxRootGiB))
+		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Raise max_root_gib in %s. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The machine spec has disk_gib %d GiB, above max_root_gib %d GiB", settingsFile, want.DiskGiB, s.MaxRootGiB))
 	}
 	c, err := h.client(ctx)
 	if err != nil {

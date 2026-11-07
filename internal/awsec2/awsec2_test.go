@@ -361,7 +361,7 @@ func TestCheckMaxRoot(t *testing.T) {
 	f := world()
 	h, _, _ := testHandler(f)
 	status, out := serve(t, h, "check", writeSettings(t, withMaxRoot(`29`)), `{"version": 1}`)
-	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json to at least the size of the image's root volume: the image's root volume has 30 GiB, and max_root_gib is 29 GiB")
+	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The image's root volume has 30 GiB, above max_root_gib 29 GiB")
 	if len(f.runs) != 0 || len(f.subnets) != 0 {
 		t.Errorf("%d RunInstances and %d DescribeSubnets calls, want none", len(f.runs), len(f.subnets))
 	}
@@ -593,8 +593,8 @@ func TestMakeMaxRoot(t *testing.T) {
 		disk     int
 		want     string
 	}{
-		{withMaxRoot(`500`), 501, "Raise max_root_gib in aws-ec2.json, set from the deploy setting MaxRootVolumeGiB: the machine spec has disk_gib 501 GiB, above max_root_gib 500 GiB"},
-		{withMaxRoot(`500`), 16384, "Raise max_root_gib in aws-ec2.json, set from the deploy setting MaxRootVolumeGiB: the machine spec has disk_gib 16384 GiB, above max_root_gib 500 GiB"},
+		{withMaxRoot(`500`), 501, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The machine spec has disk_gib 501 GiB, above max_root_gib 500 GiB"},
+		{withMaxRoot(`500`), 16384, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The machine spec has disk_gib 16384 GiB, above max_root_gib 500 GiB"},
 		{withMaxRoot(`500`), 65536, "Report this defect in the provisioner: the machine spec has disk_gib 65536 GiB, and a gp3 volume has at most 16384 GiB"},
 		{validSettings, 16385, "Report this defect in the provisioner: the machine spec has disk_gib 16385 GiB, and a gp3 volume has at most 16384 GiB"},
 		{withMaxRoot(`500`), 16385, "Report this defect in the provisioner: the machine spec has disk_gib 16385 GiB, and a gp3 volume has at most 16384 GiB"},
@@ -612,7 +612,7 @@ func TestMakeMaxRoot(t *testing.T) {
 	f := world()
 	h, _, _ := testHandler(f)
 	status, out := serve(t, h, "make", writeSettings(t, withMaxRoot(`29`)), makeRequest(1, 1024, 8, false, testData))
-	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json to at least the size of the image's root volume: the image's root volume has 30 GiB, and max_root_gib is 29 GiB")
+	wantFailure(t, status, out, contracts.FailureDefect, "Raise max_root_gib in aws-ec2.json. Where the deploy recipe writes the file, raise the recipe's MaxRootVolumeGiB setting. The image's root volume has 30 GiB, above max_root_gib 29 GiB")
 	if len(f.runs) != 0 || len(f.describes) != 0 {
 		t.Errorf("%d RunInstances and %d DescribeInstances calls, want none", len(f.runs), len(f.describes))
 	}

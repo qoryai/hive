@@ -187,11 +187,13 @@ JSON object:
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
   and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
   dry run of `check` sends them too.
-- `max_root_gib`: the largest root volume that `make` starts, in GiB, an integer from 1
-  to 16384. Optional; 16384, the largest gp3 volume, when absent. The deploy sets it
-  from the deploy setting `MaxRootVolumeGiB`, which also limits `ec2:VolumeSize` in the
-  instance role's policy, so the offers of `check` match the volumes that the instance
-  role's policy allows.
+- `max_root_gib`: the largest root volume that `make` starts, in GiB, an integer from
+  1 to 16384. Optional; 16384, the largest gp3 volume, when absent. The deploy recipe
+  sets it from the deploy setting `MaxRootVolumeGiB`, which also limits
+  `ec2:VolumeSize` in the instance role's policy, so the offers of `check` match the
+  volumes that the instance role's policy allows. The deploy recipe writes
+  `aws-ec2.json` each time the host starts, so change `MaxRootVolumeGiB` there, not
+  the file.
 
 A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be

@@ -125,8 +125,8 @@ func TestMessagesFit(t *testing.T) {
 		t.Fatalf("check with an image larger than max_root_gib: error %v", err)
 	}
 	wantFits(t, err.Error())
-	spec.DiskGiB = 501
-	_, err = region(world()).Make(context.Background(), writeSettings(t, withMaxRoot(`500`)), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
+	spec.DiskGiB = 16384
+	_, err = region(world()).Make(context.Background(), writeSettings(t, withMaxRoot(`16383`)), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
 	if err == nil || !strings.HasPrefix(err.Error(), "Raise max_root_gib") {
 		t.Fatalf("make with a disk larger than max_root_gib: error %v", err)
 	}
