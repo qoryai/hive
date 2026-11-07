@@ -18,14 +18,18 @@ The changes to Hive that no release contains yet, in the shape of
   spec, so the provisioner cannot choose a machine".
 - The AWS EC2 adapter chooses the instance type by the machine spec. The answer of
   `check` contains one offer per type in `instance_types`, in that order, each with a
-  disk of 16384 GiB. `make` starts the smallest type that fits: by vCPUs, then memory,
-  then the order of `instance_types`. For a spec with `virtualization` on a type that
-  is not bare metal, it turns on nested virtualization with `CpuOptions`. The root
-  volume is gp3, encrypted and deleted with the machine, and its size is the larger of
-  `disk_gib` and the size of the image's root volume. When EC2 has no capacity for a
-  type in the subnet's zone, `make` tries the next type that fits, and when every type
-  fails that way, it returns the last error. The answer of `make` contains the type it
-  started.
+  disk of `max_root_gib`. `make` starts the smallest type that fits: by vCPUs, then
+  memory, then the order of `instance_types`. For a spec with `virtualization` on a
+  type that is not bare metal, it turns on nested virtualization with `CpuOptions`.
+  The root volume is gp3, encrypted and deleted with the machine, and its size is the
+  larger of `disk_gib` and the size of the image's root volume. When EC2 has no
+  capacity for a type in the subnet's zone, `make` tries the next type that fits, and
+  when every type fails that way, it returns the last error. The answer of `make`
+  contains the type it started.
+- The AWS EC2 adapter reads `max_root_gib` from `aws-ec2.json`: 1 to 16384, and 16384
+  when absent. `check` and `make` fail when it is smaller than the image's root volume,
+  and `make` fails for a larger `disk_gib`. The deploy sets it from `MaxRootVolumeGiB`,
+  the `ec2:VolumeSize` limit of the instance role.
 - The machine's start script writes the steps of the machine's start to
   `/var/lib/qory-machine/steps.jsonl` just before it runs `qory run`: one JSON object
   per line with the step's name and its start and end in UTC to the millisecond, for

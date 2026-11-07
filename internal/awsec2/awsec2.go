@@ -59,14 +59,16 @@ func loadClient(ctx context.Context) (*machine.Client, error) {
 
 // Check reads the settings, checks the credentials, and reads from EC2 the image, the
 // zone of the subnet, each instance type of instance_types, and which of those types
-// the zone offers. It fails with the kind defect for an instance type that does not
+// the zone offers. It fails with the kind defect when max_root_gib is smaller than the
+// image's root volume, and for an instance type that does not
 // run the image's architecture, that the zone does not offer, or whose size is outside
 // the bounds of an offer. It then sends one RunInstances dry run per instance type, at
 // most 8 at once, and returns the error of the first type in the order of
 // instance_types whose dry run fails. Then it sends one DescribeInstances dry run, the
 // call of list. It makes no machine. It checks no right of TerminateInstances or
 // GetConsoleOutput, because their calls need the id of an instance that exists. The
-// answer has one offer per instance type, in the order of instance_types.
+// answer has one offer per instance type, in the order of instance_types, each with
+// a disk of max_root_gib.
 func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
@@ -79,6 +81,9 @@ func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCh
 	img, err := c.Image(ctx, s.ImageID)
 	if err != nil {
 		return contracts.MachinesCheckAnswer{}, failure(err)
+	}
+	if err := rootFits(s, img); err != nil {
+		return contracts.MachinesCheckAnswer{}, err
 	}
 	zone, err := c.SubnetZone(ctx, s.SubnetID)
 	if err != nil {
@@ -101,7 +106,7 @@ func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCh
 		case !offered[name]:
 			return contracts.MachinesCheckAnswer{}, defect(fmt.Sprintf("Remove %s from instance_types in %s, or set subnet_id to a subnet in a zone that offers it: in %s, zone %s does not offer it", name, settingsFile, c.Region(), zone))
 		}
-		o := offer(t, img)
+		o := offer(t, img, s.MaxRootGiB)
 		if !inBounds(o) {
 			return contracts.MachinesCheckAnswer{}, defect(fmt.Sprintf("Remove %s from instance_types in %s: in %s, it has %d vCPUs and %d MiB, and an offer has 1 to 1024 vCPUs and 512 to 8388608 MiB", name, settingsFile, c.Region(), o.VCPUs, o.MemoryMiB))
 		}
@@ -114,6 +119,15 @@ func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCh
 		return contracts.MachinesCheckAnswer{}, failure(err)
 	}
 	return contracts.MachinesCheckAnswer{Offers: offers}, nil
+}
+
+// rootFits returns a failure of the kind defect when max_root_gib of s is smaller than
+// the root volume of img, and nil otherwise.
+func rootFits(s Settings, img machine.Image) error {
+	if img.RootSizeGiB <= s.MaxRootGiB {
+		return nil
+	}
+	return defect(fmt.Sprintf("Raise max_root_gib in %s to at least the size of the image's root volume: the image's root volume has %d GiB, and max_root_gib is %d GiB", settingsFile, img.RootSizeGiB, s.MaxRootGiB))
 }
 
 // maxDryRuns is the most RunInstances dry runs that check sends at once.
@@ -146,13 +160,13 @@ func checkRights(ctx context.Context, c *machine.Client, s Settings, infos map[s
 }
 
 // offer is the machine that the adapter offers for the instance type t and the image
-// img: t's vCPUs and memory, the largest gp3 root volume, img's architecture, and
+// img: t's vCPUs and memory, a root volume of maxRootGiB, img's architecture, and
 // virtualization when t is bare metal or has nested virtualization.
-func offer(t machine.InstanceType, img machine.Image) contracts.MachineSpec {
+func offer(t machine.InstanceType, img machine.Image, maxRootGiB int) contracts.MachineSpec {
 	return contracts.MachineSpec{
 		VCPUs:          t.VCPUs,
 		MemoryMiB:      t.MemoryMiB,
-		DiskGiB:        machine.MaxRootGiB,
+		DiskGiB:        maxRootGiB,
 		Arch:           img.Arch,
 		Virtualization: t.Virtualization(),
 	}
@@ -173,14 +187,14 @@ func inBounds(o contracts.MachineSpec) bool {
 	return o.VCPUs >= minVCPUs && o.VCPUs <= maxVCPUs && o.MemoryMiB >= minMemoryMiB && o.MemoryMiB <= maxMemoryMiB
 }
 
-// fitting returns the instance types of names whose offer fits want, smallest first:
-// by vCPUs, then by memory, a tie going to the order of names. A type that does not
-// run img's architecture is left out.
-func fitting(names []string, infos map[string]machine.InstanceType, img machine.Image, want contracts.MachineSpec) []machine.InstanceType {
+// fitting returns the instance types of names whose offer, with a root volume of
+// maxRootGiB, fits want, smallest first: by vCPUs, then by memory, a tie going to the
+// order of names. A type that does not run img's architecture is left out.
+func fitting(names []string, infos map[string]machine.InstanceType, img machine.Image, maxRootGiB int, want contracts.MachineSpec) []machine.InstanceType {
 	var out []machine.InstanceType
 	for _, name := range names {
 		t := infos[name]
-		if slices.Contains(t.Archs, img.Arch) && offer(t, img).Fits(want) {
+		if slices.Contains(t.Archs, img.Arch) && offer(t, img, maxRootGiB).Fits(want) {
 			out = append(out, t)
 		}
 	}
@@ -199,6 +213,11 @@ func fitting(names []string, infos map[string]machine.InstanceType, img machine.
 // metal, it turns that on. When EC2 has no capacity for the type, make tries the next
 // type that fits, in the same order, and when every type fails for lack of capacity,
 // it returns the last failure. When no type fits, make fails with the kind defect.
+// When the spec's disk is larger than max_root_gib, make fails with the kind defect
+// before any EC2 call: the instance role's policy limits the root volume to the deploy
+// setting MaxRootVolumeGiB, which sets max_root_gib. When the image's root volume is
+// larger than max_root_gib, make fails with the kind defect before any RunInstances
+// call.
 //
 // Before the first try, make looks up a machine of the pool with the key in its qory:key
 // tag. When there is one, in any state, make returns its id and makes no machine, so a
@@ -211,6 +230,13 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, err
 	}
+	want := req.MachineSpec
+	if want.DiskGiB > machine.MaxRootGiB {
+		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Report this defect in the provisioner: the machine spec has disk_gib %d GiB, and a gp3 volume has at most %d GiB", want.DiskGiB, machine.MaxRootGiB))
+	}
+	if want.DiskGiB > s.MaxRootGiB {
+		return contracts.MachinesMakeAnswer{}, defect(fmt.Sprintf("Raise max_root_gib in %s, set from the deploy setting MaxRootVolumeGiB: the machine spec has disk_gib %d GiB, above max_root_gib %d GiB", settingsFile, want.DiskGiB, s.MaxRootGiB))
+	}
 	c, err := h.client(ctx)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
@@ -219,12 +245,16 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
+	// The spec's disk is at most max_root_gib, so the root volume, the larger of the
+	// disk and the image's root volume, is larger only when the image's root is.
+	if err := rootFits(s, img); err != nil {
+		return contracts.MachinesMakeAnswer{}, err
+	}
 	infos, err := c.InstanceTypes(ctx, s.InstanceTypes)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
-	want := req.MachineSpec
-	fits := fitting(s.InstanceTypes, infos, img, want)
+	fits := fitting(s.InstanceTypes, infos, img, s.MaxRootGiB, want)
 	if len(fits) == 0 {
 		virt := ""
 		if want.Virtualization {

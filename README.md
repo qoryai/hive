@@ -174,7 +174,8 @@ JSON object:
   "security_group_id": "sg-0123456789abcdef0",
   "image_id": "ami-0123456789abcdef0",
   "instance_types": ["t3.medium", "m7i.large"],
-  "tags": {"qory:stack": "example-stack"}
+  "tags": {"qory:stack": "example-stack"},
+  "max_root_gib": 500
 }
 ```
 
@@ -186,6 +187,11 @@ JSON object:
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
   and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
   dry run of `check` sends them too.
+- `max_root_gib`: the largest root volume that `make` starts, in GiB, an integer from 1
+  to 16384. Optional; 16384, the largest gp3 volume, when absent. The deploy sets it
+  from the deploy setting `MaxRootVolumeGiB`, which also limits `ec2:VolumeSize` in the
+  instance role's policy, so the offers of `check` match the volumes that the instance
+  role's policy allows.
 
 A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
@@ -197,25 +203,29 @@ member breaks a rule, `check` and `make` fail, and the error starts with the fix
 `subnet_id` with `ec2:DescribeSubnets`, and the types that zone offers with
 `ec2:DescribeInstanceTypeOfferings`. It fails with the kind `defect`, and an error
 that contains the type and the region, when a type does not run the architecture of
-`image_id`, or the subnet's zone does not offer it. Otherwise its answer contains one
-offer per type, in the order of `instance_types`. Each offer has a disk of 16384 GiB,
-the largest gp3 volume, because `make` sizes the root volume to the machine spec.
+`image_id`, or the subnet's zone does not offer it. It fails with the kind `defect`,
+and an error that contains both sizes, when `max_root_gib` is smaller than the root
+volume of `image_id`. Otherwise its answer contains one offer per type, in the order
+of `instance_types`. Each offer has a disk of `max_root_gib`, because `make` sizes the
+root volume to the machine spec.
 
 `make` starts the smallest type that fits the machine spec: the type with the fewest
 vCPUs, then the least memory, then the first in `instance_types`. A type fits when it
-has at least the spec's vCPUs and memory, runs the spec's architecture, has room for
-the spec's `disk_gib` of at most 16384, and, when the spec sets `virtualization`, is a
-bare metal type or has nested virtualization. For virtualization on a type that is not
-bare metal, `make` turns on nested virtualization with `CpuOptions`. The root volume
-is gp3 and encrypted, is deleted with the machine, and its size is the larger of the
-spec's `disk_gib` and the size of the root volume of `image_id`. When EC2 has no
-capacity for a type in the subnet's zone (`InsufficientInstanceCapacity`), `make`
-tries the next type that fits, and when every type fails that way, it returns the last
-error. When no type fits, `make` fails with the kind `defect`. A key gets one machine:
-each start sends a client token made of the key and the type, and before the first
-start, `make` looks for a machine with the key's tags. EC2 lists a new machine after a
-short delay, so a second `make` with the same key right after the first can start a
-second machine of another type.
+has at least the spec's vCPUs and memory, runs the spec's architecture, and, when the
+spec sets `virtualization`, is a bare metal type or has nested virtualization. When
+the spec's `disk_gib` is larger than `max_root_gib`, `make` fails with the kind
+`defect` before any EC2 call. When `max_root_gib` is smaller than the root volume of
+`image_id`, `make` fails with the kind `defect` before any RunInstances call. For
+virtualization on a type that is not bare metal, `make` turns on nested virtualization
+with `CpuOptions`. The root volume is gp3 and encrypted, is deleted with the machine,
+and its size is the larger of the spec's `disk_gib` and the size of the root volume of
+`image_id`. When EC2 has no capacity for a type in the subnet's zone
+(`InsufficientInstanceCapacity`), `make` tries the next type that fits, and when every
+type fails that way, it returns the last error. When no type fits, `make` fails with
+the kind `defect`. A key gets one machine: each start sends a client token made of the
+key and the type, and before the first start, `make` looks for a machine with the
+key's tags. EC2 lists a new machine after a short delay, so a second `make` with the
+same key right after the first can start a second machine of another type.
 
 ### Instance role policy
 
@@ -230,6 +240,7 @@ example values before you attach it to the instance role:
   `subnet_id`, `security_group_id` and `image_id` in `aws-ec2.json`.
 - `np_0123456789abcdef`: the node pool's id, the value of each machine's `qory:pool`
   tag.
+- `500`: the largest root volume in GiB, the deploy setting `MaxRootVolumeGiB`.
 
 ```json
 {
@@ -267,6 +278,9 @@ example values before you attach it to the instance role:
         },
         "Bool": {
           "ec2:Encrypted": "true"
+        },
+        "NumericLessThanEquals": {
+          "ec2:VolumeSize": "500"
         }
       }
     },
@@ -341,9 +355,12 @@ What each statement allows, and why:
   make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
   key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
   `UnauthorizedOperation`.
-- `LaunchVolume` allows the volumes of a launch only with the same tags, and only
-  encrypted. The adapter marks the root volume encrypted. Add the keys of `tags` to
-  its `aws:TagKeys` too.
+- `LaunchVolume` allows the volumes of a launch only with the same tags, only
+  encrypted, and only up to the size in `ec2:VolumeSize`, in GiB. The adapter marks
+  the root volume encrypted. Add the keys of `tags` to its `aws:TagKeys` too. Set
+  `max_root_gib` in `aws-ec2.json` to at most the value of `ec2:VolumeSize`: with a
+  larger value, `check` offers disks that `make` cannot start, and `make` fails with
+  `UnauthorizedOperation`.
 - `LaunchNetworkInterface` allows the network interface of a launch only without a
   public IP address. The adapter sends `AssociatePublicIpAddress` set to false.
 - `LaunchFromSettings` allows a launch only into the subnet and the security group of
