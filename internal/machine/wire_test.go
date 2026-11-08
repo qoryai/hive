@@ -381,36 +381,38 @@ func TestWireImage(t *testing.T) {
 }
 
 // TestWireInstanceTypes pins the DescribeInstanceTypes request on the wire and what
-// InstanceTypes reads from its reply: vCPUs, memory, architectures, nested
-// virtualization and bare metal.
+// AllInstanceTypes reads from its reply: vCPUs, memory, architectures, nested
+// virtualization, bare metal and the usage class on-demand.
 func TestWireInstanceTypes(t *testing.T) {
 	c, s := newWireClient(t, reply{200, `<DescribeInstanceTypesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId><instanceTypeSet>
 <item><instanceType>m8i.large</instanceType><bareMetal>false</bareMetal><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>8192</sizeInMiB></memoryInfo>
-<processorInfo><supportedArchitectures><item>x86_64</item></supportedArchitectures><supportedFeatures><item>nested-virtualization</item></supportedFeatures></processorInfo></item>
+<processorInfo><supportedArchitectures><item>x86_64</item></supportedArchitectures><supportedFeatures><item>nested-virtualization</item></supportedFeatures></processorInfo>
+<supportedUsageClasses><item>on-demand</item><item>spot</item></supportedUsageClasses></item>
 <item><instanceType>m7g.metal</instanceType><bareMetal>true</bareMetal><vCpuInfo><defaultVCpus>64</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>262144</sizeInMiB></memoryInfo>
-<processorInfo><supportedArchitectures><item>arm64</item></supportedArchitectures></processorInfo></item>
+<processorInfo><supportedArchitectures><item>arm64</item></supportedArchitectures></processorInfo>
+<supportedUsageClasses><item>capacity-block</item></supportedUsageClasses></item>
 </instanceTypeSet></DescribeInstanceTypesResponse>`})
-	got, err := c.InstanceTypes(context.Background(), []string{"m8i.large", "m7g.metal"})
+	got, err := c.AllInstanceTypes(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]InstanceType{
-		"m8i.large": {Name: "m8i.large", VCPUs: 2, MemoryMiB: 8192, Archs: []string{ArchAMD64}, NestedVirtualization: true},
-		"m7g.metal": {Name: "m7g.metal", VCPUs: 64, MemoryMiB: 262144, Archs: []string{ArchARM64}, BareMetal: true},
+	want := []InstanceType{
+		{Name: "m8i.large", VCPUs: 2, MemoryMiB: 8192, Archs: []string{ArchAMD64}, NestedVirtualization: true, OnDemand: true},
+		{Name: "m7g.metal", VCPUs: 64, MemoryMiB: 262144, Archs: []string{ArchARM64}, BareMetal: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("types %+v, want %+v", got, want)
 	}
-	wantForm := url.Values{"Action": {"DescribeInstanceTypes"}, "Version": {"2016-11-15"}, "InstanceType.1": {"m8i.large"}, "InstanceType.2": {"m7g.metal"}}
+	wantForm := url.Values{"Action": {"DescribeInstanceTypes"}, "Version": {"2016-11-15"}, "MaxResults": {"100"}}
 	if !reflect.DeepEqual(s.forms[0], wantForm) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], wantForm)
 	}
 }
 
-// TestWireSubnetZoneAndOffered pins the DescribeSubnets and the
-// DescribeInstanceTypeOfferings requests on the wire, and the zone and the offered
+// TestWireSubnetZoneAndZoneTypes pins the DescribeSubnets and the
+// DescribeInstanceTypeOfferings requests on the wire, and the zone and the zone's
 // types from their replies.
-func TestWireSubnetZoneAndOffered(t *testing.T) {
+func TestWireSubnetZoneAndZoneTypes(t *testing.T) {
 	c, s := newWireClient(t, reply{200, `<DescribeSubnetsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
 <subnetSet><item><subnetId>subnet-0123456789abcdef0</subnetId><availabilityZone>eu-west-1b</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`})
 	zone, err := c.SubnetZone(context.Background(), "subnet-0123456789abcdef0")
@@ -424,14 +426,13 @@ func TestWireSubnetZoneAndOffered(t *testing.T) {
 
 	c, s = newWireClient(t, reply{200, `<DescribeInstanceTypeOfferingsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
 <instanceTypeOfferingSet><item><instanceType>t3.medium</instanceType><locationType>availability-zone</locationType><location>eu-west-1b</location></item></instanceTypeOfferingSet></DescribeInstanceTypeOfferingsResponse>`})
-	offered, err := c.Offered(context.Background(), "eu-west-1b", []string{"t3.medium", "m7i.large"})
-	if err != nil || !reflect.DeepEqual(offered, map[string]bool{"t3.medium": true}) {
-		t.Errorf("offered %v, error %v", offered, err)
+	names, err := c.ZoneTypes(context.Background(), "eu-west-1b")
+	if err != nil || !reflect.DeepEqual(names, []string{"t3.medium"}) {
+		t.Errorf("zone types %v, error %v", names, err)
 	}
 	want = url.Values{
 		"Action": {"DescribeInstanceTypeOfferings"}, "Version": {"2016-11-15"}, "LocationType": {"availability-zone"},
-		"Filter.1.Name": {"location"}, "Filter.1.Value.1": {"eu-west-1b"},
-		"Filter.2.Name": {"instance-type"}, "Filter.2.Value.1": {"t3.medium"}, "Filter.2.Value.2": {"m7i.large"},
+		"Filter.1.Name": {"location"}, "Filter.1.Value.1": {"eu-west-1b"}, "MaxResults": {"1000"},
 	}
 	if !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)

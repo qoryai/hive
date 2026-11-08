@@ -239,14 +239,14 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 }
 
 // TestAStrayIsCleanedUp cleans up a listed machine whose key has no journal entry,
-// with its key as the dispatch id, and leaves a stray that is deleting as it is, with
-// no entry and no machine-end.
+// with its key as the dispatch id, and leaves a deleting stray whose key is not a
+// dispatch id as it is, with no entry and no machine-end.
 func TestAStrayIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "stray log"
 	h.start()
 	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
-	h.machines.add("i-d", dispatchD, contracts.MachineDeleting, epoch)
+	h.machines.add("i-d", "not-a-dispatch", contracts.MachineDeleting, epoch)
 	h.machines.takeCalls()
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
@@ -413,45 +413,16 @@ func TestAListFailureSkipsTheWatch(t *testing.T) {
 	}
 }
 
-// TestAFailedFolderSyncStillLetsTheLoopClaim fills the journal with max_machines 1,
-// so the claim path waits for an entry to leave. A watch then cleans up the machine,
-// whose dispatch ended, and the removal of its entry returns the error of a failed
-// sync of the folder after the entry left the journal. The loop claims again.
-func TestAFailedFolderSyncStillLetsTheLoopClaim(t *testing.T) {
+// TestAFailedFolderSyncStillRemovesTheEntry cleans up a machine whose dispatch ended,
+// and the removal of its entry returns the error of a failed sync of the folder after
+// the entry left the journal. The entry counts as removed, the log has the failed
+// removal, and the loop claims again.
+func TestAFailedFolderSyncStillRemovesTheEntry(t *testing.T) {
 	h := newHarness(t)
-	h.config.MaxMachines = 1
 	failing := &syncFailure{}
 	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
 	h.start()
-	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
-	sent := func() int {
-		return len(slices.DeleteFunc(h.apiary.takeCallsKeep(), func(c string) bool {
-			return c != "dispatched "+dispatchA+" "+machineID(1)+" "+madeType
-		}))
-	}
-	// The fake clock stands still until the claim path has logged "sent dispatched",
-	// so that no watch runs while the claim path works on the dispatch. No watch has
-	// run yet, so the line is the claim path's.
-	for deadline := time.Now().Add(patience); len(h.find("sent dispatched")) < 1; time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the claim path did not log sent dispatched")
-		}
-	}
-	// After that line, the claim path only returns and leaves the dispatch, and then
-	// waits for an entry to leave the journal. A watch skips the dispatch while the
-	// claim path works on it, so the test runs up to 30 watches, 10 ms apart, until
-	// one sends dispatched: 30 minutes of the fake clock, below the 75 minutes of the
-	// lifetime and 15 minutes.
-	for n := 0; sent() < 2; n++ {
-		if n == 30 {
-			t.Fatal("no watch sent dispatched")
-		}
-		time.Sleep(10 * time.Millisecond)
-		h.tick()
-	}
-	if n := h.apiary.claimCount(); n != 1 {
-		t.Fatalf("the loop asked for %d claims with a full journal", n)
-	}
+	h.claim(newClaim(dispatchA))
 	failing.setFail()
 	h.apiary.setDispatched(dispatchA, loop.ErrGone)
 	h.tick()
@@ -534,36 +505,141 @@ func TestARestartReleaseWithAMachineThatExistsKeepsTheEntry(t *testing.T) {
 	}
 }
 
-// TestAKeptClaimedEntryIsRemovedAfterItsLifetime keeps a claimed entry whose release
+// TestAKeptClaimedEntryGetsGoneAfterItsLifetime keeps a claimed entry whose release
 // returned 409 machine_exists while no list has its machine, until its lifetime and
-// 15 minutes have passed since the claim, and then removes it.
-func TestAKeptClaimedEntryIsRemovedAfterItsLifetime(t *testing.T) {
+// 15 minutes have passed since the claim. Then it posts gone with no delete and removes
+// the entry. When the post fails, the entry is ended with no machine id, and the watch
+// sends gone again until the post is accepted.
+func TestAKeptClaimedEntryGetsGoneAfterItsLifetime(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"accepted", nil},
+		{"failed, then accepted", endFailed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later"}
+			h.apiary.releaseErr = machineExists
+			h.apiary.setEnd("gone", c.err)
+			h.start()
+			claim := newClaim(dispatchA)
+			claim.MaxLifetimeMinutes = 15
+			h.send(claimResult{claim: claim, ok: true})
+			h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
+			h.clock.Advance(loop.ShortWait)
+			h.idle()
+			// The claim was at epoch and the clock is at 15 s, so the watches run at
+			// 75 s, 135 s and so on. The bound is epoch + 30 minutes: 29 watches keep
+			// the entry, and the 30th, at 1815 s, posts gone.
+			for range 29 {
+				h.tick()
+			}
+			equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: 15}})
+			h.apiary.takeCalls()
+			h.tick()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+			if len(h.find("no machine is listed for the claimed dispatch after its lifetime and 15 minutes")) != 1 {
+				t.Error("the log has no line for the end of the dispatch")
+			}
+			if c.err != nil {
+				equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseEnded, MaxLifetimeMinutes: 15}})
+				h.apiary.setEnd("gone", nil)
+				h.tick()
+				equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+			}
+			equal(t, "the journal", h.entries(), nil)
+			equal(t, "the adapter's calls", slices.DeleteFunc(h.machines.takeCalls(), func(c string) bool { return c == "check" || strings.HasPrefix(c, "make ") }), nil)
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// keptClaimed is the claimed entry of dispatchA with a lifetime of 15 minutes, so that
+// the watch sends its gone once more than 30 minutes have passed since the start.
+var keptClaimed = journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: 15}
+
+// TestARestartReleaseThatFailsKeepsTheEntry keeps a claimed entry that the journal had
+// at the start when its release returns 410 gone or fails. The watch posts gone with no
+// delete once the lifetime and 15 minutes have passed since the start.
+func TestARestartReleaseThatFailsKeepsTheEntry(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"410 gone", fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone)},
+		{"no answer", errors.New("no answer from Qory Apiary")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.setEntries(keptClaimed)
+			h.apiary.releaseErr = c.err
+			h.start()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + journal.ReasonRestarted})
+			equal(t, "the journal", h.entries(), []journal.Entry{keptClaimed})
+			h.tick()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+			equal(t, "the journal", h.entries(), []journal.Entry{keptClaimed})
+			h.clock.Advance(30 * time.Minute)
+			h.clock.waitPending(t, loop.WatchInterval)
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+			equal(t, "the journal", h.entries(), nil)
+			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check"})
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// TestAMakeFailureWhoseReleaseFailsKeepsTheEntry keeps the claimed entry when the
+// release after a failed make fails, uploads no make error, and posts gone with no
+// delete once the lifetime and 15 minutes have passed since the claim.
+func TestAMakeFailureWhoseReleaseFailsKeepsTheEntry(t *testing.T) {
 	h := newHarness(t)
 	h.machines.makeErr = &adapter.Error{Command: "make", Kind: contracts.FailureRetry, Message: "Try again later"}
-	h.apiary.releaseErr = machineExists
+	h.apiary.releaseErr = errors.New("no answer from Qory Apiary")
 	h.start()
-	c := newClaim(dispatchA)
-	c.MaxLifetimeMinutes = 15
-	h.send(claimResult{claim: c, ok: true})
+	h.send(claimResult{claim: newClaim(dispatchA), ok: true})
 	h.clock.waitPending(t, loop.ShortWait, loop.WatchInterval)
 	h.clock.Advance(loop.ShortWait)
 	h.idle()
-	// The claim was at epoch and the clock is at 15 s, so the watches run at 75 s,
-	// 135 s and so on. The bound is epoch + 30 minutes: 29 watches keep the entry,
-	// and the 30th, at 1815 s, removes it.
-	for range 29 {
-		h.tick()
-	}
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: 15}})
-	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"release " + dispatchA + " " + loop.ReasonRetry})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
+	h.clock.Advance(lifetime*time.Minute + loop.LifetimeGrace)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)
-	if len(h.find("no machine is listed for the claimed dispatch after its lifetime and 15 minutes")) != 1 {
-		t.Error("the log has no line for the removal")
+	if err := h.stop(); err != nil {
+		t.Error(err)
 	}
-	equal(t, "the adapter's calls", slices.DeleteFunc(h.machines.takeCalls(), func(c string) bool { return c == "check" || strings.HasPrefix(c, "make ") }), nil)
-	if calls := h.apiary.takeCalls(); slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "machine-end ") }) {
-		t.Errorf("Qory Apiary's calls are %q, with a machine-end for a machine with no id", calls)
-	}
+}
+
+// TestTheNoRecordGoneWaitsForAList sends no gone for a kept claimed entry past its
+// lifetime and 15 minutes while the list fails, because a failed list is no proof that
+// no machine exists. The next list that succeeds leads to gone.
+func TestTheNoRecordGoneWaitsForAList(t *testing.T) {
+	h := newHarness(t)
+	h.setEntries(keptClaimed)
+	h.apiary.releaseErr = machineExists
+	h.start()
+	h.apiary.takeCalls()
+	h.machines.mu.Lock()
+	h.machines.listErr = &adapter.Error{Command: "list", Kind: contracts.FailureRetry, Message: "Try again later"}
+	h.machines.mu.Unlock()
+	h.clock.Advance(31 * time.Minute)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{keptClaimed})
+	h.machines.mu.Lock()
+	h.machines.listErr = nil
+	h.machines.mu.Unlock()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}

@@ -263,6 +263,41 @@ func TestAFirstDispatchedThatIsRefusedCleansUp(t *testing.T) {
 	}
 }
 
+// TestARefusedMachineThatShutsDownSendsDeletingThenGone makes a machine whose first
+// dispatched returns 409 lease_expired or 410 gone, and whose delete returns deleting
+// while the vendor shuts it down. The loop sends deleting, and gone once the machine
+// is no longer listed, and then removes the entry.
+func TestARefusedMachineThatShutsDownSendsDeletingThenGone(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"lease_expired", fmt.Errorf("Qory Apiary answered: %w", loop.ErrLeaseExpired)},
+		{"gone", fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.lingering = true
+			h.apiary.setDispatched(dispatchA, c.err)
+			h.start()
+			h.claim(newClaim(dispatchA))
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
+				"dispatched " + dispatchA + " " + machineID(1) + " " + madeType,
+				"machine-log " + dispatchA + " false",
+				"machine-end " + dispatchA + " deleting",
+			})
+			equal(t, "the journal", h.entries(), []journal.Entry{typed(deleting(dispatchA, machineID(1)))})
+			h.machines.drop(machineID(1))
+			h.tick()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+			equal(t, "the journal", h.entries(), nil)
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
 // TestAFailedDispatchedIsSentAgain leaves the entry made when dispatched fails, and the
 // next watch sends it again and records dispatched.
 func TestAFailedDispatchedIsSentAgain(t *testing.T) {
@@ -338,22 +373,24 @@ func TestAClaimThatCannotBeMadeIsReleased(t *testing.T) {
 	}
 }
 
-// TestTheLoopClaimsOnlyBelowMaxMachines asks for no claim while the journal has
-// max_machines entries, and claims again once an entry leaves the journal.
-func TestTheLoopClaimsOnlyBelowMaxMachines(t *testing.T) {
+// TestTheLoopClaimsWhileMachinesExist starts with three live machines in the journal.
+// The loop claims and makes two more machines, and then sends a claim again: the
+// provisioner sets no limit on how many machines exist at once.
+func TestTheLoopClaimsWhileMachinesExist(t *testing.T) {
 	h := newHarness(t)
-	h.config.MaxMachines = 1
-	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: "i-a", MaxLifetimeMinutes: lifetime})
-	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
-	h.start()
-	h.tick()
-	if n := h.apiary.claimCount(); n != 0 {
-		t.Fatalf("the loop asked for %d claims with a full journal", n)
+	h.setEntries(dispatched(dispatchA, "i-a"), dispatched(dispatchB, "i-b"), dispatched(dispatchC, "i-c"))
+	for id, machine := range map[string]string{dispatchA: "i-a", dispatchB: "i-b", dispatchC: "i-c"} {
+		h.machines.add(machine, id, contracts.MachineRunning, epoch)
 	}
-	h.machines.setState("i-a", contracts.MachineStopped)
-	h.tick()
+	h.start()
+	h.claim(newClaim(dispatchD))
+	h.claim(newClaim(dispatchE))
+	equal(t, "the journal", h.entries(), []journal.Entry{
+		dispatched(dispatchA, "i-a"), dispatched(dispatchB, "i-b"), dispatched(dispatchC, "i-c"),
+		typed(dispatched(dispatchD, machineID(1))), typed(dispatched(dispatchE, machineID(2))),
+	})
+	// The send returns only once the loop sends another claim, with five machines.
 	h.idle()
-	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}

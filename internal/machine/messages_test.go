@@ -49,8 +49,6 @@ func TestMessagesFit(t *testing.T) {
 		imageID    = "ami-0123456789abcdef0"
 		subnetID   = "subnet-0123456789abcdef0"
 		region     = "ap-southeast-4"
-		// longType is an instance type of 40 characters, the most the settings allow.
-		longType = "x2iedn-metal.abcdefghijklmnopqrstuvwxyza"
 	)
 	sdk := func(code string) error {
 		return &smithy.GenericAPIError{Code: code, Message: "The request failed."}
@@ -154,12 +152,7 @@ func TestMessagesFit(t *testing.T) {
 	_, err = NewInRegion(&fakeAPI{}, region).Image(ctx, imageID)
 	wantFits(t, err.Error(), "")
 
-	// InstanceTypes, SubnetZone and Offered.
-	invalid := sdk(codeInstanceTypeInvalid)
-	_, err = NewInRegion(&fakeAPI{itype: func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error) { return nil, invalid }}, region).InstanceTypes(ctx, []string{longType})
-	wantFits(t, err.Error(), invalid.Error())
-	_, err = NewInRegion(&fakeAPI{}, region).InstanceTypes(ctx, []string{longType})
-	wantFits(t, err.Error(), "")
+	// SubnetZone.
 	noSubnet := sdk(codeSubnetNotFound)
 	_, err = NewInRegion(&fakeAPI{subnet: func(*ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error) { return nil, noSubnet }}, region).SubnetZone(ctx, subnetID)
 	wantFits(t, err.Error(), noSubnet.Error())

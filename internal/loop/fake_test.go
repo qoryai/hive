@@ -487,8 +487,8 @@ type harness struct {
 	wrap func(loop.Journal) loop.Journal
 }
 
-// newHarness returns a harness with an empty journal and no machine, and with
-// max_machines 10. The loop starts at start.
+// newHarness returns a harness with an empty journal and no machine. The loop starts
+// at start.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	clock := newClock()
@@ -504,7 +504,6 @@ func newHarness(t *testing.T) *harness {
 	h.openJournal()
 	h.config = loop.Config{
 		PoolID:         pool,
-		MaxMachines:    10,
 		GatewayAddress: netip.MustParseAddr("10.0.1.5"),
 	}
 	return h

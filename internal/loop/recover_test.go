@@ -19,7 +19,6 @@ import (
 // moves to the phase deleting; a dispatched entry with a machine stays for the watch.
 func TestRestartRecovery(t *testing.T) {
 	h := newHarness(t)
-	h.config.MaxMachines = 6
 	h.setEntries(
 		journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime},
 		journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime},

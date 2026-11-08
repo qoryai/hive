@@ -10,30 +10,32 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-// The EC2 error codes of an instance type or a subnet that does not exist.
-const (
-	codeInstanceTypeInvalid = "InvalidInstanceType"
-	codeSubnetNotFound      = "InvalidSubnetID.NotFound"
-)
+// codeSubnetNotFound is the EC2 error code of a subnet that does not exist.
+const codeSubnetNotFound = "InvalidSubnetID.NotFound"
 
-// InstanceType is what make and check read of one EC2 instance type.
+// InstanceType is what make and check read of one EC2 instance type. The adapter keeps
+// it in its cache file as JSON, with these field names.
 type InstanceType struct {
 	// Name is the instance type, such as m7i.large.
-	Name string
+	Name string `json:"name"`
 	// VCPUs is the number of virtual CPUs.
-	VCPUs int
+	VCPUs int `json:"vcpus"`
 	// MemoryMiB is the memory in MiB.
-	MemoryMiB int
+	MemoryMiB int `json:"memory_mib"`
 	// Archs are the architectures the type runs, as the provisioner contract writes
 	// them: [ArchAMD64] and [ArchARM64]. An EC2 architecture that the contract does not
 	// have is left out.
-	Archs []string
+	Archs []string `json:"archs"`
 	// NestedVirtualization is true when the type's processor lists the feature
 	// nested-virtualization, which RunInstances turns on with CpuOptions.
-	NestedVirtualization bool
+	NestedVirtualization bool `json:"nested_virtualization"`
 	// BareMetal is true for a bare metal type, whose machine runs virtual machines
 	// without CpuOptions.
-	BareMetal bool
+	BareMetal bool `json:"bare_metal"`
+	// OnDemand is true when the type lists the usage class on-demand. A type without
+	// it is sold only in another way, such as a capacity block, and RunInstances
+	// without a reservation fails for it.
+	OnDemand bool `json:"on_demand"`
 }
 
 // Virtualization reports whether a machine of the type can run virtual machines
@@ -49,32 +51,18 @@ func (t InstanceType) NestedCPUOptions() bool {
 	return t.NestedVirtualization && !t.BareMetal
 }
 
-// InstanceTypes returns each instance type of names, by name, with paginated
-// DescribeInstanceTypes calls for those names. A name that EC2 does not know fails
-// with the kind defect, and the error contains the name and the region.
-func (c *Client) InstanceTypes(ctx context.Context, names []string) (map[string]InstanceType, error) {
-	in := &ec2.DescribeInstanceTypesInput{}
-	for _, n := range names {
-		in.InstanceTypes = append(in.InstanceTypes, types.InstanceType(n))
-	}
-	out := make(map[string]InstanceType, len(names))
-	p := ec2.NewDescribeInstanceTypesPaginator(c.api, in)
+// AllInstanceTypes returns every instance type of the region, with paginated
+// DescribeInstanceTypes calls of 100 types each and no filter.
+func (c *Client) AllInstanceTypes(ctx context.Context) ([]InstanceType, error) {
+	var out []InstanceType
+	p := ec2.NewDescribeInstanceTypesPaginator(c.api, &ec2.DescribeInstanceTypesInput{MaxResults: aws.Int32(100)})
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
-		if errorCode(err) == codeInstanceTypeInvalid {
-			return nil, defect(fmt.Sprintf("Set instance_types in %s to EC2 instance types that exist in %s: DescribeInstanceTypes failed: %v", settingsFile, c.Region(), err))
-		}
 		if err != nil {
 			return nil, wrap("DescribeInstanceTypes", err)
 		}
 		for _, info := range page.InstanceTypes {
-			t := instanceTypeOf(info)
-			out[t.Name] = t
-		}
-	}
-	for _, n := range names {
-		if _, ok := out[n]; !ok {
-			return nil, defect(fmt.Sprintf("Remove %s from instance_types in %s: DescribeInstanceTypes returned no such type in %s", n, settingsFile, c.Region()))
+			out = append(out, instanceTypeOf(info))
 		}
 	}
 	return out, nil
@@ -97,6 +85,7 @@ func instanceTypeOf(info types.InstanceTypeInfo) InstanceType {
 		}
 		t.NestedVirtualization = slices.Contains(info.ProcessorInfo.SupportedFeatures, types.SupportedAdditionalProcessorFeatureNestedVirtualization)
 	}
+	t.OnDemand = slices.Contains(info.SupportedUsageClasses, types.UsageClassTypeOnDemand)
 	return t
 }
 
@@ -118,15 +107,17 @@ func (c *Client) SubnetZone(ctx context.Context, subnetID string) (string, error
 	return "", defect(fmt.Sprintf("Set subnet_id in %s to a subnet that exists in %s: DescribeSubnets returned no zone for subnet %s", settingsFile, c.Region(), subnetID))
 }
 
-// Offered returns the names of the instance types of names that zone offers, with
-// paginated DescribeInstanceTypeOfferings calls of the location type
-// availability-zone, filtered to zone and to names.
-func (c *Client) Offered(ctx context.Context, zone string, names []string) (map[string]bool, error) {
+// ZoneTypes returns the names of the instance types that zone offers, with paginated
+// DescribeInstanceTypeOfferings calls of the location type availability-zone, filtered
+// to zone, of 1000 offerings each.
+func (c *Client) ZoneTypes(ctx context.Context, zone string) ([]string, error) {
 	in := &ec2.DescribeInstanceTypeOfferingsInput{
 		LocationType: types.LocationTypeAvailabilityZone,
-		Filters:      []types.Filter{filter("location", zone), filter("instance-type", names...)},
+		Filters:      []types.Filter{filter("location", zone)},
+		MaxResults:   aws.Int32(1000),
 	}
-	out := map[string]bool{}
+	var out []string
+	seen := map[string]bool{}
 	p := ec2.NewDescribeInstanceTypeOfferingsPaginator(c.api, in)
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
@@ -134,8 +125,9 @@ func (c *Client) Offered(ctx context.Context, zone string, names []string) (map[
 			return nil, wrap("DescribeInstanceTypeOfferings", err)
 		}
 		for _, o := range page.InstanceTypeOfferings {
-			if aws.ToString(o.Location) == zone {
-				out[string(o.InstanceType)] = true
+			if name := string(o.InstanceType); aws.ToString(o.Location) == zone && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
 			}
 		}
 	}

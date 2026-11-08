@@ -48,7 +48,7 @@ const (
 // the adapter's list by its key, the dispatch id. From made on, the entry has the
 // machine id that the adapter's make returned. An entry can enter deleting or ended
 // from any phase, with the machine id that the adapter's list returned when the entry
-// had none.
+// had none. A claimed entry can also enter ended with no machine id.
 const (
 	// PhaseClaimed is a claimed dispatch for which no make has returned.
 	PhaseClaimed = "claimed"
@@ -60,8 +60,10 @@ const (
 	// PhaseDeleting is a dispatch whose machine is being deleted. The entry stays until
 	// the adapter's delete returns gone.
 	PhaseDeleting = "deleting"
-	// PhaseEnded is a dispatch whose machine the adapter's delete returned as gone,
-	// while the post of gone to Qory Apiary is pending. The entry gets no more deletes.
+	// PhaseEnded is a dispatch whose machine the adapter's delete returned as gone, or a
+	// claimed dispatch for which no machine was listed by the end of its lifetime and
+	// 15 minutes, while the post of gone to Qory Apiary is pending. The entry gets no
+	// more deletes. Its machine id is empty for a claimed dispatch with no machine.
 	PhaseEnded = "ended"
 )
 
@@ -97,7 +99,8 @@ func IsMachineType(s string) bool {
 
 // Entry is one live dispatch. MachineID is empty in [PhaseClaimed], is the machine id
 // that the adapter's make returned in [PhaseMade] and [PhaseDispatched], and is the id
-// of the machine being deleted in [PhaseDeleting] and [PhaseEnded]. The journal treats a
+// of the machine being deleted in [PhaseDeleting] and [PhaseEnded]. In [PhaseEnded] it
+// is empty for a dispatch that never had a listed machine. The journal treats a
 // machine id as opaque. MaxLifetimeMinutes is the machine's lifetime from the claim
 // answer, [MinLifetime] to [MaxLifetime], in every phase. MachineType is the vendor's
 // type of the machine that the adapter's make returned, such as t3.medium, which each
@@ -143,8 +146,10 @@ func (e Entry) check() string {
 		return "the machine id is set in the phase claimed"
 	case e.Phase == PhaseClaimed:
 		return ""
+	case e.Phase == PhaseEnded && e.MachineID == "":
+		return ""
 	case e.MachineID == "":
-		return "the phase made, dispatched, deleting or ended has no machine id"
+		return "the phase made, dispatched or deleting has no machine id"
 	case !machineIDShape.MatchString(e.MachineID):
 		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
 	case e.MachineID == noMachine:
