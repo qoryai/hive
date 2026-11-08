@@ -3,14 +3,35 @@ package awsec2
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"sync"
+	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/aws/smithy-go"
 
 	"github.com/qoryai/hive/internal/machine"
 )
+
+// cacheRoot is the folder of the cache folders of the tests' handlers, which TestMain
+// makes and removes, so no test writes to the cache folder of the user that runs it.
+var cacheRoot string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "awsec2-cache-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	cacheRoot = dir
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // fakeAPI records each input and returns the outputs and errors its funcs return. A
 // nil func returns an empty output.
@@ -33,9 +54,33 @@ type fakeAPI struct {
 	subnet    func(*ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error)
 	itype     func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error)
 	offering  func(*ec2.DescribeInstanceTypeOfferingsInput) (*ec2.DescribeInstanceTypeOfferingsOutput, error)
+
+	// products are the GetProducts inputs of the price client, and product returns
+	// its outputs.
+	products []*pricing.GetProductsInput
+	product  func(*pricing.GetProductsInput) (*pricing.GetProductsOutput, error)
+	// productLimits are the time left until the deadline of each GetProducts call's
+	// context, or -1 for a context with no deadline.
+	productLimits []time.Duration
 }
 
 var _ machine.API = (*fakeAPI)(nil)
+var _ machine.PriceAPI = (*fakeAPI)(nil)
+
+func (f *fakeAPI) GetProducts(ctx context.Context, in *pricing.GetProductsInput, _ ...func(*pricing.Options)) (*pricing.GetProductsOutput, error) {
+	limit := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		limit = time.Until(deadline)
+	}
+	f.mu.Lock()
+	f.products = append(f.products, in)
+	f.productLimits = append(f.productLimits, limit)
+	f.mu.Unlock()
+	if f.product == nil {
+		return &pricing.GetProductsOutput{}, nil
+	}
+	return f.product(in)
+}
 
 func (f *fakeAPI) RunInstances(_ context.Context, in *ec2.RunInstancesInput, _ ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error) {
 	f.mu.Lock()
@@ -117,7 +162,7 @@ func (f *fakeAPI) DescribeInstanceTypeOfferings(_ context.Context, in *ec2.Descr
 	return f.offering(in)
 }
 
-// calls is the number of EC2 calls f received.
+// calls is the number of EC2 calls f received, price lookups left out.
 func (f *fakeAPI) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -129,17 +174,27 @@ func apiError(code string) error {
 	return &smithy.GenericAPIError{Code: code, Message: "test message for " + code}
 }
 
-// testHandler returns a handler that calls f, and the buffer of its log lines. The
-// handler counts how often it builds the client.
+// testNow is the time of the tests' clock.
+var testNow = time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+
+// testHandler returns a handler that calls f for EC2 and for prices, in eu-west-1, and
+// the buffer of its log lines. The handler counts how often it builds the client. Its
+// cache folder is a new, empty folder in cacheRoot, and its clock is at testNow.
 func testHandler(f *fakeAPI) (*Handler, *bytes.Buffer, *int) {
 	var log bytes.Buffer
 	n := new(int)
+	dir, err := os.MkdirTemp(cacheRoot, "home-")
+	if err != nil {
+		panic(err)
+	}
 	h := &Handler{
 		client: func(context.Context) (*machine.Client, error) {
 			*n++
-			return machine.NewInRegion(f, "eu-west-1"), nil
+			return machine.NewWithPrices(f, f, "eu-west-1"), nil
 		},
-		log: slog.New(slog.NewTextHandler(&log, nil)),
+		log:      slog.New(slog.NewTextHandler(&log, nil)),
+		cacheDir: func() (string, error) { return dir, nil },
+		now:      func() time.Time { return testNow },
 	}
 	return h, &log, n
 }

@@ -97,14 +97,15 @@ func toLoop(err error) error {
 
 // toLoopEnd is err of a machine end as the loop reads it: a [refusal] with
 // [loop.ErrMachineEndStopped] for a signed 400, 403 or 404, a [refusal] with
-// [loop.ErrMachineEndDone] for a signed answer that breaks the contract, and err as it
-// is otherwise, nil included, so the loop sends the post again.
+// [loop.ErrMachineEndUnusable] for a signed answer that breaks the contract, which the
+// loop counts as done for deleting and delete_failed and as failed for gone, and err
+// as it is otherwise, nil included, so the loop sends the post again.
 func toLoopEnd(err error) error {
 	switch {
 	case errors.Is(err, provisioner.ErrMachineEndStopped):
 		return &refusal{err: err, sentinel: loop.ErrMachineEndStopped}
 	case errors.Is(err, provisioner.ErrAnswerUnusable):
-		return &refusal{err: err, sentinel: loop.ErrMachineEndDone}
+		return &refusal{err: err, sentinel: loop.ErrMachineEndUnusable}
 	}
 	return err
 }

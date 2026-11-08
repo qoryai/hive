@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/qoryai/hive/internal/adapterio"
@@ -30,22 +32,26 @@ func (l *loop) watch(ctx context.Context) {
 // journal before the list, except the dispatches of the claim path:
 //   - A deleting entry is cleaned up again, until the adapter's delete returns gone.
 //     It gets no dispatched, and its lifetime does not count.
-//   - An ended entry gets gone again, until the post is done or [MachineEndLimit] has
-//     passed. It gets no delete and no dispatched.
-//   - A claimed entry stays after a release that returned 409 machine_exists, or
-//     after a release when Journal.Remove failed before the entry left the journal.
+//   - An ended entry gets gone again, until the post is done, with the waits of
+//     [loop.goneFailed] between failed posts. It gets no delete and no dispatched.
+//   - A claimed entry stays after a release that did not return 204, or after a
+//     release when Journal.Remove failed before the entry left the journal.
 //     When the list has a machine with its key, the entry adopts the machine: it
 //     becomes made with the machine's id, and the rules of a made entry apply. When
-//     the machine is deleting, the entry is cleaned up with the machine's id. The
-//     entry is removed when no machine is listed once the entry's lifetime and 15
-//     minutes have passed since the claim, or since the start of Run, for an entry
-//     that the journal had at the start.
+//     the machine is deleting, the entry is cleaned up with the machine's id. When no
+//     machine is listed once the entry's lifetime and 15 minutes have passed since the
+//     claim, or since the start of Run for an entry that the journal had at the start,
+//     the entry gets gone with no delete, as [loop.sendGone] sends it.
 //   - A made or dispatched entry whose machine is not listed is cleaned up only after
 //     [ListGrace]. Inside the grace, it gets dispatched as usual.
 //
-// Then the watch cleans up each listed machine whose key had no journal entry, neither
-// before the list nor after it: a make that starts during the list has a claimed
-// entry after it.
+// Then the watch acts on each pending stray, as [loop.watchPending] does. Last, it
+// cleans up each listed machine whose key had no journal entry, neither before the
+// list nor after it: a make that starts during the list has a claimed entry after it.
+// The watch skips a machine whose key is a pending stray, and one whose key had gone
+// done in the last [ListGrace], because a vendor's list can show a machine for a while
+// after its delete returned gone. It also skips a deleting machine whose key is not a
+// dispatch id, because it has no dispatch to send machine-end for.
 //
 // Each machine-end is one try. After the first failure, the watch sends no more
 // machine-end, and its deletes and dispatched go on. So a Qory Apiary with no
@@ -58,6 +64,8 @@ func (l *loop) watchOnce(ctx context.Context) {
 		l.Log.Warn("listing the pool's machines failed", errorAttr(err, nil))
 		return
 	}
+	// The no-record gone of a claimed entry counts from the time the list arrived.
+	listedAt := l.Clock.Now()
 	byKey := machinesByKey(list.Machines)
 	for _, e := range before {
 		if ctx.Err() != nil {
@@ -77,7 +85,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 		m, found := byKey[e.DispatchID]
 		if e.Phase == journal.PhaseClaimed {
 			var ok bool
-			if e, ok = l.adopt(ctx, e, m, found); !ok {
+			if e, ok = l.adopt(ctx, e, m, found, listedAt); !ok {
 				continue
 			}
 		}
@@ -87,11 +95,13 @@ func (l *loop) watchOnce(ctx context.Context) {
 	for _, e := range append(before, l.Journal.List()...) {
 		known[e.DispatchID] = true
 	}
+	l.watchPending(ctx, known)
+	l.pruneGoneDone()
 	for _, m := range list.Machines {
 		if ctx.Err() != nil {
 			return
 		}
-		if known[m.Key] || m.State == contracts.MachineDeleting {
+		if known[m.Key] || l.isPending(m.Key) || l.goneIsRecent(m.Key) || m.State == contracts.MachineDeleting && !journal.IsDispatchID(m.Key) {
 			continue
 		}
 		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
@@ -102,11 +112,12 @@ func (l *loop) watchOnce(ctx context.Context) {
 	}
 }
 
-// adopt acts on the claimed entry e, given the lookup of its machine m. It returns
-// the entry made with the machine's id and true when the machine is listed and not
-// deleting. Otherwise it cleans up the machine, removes the entry or leaves it, and
-// returns false.
-func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, found bool) (journal.Entry, bool) {
+// adopt acts on the claimed entry e, given the lookup of its machine m in the list that
+// arrived at listedAt. It returns the entry made with the machine's id and true when
+// the machine is listed and not deleting. Otherwise it cleans up the machine, sends
+// gone for the entry or leaves it, and returns false. Gone with no machine needs a
+// list that arrived more than the entry's lifetime and 15 minutes after the claim.
+func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, found bool, listedAt time.Time) (journal.Entry, bool) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID)}
 	if found {
 		attrs = append(attrs, slog.String("machine_id", m.ID), slog.String("state", m.State))
@@ -118,9 +129,11 @@ func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, 
 		e.MachineID = m.ID
 		l.cleanUpLogged(ctx, e)
 		return e, false
-	case !found && l.Clock.Now().Sub(l.claimedAt(e.DispatchID)) > lifetime:
+	case !found && listedAt.Sub(l.claimedAt(e.DispatchID)) > lifetime:
+		// The machine powered off at the end of its lifetime, if it ever started, so
+		// the dispatch ends with gone and no delete.
 		l.Log.Info("no machine is listed for the claimed dispatch after its lifetime and 15 minutes", attrs...)
-		l.remove(e.DispatchID)
+		l.sendGone(ctx, e, attrs)
 		return e, false
 	case !found:
 		return e, false
@@ -187,11 +200,10 @@ func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
 
 // cleanUp reads the log of the entry's machine, uploads it, deletes the machine and
 // sends machine-end. Each step runs after a failure of the step before it. When the
-// delete returns gone, cleanUp sends gone and removes the entry. When that post fails
-// or is paused, the entry moves to the phase ended. When the delete returns deleting or
-// fails, the entry moves to the phase deleting, cleanUp sends that state, and the next
-// watch calls cleanUp again. After a failed write of the journal, the entry stays as it
-// is and the next watch acts on it again.
+// delete returns gone, cleanUp sends gone as [loop.sendGone] does. When the delete
+// returns deleting or fails, the entry moves to the phase deleting, cleanUp sends that
+// state, and the next watch calls cleanUp again. After a failed write of the journal,
+// the entry stays as it is and the next watch acts on it again.
 func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
 	state, err := l.deleteMachine(ctx, e.DispatchID, e.MachineID, attrs)
@@ -200,9 +212,7 @@ func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 	case err != nil:
 		end = contracts.MachineEndDeleteFailed
 	case state == contracts.MachineGone:
-		if !l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs) || !l.removeEnded(e) {
-			l.setEnded(e, attrs)
-		}
+		l.sendGone(ctx, e, attrs)
 		return
 	}
 	if l.setDeleting(e, attrs) {
@@ -210,19 +220,69 @@ func (l *loop) cleanUp(ctx context.Context, e journal.Entry) {
 	}
 }
 
+// sendGone sends gone for the entry e, whose machine is gone or was never listed, and
+// removes the entry once the post is done. When the post fails or is paused, or the
+// removal fails, the entry moves to the phase ended, and the watch sends gone again
+// until the post is done. A failed post starts the waits of [loop.goneFailed].
+func (l *loop) sendGone(ctx context.Context, e journal.Entry, attrs []any) {
+	sent := !l.endsArePaused()
+	if l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs) {
+		if l.removeEnded(e) {
+			return
+		}
+		sent = false
+	}
+	if l.setEnded(e, attrs) && sent {
+		l.goneFailed(e.DispatchID)
+	}
+}
+
 // watchEnded acts on the ended entry e. It sends gone and removes the entry once the
 // post is done. After a failed removal, the entry stays, and the next watch acts on it
-// again. An entry whose post is not done and that has reached [MachineEndLimit] is
-// removed.
+// again. After a failed post, the entry stays, and the watch sends gone again once the
+// wait of [loop.goneFailed] has passed. Gone has no limit, so the entry stays until
+// the post is done.
 func (l *loop) watchEnded(ctx context.Context, e journal.Entry) {
-	attrs := []any{slog.String("dispatch_id", e.DispatchID), slog.String("machine_id", e.MachineID)}
+	attrs := []any{slog.String("dispatch_id", e.DispatchID)}
+	if e.MachineID != "" {
+		attrs = append(attrs, slog.String("machine_id", e.MachineID))
+	}
+	if l.Clock.Now().Before(l.nextGone(e.DispatchID)) {
+		return
+	}
+	sent := !l.endsArePaused()
 	switch {
 	case l.sendMachineEnd(ctx, e.DispatchID, contracts.MachineEndGone, attrs):
 		l.removeEnded(e)
-	case l.Clock.Now().Sub(l.goneAt(e.DispatchID)) >= MachineEndLimit:
-		l.Log.Error("stopped sending machine-end gone after 24 hours", attrs...)
-		l.removeEnded(e)
+	case sent:
+		l.goneFailed(e.DispatchID)
 	}
+}
+
+// goneFailed counts a failed post of gone for the dispatch id, and sets the time of its
+// next post. The first wait is [WatchInterval], and each later failure doubles it, up
+// to [GoneRetryMax]: 1, 2, 4, 8, 16 and 32 minutes, and then 1 hour. A post that the
+// pause skipped is not counted, so it goes out at the next watch.
+func (l *loop) goneFailed(id string) {
+	now := l.Clock.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r := l.goneRetry[id]
+	r.failures++
+	wait := WatchInterval
+	for i := 1; i < r.failures && wait < GoneRetryMax; i++ {
+		wait *= 2
+	}
+	r.next = now.Add(min(wait, GoneRetryMax))
+	l.goneRetry[id] = r
+}
+
+// nextGone is the time before which the watch sends no gone for the dispatch id, or
+// the zero time.
+func (l *loop) nextGone(id string) time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.goneRetry[id].next
 }
 
 // removeEnded removes the entry e, whose cleanup is over, and returns whether it left
@@ -243,13 +303,21 @@ func (l *loop) cleanUpLogged(ctx context.Context, e journal.Entry) {
 }
 
 // cleanUpStray cleans up the listed machine m, whose key has no journal entry, and
-// returns whether the journal has an entry for it. A key in the shape of a dispatch id
-// gets a deleting entry, and [loop.cleanUp] does the rest. Any other key, or a failed
-// write of the journal, leaves one delete with no entry and no machine-end, and the
-// next watch finds the machine again if it is still listed and not deleting.
+// returns whether the journal has an entry for it. A machine that is deleting gets no
+// read of its log. A key in the shape of a dispatch id gets a deleting entry, and
+// [loop.cleanUp] does the rest. After a failed write of the journal, such a key gets
+// one delete with no entry, and then one try of machine-end: gone when the delete
+// returns gone, deleting when it returns deleting, and delete_failed when it fails.
+// Unless gone is done, the key becomes a pending stray, as [loop.watchPending]
+// describes. Any other key has no dispatch, so it gets one delete and no machine-end,
+// and the next watch finds the machine again if it is still listed and not deleting.
 func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 	attrs := []any{slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID)}
-	if journal.IsDispatchID(m.Key) {
+	if m.State == contracts.MachineDeleting {
+		l.setLogged(m.ID, true)
+	}
+	dispatch := journal.IsDispatchID(m.Key)
+	if dispatch {
 		e := journal.Entry{DispatchID: m.Key, Phase: journal.PhaseDeleting, MachineID: m.ID, MaxLifetimeMinutes: journal.MinLifetime}
 		err := l.Journal.Set(e)
 		if err == nil {
@@ -258,10 +326,140 @@ func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 		}
 		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
 	}
-	if _, err := l.deleteMachine(ctx, m.Key, m.ID, attrs); err == nil {
+	state, err := l.deleteMachine(ctx, m.Key, m.ID, attrs)
+	if err == nil {
+		// The machine has no entry that would end its record. While its delete
+		// fails, the record stays, so a later watch reads its log no more.
 		l.setLogged(m.ID, false)
 	}
+	if !dispatch {
+		return false
+	}
+	end := contracts.MachineEndDeleting
+	switch {
+	case err != nil:
+		end = contracts.MachineEndDeleteFailed
+	case state == contracts.MachineGone:
+		end = contracts.MachineEndGone
+	}
+	sent := !l.endsArePaused()
+	done := l.sendMachineEnd(ctx, m.Key, end, attrs)
+	// The key has no entry, so the post leaves no record.
+	l.forgetEnds(m.Key)
+	switch {
+	case end != contracts.MachineEndGone:
+		l.setPending(m.Key, m.ID)
+	case !done:
+		l.setPending(m.Key, "")
+		if sent {
+			l.goneFailed(m.Key)
+		}
+	}
 	return false
+}
+
+// watchPending acts on each pending stray: a stray with a dispatch key whose journal
+// write failed, and whose gone is not done. A pending stray with a machine id gets a
+// delete with no read of its log at each watch, also when the list no longer shows the
+// machine, until the delete returns gone. Then it gets gone with the waits of
+// [loop.goneFailed], until the post is done, which includes a signed 400, 403 or 404.
+// A pending stray whose dispatch id is known, because the journal has an entry for it,
+// is dropped: the entry does the rest. Once gone is done, [loop.goneIsRecent] makes the
+// stray loop skip its machine, also in the same watch.
+//
+// Pending strays are kept in memory only, so a restart loses them. A machine that is
+// still listed is then found again as a stray. Otherwise Qory Apiary frees the
+// dispatch's slot by its time limit for a slot: the dispatch's max_lifetime_minutes and
+// 60 minutes after the latest of the claim and the dispatch's machine events, as
+// claim.schema.json of the provisioner contract states.
+func (l *loop) watchPending(ctx context.Context, known map[string]bool) {
+	for _, id := range l.pendingIDs() {
+		if ctx.Err() != nil {
+			return
+		}
+		if known[id] {
+			l.dropPending(id)
+			continue
+		}
+		if machineID := l.pendingMachine(id); machineID != "" {
+			attrs := []any{slog.String("dispatch_id", id), slog.String("machine_id", machineID)}
+			l.setLogged(machineID, true)
+			state, err := l.deleteMachine(ctx, id, machineID, attrs)
+			l.setLogged(machineID, false)
+			if err != nil || state != contracts.MachineGone {
+				continue
+			}
+			l.setPending(id, "")
+		}
+		if l.Clock.Now().Before(l.nextGone(id)) {
+			continue
+		}
+		sent := !l.endsArePaused()
+		switch {
+		case l.sendMachineEnd(ctx, id, contracts.MachineEndGone, []any{slog.String("dispatch_id", id)}):
+			l.dropPending(id)
+		case sent:
+			l.goneFailed(id)
+		}
+	}
+}
+
+// pendingIDs is the dispatch ids of the pending strays, in sorted order.
+func (l *loop) pendingIDs() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Sorted(maps.Keys(l.pending))
+}
+
+// setPending makes the dispatch id a pending stray with the machine id to delete, or
+// with "" when only its gone is left.
+func (l *loop) setPending(id, machineID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pending[id] = machineID
+}
+
+// isPending is whether the dispatch id is a pending stray.
+func (l *loop) isPending(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.pending[id]
+	return ok
+}
+
+// pendingMachine is the machine id that the pending stray of the dispatch id still
+// deletes, or "".
+func (l *loop) pendingMachine(id string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pending[id]
+}
+
+// dropPending ends the pending stray of the dispatch id, with its waits and the record
+// of its posts.
+func (l *loop) dropPending(id string) {
+	l.mu.Lock()
+	delete(l.pending, id)
+	delete(l.goneRetry, id)
+	l.mu.Unlock()
+	l.forgetEnds(id)
+}
+
+// goneIsRecent is whether gone was done for the dispatch id in the last [ListGrace].
+func (l *loop) goneIsRecent(id string) bool {
+	now := l.Clock.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	at, ok := l.goneDone[id]
+	return ok && now.Sub(at) < ListGrace
+}
+
+// pruneGoneDone drops each time of goneDone that is [ListGrace] old or older.
+func (l *loop) pruneGoneDone() {
+	now := l.Clock.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	maps.DeleteFunc(l.goneDone, func(_ string, at time.Time) bool { return now.Sub(at) >= ListGrace })
 }
 
 // deleteMachine reads and uploads the log of the machine, unless it counts as logged,
@@ -295,29 +493,28 @@ func (l *loop) setDeleting(e journal.Entry, attrs []any) bool {
 	return true
 }
 
-// setEnded writes the entry e in the phase ended, which frees its place in
-// MaxMachines, and starts its [MachineEndLimit]. A failed write is logged. When the entry
-// is still as it was, it stays so. A write can fail after the journal changed, as when
-// syncing the folder fails, and then the entry counts as ended.
-func (l *loop) setEnded(e journal.Entry, attrs []any) {
+// setEnded writes the entry e in the phase ended, and returns whether the entry counts
+// as ended. A failed write is logged. When the entry is still as it was, it stays so.
+// A write can fail after the journal changed, as when syncing the folder fails, and
+// then the entry counts as ended.
+func (l *loop) setEnded(e journal.Entry, attrs []any) bool {
 	e.Phase = journal.PhaseEnded
 	if err := l.Journal.Set(e); err != nil {
 		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
-		if !l.inJournal(e) {
-			return
-		}
+		return l.inJournal(e)
 	}
-	l.setTime(l.gone, e.DispatchID)
-	l.free()
+	return true
 }
 
 // sendMachineEnd sends state for the dispatch, with one try, and returns whether the
 // post is done. It sends a state only when it differs from the last one done for the
 // dispatch. A dispatch whose posts stopped gets none. A post that is not sent for those
-// reasons ends the count of any failing state. A post is done on 204,
-// [ErrMachineEndDone] and [ErrMachineEndStopped]. Any other failure pauses machine-end
-// until the next watch starts. While they are paused, a post is not sent and counts as
-// failed. The next watch sends the state again.
+// reasons ends the count of any failing state. A post is done on 204 and
+// [ErrMachineEndStopped], and on [ErrMachineEndUnusable] for deleting and
+// delete_failed. Gone is done only on 204 or [ErrMachineEndStopped], as the contract
+// requires, so [ErrMachineEndUnusable] to gone is a failure. Any other failure pauses
+// machine-end until the next watch starts. While they are paused, a post is not sent
+// and counts as failed. The next watch sends the state again.
 func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, attrs []any) bool {
 	last := l.lastMachineEnd(dispatchID)
 	if last == machineEndStopped || last == state {
@@ -339,7 +536,7 @@ func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, att
 	case errors.Is(err, ErrMachineEndStopped):
 		l.Log.Warn("sending machine-end failed, and the dispatch gets no more machine-end", append(attrs, errorAttr(err, nil))...)
 		record = machineEndStopped
-	case errors.Is(err, ErrMachineEndDone):
+	case errors.Is(err, ErrMachineEndUnusable) && state != contracts.MachineEndGone:
 		l.Log.Warn("sending machine-end failed, and a later try cannot change the answer", append(attrs, errorAttr(err, nil))...)
 	default:
 		l.Log.Warn("sending machine-end failed", append(attrs, errorAttr(err, nil))...)
@@ -351,13 +548,16 @@ func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, att
 	defer l.mu.Unlock()
 	l.sentEnd[dispatchID] = record
 	delete(l.failedEnd, dispatchID)
+	if state == contracts.MachineEndGone {
+		l.goneDone[dispatchID] = l.Clock.Now()
+	}
 	return true
 }
 
 // machineEndFailed counts a post of state that failed or was not sent. A deleting or
 // delete_failed that has failed for [MachineEndLimit] since its first failure is logged
-// once and counts as done, so it is dropped and a later state goes out as usual. The
-// limit of gone is in [loop.watchEnded].
+// once and counts as done, so it is dropped and a later state goes out as usual. Gone
+// is never dropped: [loop.watchEnded] sends it again until the post is done.
 func (l *loop) machineEndFailed(dispatchID, state string, attrs []any) {
 	if state == contracts.MachineEndGone {
 		return

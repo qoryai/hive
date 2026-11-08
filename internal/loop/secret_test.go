@@ -12,6 +12,7 @@ import (
 
 	"github.com/qoryai/hive/internal/adapter"
 	"github.com/qoryai/hive/internal/adapterio"
+	"github.com/qoryai/hive/internal/journal"
 	"github.com/qoryai/hive/internal/loop"
 	"github.com/qoryai/integrations/contracts"
 )
@@ -103,7 +104,8 @@ func TestNoLogLineContainsTheRunCode(t *testing.T) {
 	h.apiary.logErr = errors.New("machine log failed for " + runCode)
 	h.apiary.mu.Unlock()
 	h.tick()
-	equal(t, "the journal", h.entries(), nil)
+	// The failed release keeps the claimed entry of dispatchB for the watch.
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchB, Phase: journal.PhaseClaimed, MaxLifetimeMinutes: lifetime}})
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}

@@ -35,7 +35,6 @@ one node pool; see
 {
   "apiary_url": "https://apiary.example.com",
   "gateway_address": "10.0.1.5",
-  "max_machines": 2,
   "adapter": {
     "command": "/usr/local/bin/qory-machines-aws-ec2",
     "settings": "/etc/qory-provisioner/aws-ec2.json"
@@ -49,12 +48,13 @@ one node pool; see
 - `gateway_address`: the IPv4 or IPv6 address of the gateway on the machines'
   network, with no zone and no port, and not an unspecified, multicast or loopback
   address. The provisioner passes it to each machine that it makes. Required.
-- `max_machines`: the most machines that exist at once, 1 to 100. Optional, 1 when
-  you leave it out.
 - `adapter`: the machine adapter. `command` is the path of the adapter's program, and
   `settings` is the path of the adapter's settings file. Required.
 - `enrolment_code_file`: the path of the file with the node pool's enrolment code.
   Optional. See [Enrol the access key](#enrol-the-access-key).
+
+The pool's Machine limit in Qory Apiary is the only limit on how many machines exist
+at once: the provisioner makes a machine for each dispatch that it claims.
 
 Write each path as an absolute path of at most 4096 bytes, with no `.` or `..`
 element, no double slash, no trailing slash, and no NUL byte. Keep secrets out of
@@ -173,61 +173,95 @@ JSON object:
   "subnet_id": "subnet-0123456789abcdef0",
   "security_group_id": "sg-0123456789abcdef0",
   "image_id": "ami-0123456789abcdef0",
-  "instance_types": ["t3.medium", "m7i.large"],
-  "tags": {"qory:stack": "example-stack"},
-  "max_root_gib": 500
+  "tags": {"qory:stack": "example-stack"}
 }
 ```
 
 - `subnet_id` and `security_group_id`: the run subnet and the security group of each
   machine's network interface. Required.
 - `image_id`: the image that each machine starts from. Required.
-- `instance_types`: the EC2 instance types that the adapter may start, 1 to 64 of
-  them, each 1 to 40 characters and listed once. Required.
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
   and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
   dry run of `check` sends them too.
-- `max_root_gib`: the largest root volume that `make` starts, in GiB, an integer from
-  1 to 16384. Optional; 16384, the largest gp3 volume, when absent. The deploy recipe
-  sets it from the deploy setting `MaxRootVolumeGiB`, which also limits
-  `ec2:VolumeSize` in the instance role's policy, so the offers of `check` match the
-  volumes that the instance role's policy allows. The deploy recipe writes
-  `aws-ec2.json` each time the host starts, so change `MaxRootVolumeGiB` there, not
-  the file.
 
 A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
 `qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
 a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
-member breaks a rule, `check` and `make` fail, and the error starts with the fix.
+member breaks a rule, `check` and `make` fail, and the error starts with the fix. A
+file with another member, such as `instance_types`, fails with the error "Remove every
+member other than subnet_id, security_group_id, image_id and tags from aws-ec2.json."
 
-`check` reads each instance type with `ec2:DescribeInstanceTypes`, the zone of
-`subnet_id` with `ec2:DescribeSubnets`, and the types that zone offers with
-`ec2:DescribeInstanceTypeOfferings`. It fails with the kind `defect`, and an error
-that contains the type and the region, when a type does not run the architecture of
-`image_id`, or the subnet's zone does not offer it. It fails with the kind `defect`,
-and an error that contains both sizes, when `max_root_gib` is smaller than the root
-volume of `image_id`. Otherwise its answer contains one offer per type, in the order
-of `instance_types`. Each offer has a disk of `max_root_gib`, because `make` sizes the
-root volume to the machine spec.
+### Instance types
 
-`make` starts the smallest type that fits the machine spec: the type with the fewest
-vCPUs, then the least memory, then the first in `instance_types`. A type fits when it
-has at least the spec's vCPUs and memory, runs the spec's architecture, and, when the
-spec sets `virtualization`, is a bare metal type or has nested virtualization. When
-the spec's `disk_gib` is larger than `max_root_gib`, `make` fails with the kind
-`defect` before any EC2 call. When `max_root_gib` is smaller than the root volume of
-`image_id`, `make` fails with the kind `defect` before any RunInstances call. For
+The adapter has no list of instance types. `check` and `make` read the architecture
+of `image_id` with `ec2:DescribeImages`, the zone of `subnet_id` with
+`ec2:DescribeSubnets`, the instance types of the region with
+`ec2:DescribeInstanceTypes`, and the types that the zone offers with
+`ec2:DescribeInstanceTypeOfferings`. They use only the types that the zone offers,
+that are sold on demand, and that run the image's architecture. With an x86_64 image,
+a machine spec for arm64 gets no offer and no machine; with an arm64 image, arm64
+types work the same way.
+
+The answer of `check` contains the offers that no other offer covers. One offer covers
+another when it has at least its vCPUs and memory, the same architecture, and
+virtualization when the other has it. Qory Apiary uses offers only to test whether
+any offer fits a run's machine type, so a covered offer adds no machine type. Each
+offer has a disk of 16384 GiB, the largest gp3 volume, because `make` sizes the root
+volume to the machine spec. vCPUs above 1024 and memory above 8388608 MiB are cut to
+those values, the most that an offer may have. `check` fails with the kind `defect`
+when the zone offers no type for the image's architecture. It sends at most two
+`ec2:RunInstances` dry runs: one for the first type that `make` would start, and one
+with `CpuOptions` for the first type that needs them for nested virtualization.
+
+`make` starts the first type that fits the machine spec: the type with the fewest
+vCPUs, then the least memory, then the lowest on-demand Linux price in the region,
+then the first by name. A type with no price comes after the types of its size that
+have one. A type fits when it has at least the spec's vCPUs and memory, runs the
+spec's architecture, and, when the spec sets `virtualization`, is a bare metal type or
+has nested virtualization. When the spec's `disk_gib` is larger than 16384, the
+largest gp3 volume, `make` fails with the kind `defect` before any EC2 call. For
 virtualization on a type that is not bare metal, `make` turns on nested virtualization
 with `CpuOptions`. The root volume is gp3 and encrypted, is deleted with the machine,
 and its size is the larger of the spec's `disk_gib` and the size of the root volume of
 `image_id`. When EC2 has no capacity for a type in the subnet's zone
-(`InsufficientInstanceCapacity`), `make` tries the next type that fits, and when every
-type fails that way, it returns the last error. When no type fits, `make` fails with
-the kind `defect`. A key gets one machine: each start sends a client token made of the
-key and the type, and before the first start, `make` looks for a machine with the
-key's tags. EC2 lists a new machine after a short delay, so a second `make` with the
-same key right after the first can start a second machine of another type.
+(`InsufficientInstanceCapacity`), `make` tries the next type that fits, at most 8
+types, and then returns the last error. When no type fits, `make` fails with the kind
+`defect`. A key gets one machine: each start sends a client token made of the key and
+the type, and before the first start, `make` looks for a machine with the key's tags.
+EC2 lists a new machine after a short delay, so a second `make` with the same key
+right after the first can start a second machine of another type.
+
+### Prices
+
+The adapter reads the prices with `pricing:GetProducts` of the AWS Price List Query
+API, at `https://api.pricing.us-east-1.amazonaws.com`, whatever the region of the
+machines: the API runs only in a few regions, and us-east-1 returns the prices of
+every region. It reads the hourly on-demand price in USD for the region, Linux,
+shared tenancy, no software, and capacity status `Used`, for the product families
+`Compute Instance` and `Compute Instance (bare metal)`. One lookup has a time limit of
+20 seconds. When the lookup fails, `check` and `make` go on: they log one line that
+starts with "Give the instance role pricing:GetProducts", and use the prices of the
+cache, or no prices. The cache file records the time of the failed lookup, and
+`check` and `make` try no lookup until 1 hour after it.
+
+### Cache
+
+The adapter keeps the instance types, the types of each zone, and the prices in one
+JSON file per region, `qory-machines-aws-ec2/<region>.json`, in the folder that Go's
+`os.UserCacheDir` returns: `$XDG_CACHE_HOME`, or else `$HOME/.cache`. In the image,
+which runs as the user `nonroot`, that is
+`/home/nonroot/.cache/qory-machines-aws-ec2/<region>.json`. The folder has mode 0700
+and the file 0600.
+
+- Each of the three parts is read again from AWS when it is 24 hours old. The types of
+  the region are also read again when the zone offers a type that the file lacks.
+- When a read fails, the adapter uses the part in the file and logs one line. A failed
+  read of the types or of the zone's types with no part in the file fails the command.
+- When `HOME` and `XDG_CACHE_HOME` are both unset, or the folder cannot be written,
+  `check` and `make` still work: they log one line, and read the types and prices from
+  AWS on every call. Give the adapter a writable home folder, or set
+  `XDG_CACHE_HOME` to a writable folder, to keep the file between calls.
 
 ### Instance role policy
 
@@ -242,7 +276,6 @@ example values before you attach it to the instance role:
   `subnet_id`, `security_group_id` and `image_id` in `aws-ec2.json`.
 - `np_0123456789abcdef`: the node pool's id, the value of each machine's `qory:pool`
   tag.
-- `500`: the largest root volume in GiB, the deploy setting `MaxRootVolumeGiB`.
 
 ```json
 {
@@ -280,9 +313,6 @@ example values before you attach it to the instance role:
         },
         "Bool": {
           "ec2:Encrypted": "true"
-        },
-        "NumericLessThanEquals": {
-          "ec2:VolumeSize": "500"
         }
       }
     },
@@ -334,6 +364,12 @@ example values before you attach it to the instance role:
       "Resource": "*"
     },
     {
+      "Sid": "ReadPrices",
+      "Effect": "Allow",
+      "Action": "pricing:GetProducts",
+      "Resource": "*"
+    },
+    {
       "Sid": "TerminateAndReadConsole",
       "Effect": "Allow",
       "Action": ["ec2:TerminateInstances", "ec2:GetConsoleOutput"],
@@ -357,12 +393,9 @@ What each statement allows, and why:
   make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
   key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
   `UnauthorizedOperation`.
-- `LaunchVolume` allows the volumes of a launch only with the same tags, only
-  encrypted, and only up to the size in `ec2:VolumeSize`, in GiB. The adapter marks
-  the root volume encrypted. Add the keys of `tags` to its `aws:TagKeys` too. Set
-  `max_root_gib` in `aws-ec2.json` to at most the value of `ec2:VolumeSize`: with a
-  larger value, `check` offers disks that `make` cannot start, and `make` fails with
-  `UnauthorizedOperation`.
+- `LaunchVolume` allows the volumes of a launch only with the same tags, and only
+  encrypted. The adapter marks the root volume encrypted. Add the keys of `tags` to
+  its `aws:TagKeys` too.
 - `LaunchNetworkInterface` allows the network interface of a launch only without a
   public IP address. The adapter sends `AssociatePublicIpAddress` set to false.
 - `LaunchFromSettings` allows a launch only into the subnet and the security group of
@@ -372,21 +405,23 @@ What each statement allows, and why:
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
   finds a machine by its key; `ec2:DescribeImages`, which reads the image's root
   device, the size of its root volume and its architecture;
-  `ec2:DescribeInstanceTypes`, which reads the vCPUs, memory, architectures and
-  virtualization of each type in `instance_types`; `ec2:DescribeSubnets`, which reads
-  the zone of `subnet_id`; and `ec2:DescribeInstanceTypeOfferings`, which reads the
-  types that zone offers. None of these actions accepts a limit to a resource, so the
-  resource is `*`.
+  `ec2:DescribeInstanceTypes`, which reads the vCPUs, memory, architectures,
+  virtualization and usage classes of every type in the region;
+  `ec2:DescribeSubnets`, which reads the zone of `subnet_id`; and
+  `ec2:DescribeInstanceTypeOfferings`, which reads the types that zone offers. None of
+  these actions accepts a limit to a resource, so the resource is `*`.
+- `ReadPrices` allows `pricing:GetProducts`, which reads the on-demand prices of the
+  instance types. The action accepts no limit to a resource, so the resource is `*`.
 - `TerminateAndReadConsole` allows `ec2:TerminateInstances` and
   `ec2:GetConsoleOutput` only on instances with the tags `qory:managed` set to `true`
   and `qory:pool` set to the node pool's id. The adapter deletes machines and reads
   their logs with these actions.
 
-`qory-machines-aws-ec2 check` sends `ec2:RunInstances`, once per type in
-`instance_types`, and `ec2:DescribeInstances` as dry runs, and a dry run needs the same
-permissions as the call. The policy has no condition on `ec2:InstanceType`: if you add
-one, allow every type in `instance_types`, or `check` fails with
-`UnauthorizedOperation`. The dry run of
+`qory-machines-aws-ec2 check` sends `ec2:RunInstances`, at most twice, and
+`ec2:DescribeInstances` as dry runs, and a dry run needs the same permissions as the
+call. The policy has no condition on `ec2:InstanceType`: if you add one, allow every
+type that a machine spec of your machine types may fit, or `check` or `make` fails
+with `UnauthorizedOperation`. The dry run of
 `ec2:RunInstances` sends the placeholder pool id `np_0000000000000000` as the
 `qory:pool` tag. Keep the `RunInstances` statements free of a condition on the value
 of `qory:pool`: if they require the node pool's id, `check` fails with
@@ -394,9 +429,13 @@ of `qory:pool`: if they require the node pool's id, `check` fails with
 
 The policy contains no `iam:PassRole`, so no machine gets an instance role.
 
-When the instance role lacks a permission, the adapter's error starts with "Give the
-instance role the EC2 rights that the EC2 machine adapter needs" and contains the
+When the instance role lacks an EC2 permission, the adapter's error starts with "Give
+the instance role the EC2 rights that the EC2 machine adapter needs" and contains the
 action that failed.
+
+The adapter calls these endpoints over HTTPS: `ec2.<region>.amazonaws.com` and
+`api.pricing.us-east-1.amazonaws.com`. It also reads the instance metadata service at
+`169.254.169.254`, or `[fd00:ec2::254]` with IPv6.
 
 If the account's default EBS encryption key is a customer managed KMS key, also allow
 `kms:CreateGrant`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:Decrypt` on that

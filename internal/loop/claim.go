@@ -58,19 +58,15 @@ func kindOf(err error) string {
 	return contracts.FailureDefect
 }
 
-// claim is the claim path. It claims one dispatch at a time, while the journal has
-// fewer machines than MaxMachines, until ctx ends. It returns an error only when the
-// journal cannot be written before or after a make.
+// claim is the claim path. It claims one dispatch at a time until ctx ends, and claims
+// again as soon as it has handled one, whatever the number of machines in the journal.
+// The pool's Machine limit in Qory Apiary is the only limit on how many machines exist
+// at once. A claim with no work returns once Qory Apiary has kept it open up to the
+// claim's wait, 25 seconds, so the next claim follows without a pause. It returns an
+// error only when the journal cannot be written before or after a make.
 func (l *loop) claim(ctx context.Context) error {
 	defer l.Log.Info("stopped claiming")
 	for {
-		for l.machines() >= l.MaxMachines {
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-l.freed:
-			}
-		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -87,18 +83,6 @@ func (l *loop) claim(ctx context.Context) error {
 			l.wait(ctx, ShortWait)
 		}
 	}
-}
-
-// machines is the number of journal entries that count toward MaxMachines: all but the
-// ended ones, whose machine is gone.
-func (l *loop) machines() int {
-	n := 0
-	for _, e := range l.Journal.List() {
-		if e.Phase != journal.PhaseEnded {
-			n++
-		}
-	}
-	return n
 }
 
 // handle makes the machine of the claim c and sends dispatched. When the claim has no
@@ -158,7 +142,8 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 		if rerr := l.releaseEntry(ctx, id, reason); rerr == nil || errors.Is(rerr, ErrLeaseExpired) {
 			l.uploadMakeError(ctx, id, shown(err, data), data)
 		}
-		// An entry kept by 409 machine_exists is the watch's during the wait.
+		// An entry kept after a release that did not return 204 is the watch's during
+		// the wait.
 		l.setBusy(id, false)
 		l.wait(ctx, wait)
 		return nil

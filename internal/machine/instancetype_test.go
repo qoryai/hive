@@ -14,72 +14,65 @@ import (
 )
 
 // typeInfo returns an EC2 instance type with vcpus, memory in MiB, the architectures
-// and the processor features.
+// and the processor features, sold on demand.
 func typeInfo(name string, vcpus int32, mib int64, bare bool, archs []types.ArchitectureType, features ...types.SupportedAdditionalProcessorFeature) types.InstanceTypeInfo {
 	return types.InstanceTypeInfo{
-		InstanceType:  types.InstanceType(name),
-		BareMetal:     aws.Bool(bare),
-		VCpuInfo:      &types.VCpuInfo{DefaultVCpus: aws.Int32(vcpus)},
-		MemoryInfo:    &types.MemoryInfo{SizeInMiB: aws.Int64(mib)},
-		ProcessorInfo: &types.ProcessorInfo{SupportedArchitectures: archs, SupportedFeatures: features},
+		InstanceType:          types.InstanceType(name),
+		BareMetal:             aws.Bool(bare),
+		VCpuInfo:              &types.VCpuInfo{DefaultVCpus: aws.Int32(vcpus)},
+		MemoryInfo:            &types.MemoryInfo{SizeInMiB: aws.Int64(mib)},
+		ProcessorInfo:         &types.ProcessorInfo{SupportedArchitectures: archs, SupportedFeatures: features},
+		SupportedUsageClasses: []types.UsageClassType{types.UsageClassTypeOnDemand},
 	}
 }
 
-// TestInstanceTypes pins the DescribeInstanceTypes input, the paging, what each type
-// contains, and the errors for a type that EC2 does not return or does not know.
-func TestInstanceTypes(t *testing.T) {
+// TestAllInstanceTypes pins the DescribeInstanceTypes input, the paging, what each
+// type contains, and the error of a failed call.
+func TestAllInstanceTypes(t *testing.T) {
+	m8i := typeInfo("m8i.large", 2, 8192, false, []types.ArchitectureType{"x86_64"}, "amd-sev-snp", "nested-virtualization")
+	m8i.SupportedUsageClasses = []types.UsageClassType{"on-demand", "spot"}
+	block := typeInfo("p5e.48xlarge", 192, 2097152, false, []types.ArchitectureType{"x86_64"})
+	block.SupportedUsageClasses = []types.UsageClassType{"capacity-block"}
 	pages := map[string]*ec2.DescribeInstanceTypesOutput{
 		"": {
 			InstanceTypes: []types.InstanceTypeInfo{typeInfo("t3.medium", 2, 4096, false, []types.ArchitectureType{"i386", "x86_64"})},
 			NextToken:     aws.String("page-2"),
 		},
 		"page-2": {InstanceTypes: []types.InstanceTypeInfo{
-			typeInfo("m8i.large", 2, 8192, false, []types.ArchitectureType{"x86_64"}, "amd-sev-snp", "nested-virtualization"),
+			m8i,
 			typeInfo("m7g.metal", 64, 262144, true, []types.ArchitectureType{"arm64", "arm64_mac"}),
+			block,
 		}},
 	}
 	f := &fakeAPI{itype: func(in *ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error) {
 		return pages[aws.ToString(in.NextToken)], nil
 	}}
 	c := NewInRegion(f, "eu-west-1")
-	got, err := c.InstanceTypes(context.Background(), []string{"t3.medium", "m8i.large", "m7g.metal"})
+	got, err := c.AllInstanceTypes(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]InstanceType{
-		"t3.medium": {Name: "t3.medium", VCPUs: 2, MemoryMiB: 4096, Archs: []string{ArchAMD64}},
-		"m8i.large": {Name: "m8i.large", VCPUs: 2, MemoryMiB: 8192, Archs: []string{ArchAMD64}, NestedVirtualization: true},
-		"m7g.metal": {Name: "m7g.metal", VCPUs: 64, MemoryMiB: 262144, Archs: []string{ArchARM64}, BareMetal: true},
+	want := []InstanceType{
+		{Name: "t3.medium", VCPUs: 2, MemoryMiB: 4096, Archs: []string{ArchAMD64}, OnDemand: true},
+		{Name: "m8i.large", VCPUs: 2, MemoryMiB: 8192, Archs: []string{ArchAMD64}, NestedVirtualization: true, OnDemand: true},
+		{Name: "m7g.metal", VCPUs: 64, MemoryMiB: 262144, Archs: []string{ArchARM64}, BareMetal: true, OnDemand: true},
+		{Name: "p5e.48xlarge", VCPUs: 192, MemoryMiB: 2097152, Archs: []string{ArchAMD64}},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("types %+v, want %+v", got, want)
+		t.Errorf("types\n%+v\nwant\n%+v", got, want)
 	}
-	if len(f.types) != 2 || !reflect.DeepEqual(f.types[0].InstanceTypes, []types.InstanceType{"t3.medium", "m8i.large", "m7g.metal"}) {
+	wantIn := &ec2.DescribeInstanceTypesInput{MaxResults: aws.Int32(100)}
+	if len(f.types) != 2 || !reflect.DeepEqual(f.types[0], wantIn) {
 		t.Errorf("%d calls, first input %+v", len(f.types), f.types[0])
 	}
-	if !got["m8i.large"].Virtualization() || !got["m7g.metal"].Virtualization() || got["t3.medium"].Virtualization() {
+	if !got[1].Virtualization() || !got[2].Virtualization() || got[0].Virtualization() {
 		t.Error("Virtualization is not true for exactly the nested and the bare metal type")
-	}
-
-	_, err = c.InstanceTypes(context.Background(), []string{"t3.medium", "c7i.large"})
-	const wantMissing = "Remove c7i.large from instance_types in aws-ec2.json: DescribeInstanceTypes returned no such type in eu-west-1"
-	if err == nil || err.Error() != wantMissing || kindOf(err) != contracts.FailureDefect {
-		t.Errorf("a missing type: error %v, want %q of kind defect", err, wantMissing)
-	}
-
-	f.itype = func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error) {
-		return nil, apiError("InvalidInstanceType")
-	}
-	_, err = c.InstanceTypes(context.Background(), []string{"t3.huge"})
-	const wantInvalid = "Set instance_types in aws-ec2.json to EC2 instance types that exist in eu-west-1: DescribeInstanceTypes failed: api error InvalidInstanceType: test message for InvalidInstanceType"
-	if err == nil || err.Error() != wantInvalid || kindOf(err) != contracts.FailureDefect {
-		t.Errorf("an unknown type: error %v, want %q of kind defect", err, wantInvalid)
 	}
 
 	f.itype = func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error) {
 		return nil, apiError("UnauthorizedOperation")
 	}
-	_, err = c.InstanceTypes(context.Background(), []string{"t3.medium"})
+	_, err = c.AllInstanceTypes(context.Background())
 	const wantDenied = "Give the instance role the EC2 rights that the EC2 machine adapter needs: DescribeInstanceTypes failed with UnauthorizedOperation: api error UnauthorizedOperation: test message for UnauthorizedOperation"
 	if err == nil || err.Error() != wantDenied {
 		t.Errorf("denied: error %v, want %q", err, wantDenied)
@@ -121,29 +114,27 @@ func TestSubnetZone(t *testing.T) {
 	}
 }
 
-// TestOffered pins the DescribeInstanceTypeOfferings input, the paging, and that only
-// the offerings in the zone count.
-func TestOffered(t *testing.T) {
+// TestZoneTypes pins the DescribeInstanceTypeOfferings input, the paging, that only
+// the offerings in the zone count, and that each type counts once.
+func TestZoneTypes(t *testing.T) {
 	offering := func(name, zone string) types.InstanceTypeOffering {
 		return types.InstanceTypeOffering{InstanceType: types.InstanceType(name), Location: aws.String(zone), LocationType: types.LocationTypeAvailabilityZone}
 	}
 	pages := map[string]*ec2.DescribeInstanceTypeOfferingsOutput{
 		"":       {InstanceTypeOfferings: []types.InstanceTypeOffering{offering("t3.medium", "eu-west-1a")}, NextToken: aws.String("page-2")},
-		"page-2": {InstanceTypeOfferings: []types.InstanceTypeOffering{offering("m7i.large", "eu-west-1a"), offering("m7g.large", "eu-west-1b")}},
+		"page-2": {InstanceTypeOfferings: []types.InstanceTypeOffering{offering("m7i.large", "eu-west-1a"), offering("m7g.large", "eu-west-1b"), offering("t3.medium", "eu-west-1a")}},
 	}
 	f := &fakeAPI{offering: func(in *ec2.DescribeInstanceTypeOfferingsInput) (*ec2.DescribeInstanceTypeOfferingsOutput, error) {
 		return pages[aws.ToString(in.NextToken)], nil
 	}}
-	got, err := New(f).Offered(context.Background(), "eu-west-1a", []string{"t3.medium", "m7i.large", "m7g.large"})
-	if err != nil || !reflect.DeepEqual(got, map[string]bool{"t3.medium": true, "m7i.large": true}) {
-		t.Errorf("offered %v, error %v", got, err)
+	got, err := New(f).ZoneTypes(context.Background(), "eu-west-1a")
+	if err != nil || !reflect.DeepEqual(got, []string{"t3.medium", "m7i.large"}) {
+		t.Errorf("zone types %v, error %v", got, err)
 	}
 	want := &ec2.DescribeInstanceTypeOfferingsInput{
 		LocationType: types.LocationTypeAvailabilityZone,
-		Filters: []types.Filter{
-			{Name: aws.String("location"), Values: []string{"eu-west-1a"}},
-			{Name: aws.String("instance-type"), Values: []string{"t3.medium", "m7i.large", "m7g.large"}},
-		},
+		Filters:      []types.Filter{{Name: aws.String("location"), Values: []string{"eu-west-1a"}}},
+		MaxResults:   aws.Int32(1000),
 	}
 	if len(f.offerings) != 2 || !reflect.DeepEqual(f.offerings[0], want) {
 		t.Errorf("%d calls, first input %+v, want %+v", len(f.offerings), f.offerings[0], want)
@@ -152,7 +143,7 @@ func TestOffered(t *testing.T) {
 	f.offering = func(*ec2.DescribeInstanceTypeOfferingsInput) (*ec2.DescribeInstanceTypeOfferingsOutput, error) {
 		return nil, apiError("UnauthorizedOperation")
 	}
-	_, err = New(f).Offered(context.Background(), "eu-west-1a", []string{"t3.medium"})
+	_, err = New(f).ZoneTypes(context.Background(), "eu-west-1a")
 	if kindOf(err) != contracts.FailureDefect {
 		t.Errorf("denied: error %v, want kind defect", err)
 	}

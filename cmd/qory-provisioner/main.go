@@ -201,14 +201,13 @@ func start(ctx context.Context, f serveFlags, e env, log *slog.Logger) int {
 	log.Info("started the provisioner",
 		slog.String("version", version), slog.String("apiary_url", st.ApiaryURL), slog.String("pool_id", st.PoolID),
 		slog.String("access_key_id", st.AccessKeyID), slog.String("instance_id", st.InstanceID),
-		slog.Int("max_machines", s.MaxMachines), slog.String("gateway_address", gateway.String()),
+		slog.String("gateway_address", gateway.String()),
 		slog.String("state_dir", f.stateDir), slog.String("adapter", s.Adapter.Command))
 	err = loop.Run(ctx, loop.Config{
 		Apiary:         apiary{client: client},
 		Machines:       adapter.New(s.Adapter.Command, s.Adapter.Settings, e.stderr),
 		Journal:        j,
 		PoolID:         st.PoolID,
-		MaxMachines:    s.MaxMachines,
 		GatewayAddress: gateway,
 		Log:            log,
 	})

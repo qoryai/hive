@@ -30,41 +30,21 @@ type Settings struct {
 	// ImageID is the image each machine starts from: ami- and 8 or 17 hexadecimal
 	// digits.
 	ImageID string
-	// InstanceTypes are the EC2 instance types that make may start, such as
-	// t3.medium, in the order of the settings: 1 to 64 types, each once. Check offers
-	// one machine per type in this order, and make tries the types that fit in order
-	// of vCPUs, then memory, then this order.
-	InstanceTypes []string
 	// Tags maps a tag key to its value, such as qory:stack to example-stack: at most 20
 	// entries. Each machine and its volume get these tags after qory:managed,
 	// qory:pool and qory:key. Tags is nil when the member tags is
 	// absent or an empty object.
 	Tags map[string]string
-	// MaxRootGiB is the largest root volume that make may start, in GiB: 1 to
-	// [machine.MaxRootGiB], and machine.MaxRootGiB when the member max_root_gib is
-	// absent. Each offer of check has this disk.
-	MaxRootGiB int
 }
 
 // members are the required members, in the order an error lists the missing ones.
-var members = []string{"subnet_id", "security_group_id", "image_id", "instance_types"}
+var members = []string{"subnet_id", "security_group_id", "image_id"}
 
-// The optional members.
-const (
-	tagsMember    = "tags"
-	maxRootMember = "max_root_gib"
-)
+// tagsMember is the one optional member.
+const tagsMember = "tags"
 
 // maxFile is the most bytes a settings file may contain.
 const maxFile = 64 << 10
-
-// maxInstanceTypes is the most entries of instance_types: the most offers of a check
-// answer.
-const maxInstanceTypes = 64
-
-// maxInstanceType is the most characters of an instance type, so that the client
-// token of a key and a type, [machine.ClientToken], has at most 64 characters.
-const maxInstanceType = 40
 
 // maxTags is the most entries of tags. EC2 accepts at most 50 tags on a resource, and
 // the adapter adds 3: qory:managed, qory:pool and qory:key.
@@ -85,9 +65,7 @@ var rules = map[string]string{
 	"subnet_id":         "subnet- and 8 or 17 lower-case hexadecimal digits",
 	"security_group_id": "sg- and 8 or 17 lower-case hexadecimal digits",
 	"image_id":          "ami- and 8 or 17 lower-case hexadecimal digits",
-	"instance_types":    "a list of 1 to 64 EC2 instance types such as t3.medium, each of 1 to 40 characters",
 	tagsMember:          "an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters",
-	maxRootMember:       "an integer from 1 to 16384",
 }
 
 // The errors of tags beyond its rule, in the order tags checks them, so a document
@@ -98,17 +76,13 @@ const (
 	msgTagAdapter = "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + settingsFile + ": the adapter sets these tags on every machine."
 )
 
-// msgUnknownMember is the error of a member that is neither required nor optional.
-const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id, instance_types, tags and max_root_gib from " + settingsFile + "."
-
-// msgRepeatedType is the error of an instance type that instance_types lists twice.
-const msgRepeatedType = "Write each instance type once in instance_types in " + settingsFile + "."
+// msgUnknownMember is the error of a member that is neither required nor tags.
+const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id and tags from " + settingsFile + "."
 
 var (
 	subnetShape        = regexp.MustCompile(`^subnet-([0-9a-f]{8}|[0-9a-f]{17})$`)
 	securityGroupShape = regexp.MustCompile(`^sg-([0-9a-f]{8}|[0-9a-f]{17})$`)
 	imageShape         = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	instanceTypeShape  = regexp.MustCompile(`^[a-z][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$`)
 	// tagText is the characters that EC2 accepts in a tag key and a tag value.
 	tagText = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]*$`)
 )
@@ -173,7 +147,7 @@ func ParseSettings(b []byte) (Settings, error) {
 		return Settings{}, settingsError("Write " + settingsFile + " as one JSON object.")
 	}
 	for name := range doc {
-		if name != tagsMember && name != maxRootMember && !slices.Contains(members, name) {
+		if name != tagsMember && !slices.Contains(members, name) {
 			return Settings{}, settingsError(msgUnknownMember)
 		}
 	}
@@ -197,12 +171,6 @@ func ParseSettings(b []byte) (Settings, error) {
 			s.SecurityGroupID, good = matching(raw, securityGroupShape)
 		case "image_id":
 			s.ImageID, good = matching(raw, imageShape)
-		case "instance_types":
-			var repeated bool
-			s.InstanceTypes, good, repeated = instanceTypes(raw)
-			if repeated {
-				return Settings{}, settingsError(msgRepeatedType)
-			}
 		}
 		if !good {
 			return Settings{}, settingsError(ruleError(name))
@@ -212,13 +180,6 @@ func ParseSettings(b []byte) (Settings, error) {
 		var msg string
 		if s.Tags, msg = tags(raw); msg != "" {
 			return Settings{}, settingsError(msg)
-		}
-	}
-	s.MaxRootGiB = machine.MaxRootGiB
-	if raw, ok := doc[maxRootMember]; ok {
-		var good bool
-		if s.MaxRootGiB, good = maxRoot(raw); !good {
-			return Settings{}, settingsError(ruleError(maxRootMember))
 		}
 	}
 	return s, nil
@@ -236,41 +197,6 @@ func matching(raw jsontext.Value, shape *regexp.Regexp) (string, bool) {
 		return "", false
 	}
 	return s, shape.MatchString(s)
-}
-
-// instanceTypes reads the member instance_types: a list of 1 to maxInstanceTypes
-// strings, each of at most maxInstanceType characters that instanceTypeShape matches.
-// good is false when a rule fails. repeated is true when the list is good but has a
-// type twice.
-func instanceTypes(raw jsontext.Value) (list []string, good, repeated bool) {
-	var vs []jsontext.Value
-	if raw.Kind() != '[' || jsonv2.Unmarshal(raw, &vs) != nil || len(vs) < 1 || len(vs) > maxInstanceTypes {
-		return nil, false, false
-	}
-	out := make([]string, 0, len(vs))
-	for _, v := range vs {
-		t, ok := matching(v, instanceTypeShape)
-		if !ok || len(t) > maxInstanceType {
-			return nil, false, false
-		}
-		out = append(out, t)
-	}
-	for i, t := range out {
-		if slices.Contains(out[:i], t) {
-			return nil, true, true
-		}
-	}
-	return out, true, false
-}
-
-// maxRoot reads the member max_root_gib: an integer from 1 to [machine.MaxRootGiB].
-// A number with a fraction or an exponent is not an integer.
-func maxRoot(raw jsontext.Value) (int, bool) {
-	var n int
-	if raw.Kind() != '0' || jsonv2.Unmarshal(raw, &n) != nil || n < 1 || n > machine.MaxRootGiB {
-		return 0, false
-	}
-	return n, true
 }
 
 // tags reads the member tags: an object of at most maxTags members, each a key of 1

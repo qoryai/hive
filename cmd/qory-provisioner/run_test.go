@@ -71,7 +71,6 @@ func newProvisionerFixture(t *testing.T) *provisionerFixture {
 	b, _ = json.Marshal(map[string]any{
 		"apiary_url":      srv.URL,
 		"gateway_address": "::ffff:10.0.1.5",
-		"max_machines":    1,
 		"adapter":         map[string]string{"command": exe, "settings": adapterSettings},
 	})
 	f.settings = writeFile(t, dir, "settings.json", string(b))
@@ -229,7 +228,7 @@ func TestServeRuns(t *testing.T) {
 		`level=INFO msg="Remove QORY_ENROLMENT_CODE from the environment: the state folder has an access key, so the code is not used"`,
 		`level=INFO msg="started the provisioner" version=`,
 		`apiary_url=` + f.srv.URL + ` pool_id=` + provisionertest.PoolID + ` access_key_id=` + provisionertest.KeyID,
-		`max_machines=1 gateway_address=10.0.1.5 state_dir=` + f.state,
+		` gateway_address=10.0.1.5 state_dir=` + f.state,
 		`level=INFO msg="sent dispatched" dispatch_id=` + d.ID + ` machine_id=i-00000000000000001`,
 		`level=INFO msg="received a stop signal: the provisioner stops claiming" signal=terminated`,
 		`level=INFO msg="stopped claiming"`,
@@ -257,8 +256,12 @@ func TestServeRuns(t *testing.T) {
 	if got, want := f.commands(t), []string{"check", "list", "make", "check", "list"}; !slices.Equal(got, want) {
 		t.Errorf("the adapter ran %q, want %q", got, want)
 	}
-	if n := len(f.srv.Calls()); n != calls {
-		t.Errorf("the restart sent %d requests to Qory Apiary, want none: the journal is full", n-calls)
+	// The restart claims again, and sends nothing for the resumed dispatch before the
+	// first watch.
+	for _, c := range f.srv.Calls()[calls:] {
+		if c.Route != provisionertest.RouteClaim {
+			t.Errorf("the restart sent a %s request to Qory Apiary, want only claims", c.Route)
+		}
 	}
 }
 
@@ -347,7 +350,7 @@ func TestToLoop(t *testing.T) {
 func TestToLoopEnd(t *testing.T) {
 	for _, c := range []struct{ client, loop error }{
 		{provisioner.ErrMachineEndStopped, loop.ErrMachineEndStopped},
-		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndDone},
+		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndUnusable},
 	} {
 		err := fmt.Errorf("the machine end of dp_0123456789abcdef: %w", c.client)
 		if got := toLoopEnd(err); !errors.Is(got, c.loop) || !errors.Is(got, c.client) || got.Error() != err.Error() {
@@ -389,12 +392,12 @@ func TestApiaryMachineEnd(t *testing.T) {
 		t.Errorf("an unknown dispatch: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 200, Body: `{}`})
-	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndUnusable) {
 		t.Errorf("a signed 200: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 404, Unsigned: true})
 	err = a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone)
-	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndDone) {
+	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndUnusable) {
 		t.Errorf("an unsigned 404: %v, want a failure the loop retries", err)
 	}
 }

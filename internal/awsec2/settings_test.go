@@ -17,8 +17,7 @@ import (
 const validSettings = `{
   "subnet_id": "subnet-0123456789abcdef0",
   "security_group_id": "sg-0123456789abcdef0",
-  "image_id": "ami-0123456789abcdef0",
-  "instance_types": ["t3.medium", "m7i.large"]
+  "image_id": "ami-0123456789abcdef0"
 }`
 
 // writeSettings writes doc to a settings file in a temporary folder and returns its
@@ -33,8 +32,7 @@ func writeSettings(t *testing.T, doc string) string {
 }
 
 // TestParseSettings pins the settings that ReadSettings returns for a valid document,
-// with instance_types in their order, and the bounds of instance_types that pass: 64
-// entries and a type of 40 characters.
+// and the ids of 8 hexadecimal digits.
 func TestParseSettings(t *testing.T) {
 	s, err := ReadSettings(writeSettings(t, validSettings))
 	if err != nil {
@@ -44,29 +42,15 @@ func TestParseSettings(t *testing.T) {
 		SubnetID:        "subnet-0123456789abcdef0",
 		SecurityGroupID: "sg-0123456789abcdef0",
 		ImageID:         "ami-0123456789abcdef0",
-		InstanceTypes:   []string{"t3.medium", "m7i.large"},
-		MaxRootGiB:      16384,
 	}
 	if !reflect.DeepEqual(s, want) {
 		t.Errorf("settings %+v, want %+v", s, want)
 	}
 
-	var entries []string
-	for i := range 63 {
-		entries = append(entries, fmt.Sprintf(`"m%d.large"`, i))
-	}
-	long := "c7i-" + strings.Repeat("x", 21) + ".metal-48xlarge"
-	if len(long) != 40 {
-		t.Fatalf("the long type has %d characters", len(long))
-	}
-	entries = append(entries, `"`+long+`"`)
-	doc := `{"subnet_id": "subnet-01234567", "security_group_id": "sg-01234567", "image_id": "ami-01234567", "instance_types": [` + strings.Join(entries, ", ") + `]}`
+	doc := `{"subnet_id": "subnet-01234567", "security_group_id": "sg-01234567", "image_id": "ami-01234567"}`
 	s, err = ParseSettings([]byte(doc))
-	if err != nil {
-		t.Fatalf("64 types and a type of 40 characters: %v", err)
-	}
-	if len(s.InstanceTypes) != 64 || s.InstanceTypes[0] != "m0.large" || s.InstanceTypes[63] != long || s.SubnetID != "subnet-01234567" {
-		t.Errorf("settings %+v", s)
+	if err != nil || s.SubnetID != "subnet-01234567" || s.SecurityGroupID != "sg-01234567" || s.ImageID != "ami-01234567" {
+		t.Errorf("settings %+v, error %v", s, err)
 	}
 }
 
@@ -114,24 +98,16 @@ func TestParseSettingsTags(t *testing.T) {
 	}
 }
 
-// withMaxRoot is validSettings with the member max_root_gib set to the JSON value n.
-func withMaxRoot(n string) string {
-	return strings.TrimSuffix(validSettings, "\n}") + ",\n  \"max_root_gib\": " + n + "\n}"
-}
-
-// TestParseSettingsMaxRoot pins the member max_root_gib: absent gives 16384, and the
-// bounds that pass are 1 and 16384, also next to tags.
-func TestParseSettingsMaxRoot(t *testing.T) {
-	for doc, want := range map[string]int{
-		validSettings:        16384,
-		withMaxRoot(`1`):     1,
-		withMaxRoot(`500`):   500,
-		withMaxRoot(`16384`): 16384,
-		strings.TrimSuffix(withTags(`{"qory:stack": "example-stack"}`), "\n}") + `, "max_root_gib": 500}`: 500,
-	} {
-		s, err := ParseSettings([]byte(doc))
-		if err != nil || s.MaxRootGiB != want {
-			t.Errorf("%s: max_root_gib %d, error %v, want %d", doc, s.MaxRootGiB, err, want)
+// TestParseSettingsRefusesRemoved pins that max_root_gib and instance_types, which
+// the settings no longer have, fail with the unknown-member error. The disk of each
+// machine comes only from the run's machine spec, and the instance type from the
+// types that AWS offers in the subnet's zone.
+func TestParseSettingsRefusesRemoved(t *testing.T) {
+	for _, member := range []string{`"max_root_gib": 500`, `"instance_types": ["t3.medium", "m7i.large"]`} {
+		doc := strings.TrimSuffix(validSettings, "\n}") + ",\n  " + member + "\n}"
+		_, err := ParseSettings([]byte(doc))
+		if err == nil || err.Error() != "Remove every member other than subnet_id, security_group_id, image_id and tags from aws-ec2.json." || kindOf(err) != contracts.FailureDefect {
+			t.Errorf("%s: error %v", member, err)
 		}
 	}
 }
@@ -147,25 +123,16 @@ func TestParseSettingsErrors(t *testing.T) {
 			"subnet_id":         `"subnet-0123456789abcdef0"`,
 			"security_group_id": `"sg-0123456789abcdef0"`,
 			"image_id":          `"ami-0123456789abcdef0"`,
-			"instance_types":    `["t3.medium"]`,
 		}
 		doc[name] = value
-		return fmt.Sprintf(`{"subnet_id": %s, "security_group_id": %s, "image_id": %s, "instance_types": %s}`, doc["subnet_id"], doc["security_group_id"], doc["image_id"], doc["instance_types"])
-	}
-	var many []string
-	for i := range 65 {
-		many = append(many, fmt.Sprintf(`"m%d.large"`, i))
+		return fmt.Sprintf(`{"subnet_id": %s, "security_group_id": %s, "image_id": %s}`, doc["subnet_id"], doc["security_group_id"], doc["image_id"])
 	}
 	subnetRule := "Set subnet_id in " + file + " to subnet- and 8 or 17 lower-case hexadecimal digits."
 	sgRule := "Set security_group_id in " + file + " to sg- and 8 or 17 lower-case hexadecimal digits."
 	imageRule := "Set image_id in " + file + " to ami- and 8 or 17 lower-case hexadecimal digits."
-	typesRule := "Set instance_types in " + file + " to a list of 1 to 64 EC2 instance types such as t3.medium, each of 1 to 40 characters."
-	typesOnce := "Write each instance type once in instance_types in " + file + "."
 	tagsRule := "Set tags in " + file + " to an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters."
 	tagText := "Write the keys and values of tags in " + file + " with only letters, digits, spaces and _ . : / = + - @."
 	tagAWS := "Remove every key that starts with aws: from tags in " + file + ": AWS reserves that prefix."
-	maxRootRule := "Set max_root_gib in " + file + " to an integer from 1 to 16384."
-	unknown := "Remove every member other than subnet_id, security_group_id, image_id, instance_types, tags and max_root_gib from " + file + "."
 	tagAdapter := "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + file + ": the adapter sets these tags on every machine."
 	var manyTags []string
 	for i := range 21 {
@@ -183,13 +150,13 @@ func TestParseSettingsErrors(t *testing.T) {
 		{`{"subnet_id": "` + marker + `",}`, "Fix the JSON in " + file + " at byte offset 31."},
 		{"{\"subnet_id\": \"" + marker + "\xff\"}", "Fix the JSON in " + file + " at byte offset 30."},
 		{`{"subnet_id": "subnet-01234567", "subnet_id": "` + marker + `"}`, "Write each member once in " + file + "."},
-		{`{"` + marker + `": 1}`, unknown},
-		{`{"run_subnet_id": "subnet-01234567"}`, unknown},
-		{`{"sizes": {"standard": "t3.medium"}}`, unknown},
-		{`{"tags": {}}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
-		{`{"max_root_gib": 500}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
-		{`{}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id, instance_types."},
-		{`{"subnet_id": "subnet-01234567", "instance_types": []}`, "Add the missing members to " + file + ": security_group_id, image_id."},
+		{`{"` + marker + `": 1}`, "Remove every member other than subnet_id, security_group_id, image_id and tags from " + file + "."},
+		{`{"run_subnet_id": "subnet-01234567"}`, "Remove every member other than subnet_id, security_group_id, image_id and tags from " + file + "."},
+		{`{"sizes": {"standard": "t3.medium"}}`, "Remove every member other than subnet_id, security_group_id, image_id and tags from " + file + "."},
+		{`{"tags": {}}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id."},
+		{`{}`, "Add the missing members to " + file + ": subnet_id, security_group_id, image_id."},
+		{`{"subnet_id": "subnet-01234567"}`, "Add the missing members to " + file + ": security_group_id, image_id."},
+		{`{"subnet_id": "subnet-01234567", "instance_types": []}`, "Remove every member other than subnet_id, security_group_id, image_id and tags from " + file + "."},
 		{member("subnet_id", `"`+marker+`"`), subnetRule},
 		{member("subnet_id", `"subnet-0123456"`), subnetRule},
 		{member("subnet_id", `"subnet-0123456789ABCDEF0"`), subnetRule},
@@ -198,20 +165,6 @@ func TestParseSettingsErrors(t *testing.T) {
 		{member("security_group_id", `"subnet-0123456789abcdef0"`), sgRule},
 		{member("image_id", `"ami-`+marker+`"`), imageRule},
 		{member("image_id", `["ami-0123456789abcdef0"]`), imageRule},
-		{member("instance_types", `[]`), typesRule},
-		{member("instance_types", `[`+strings.Join(many, ", ")+`]`), typesRule},
-		{member("instance_types", `["`+marker+`"]`), typesRule},
-		{member("instance_types", `["t3"]`), typesRule},
-		{member("instance_types", `["t3.-medium"]`), typesRule},
-		{member("instance_types", `["T3.medium"]`), typesRule},
-		{member("instance_types", `["c7i-`+strings.Repeat("x", 22)+`.metal-48xlarge"]`), typesRule},
-		{member("instance_types", `[3]`), typesRule},
-		{member("instance_types", `[null]`), typesRule},
-		{member("instance_types", `"t3.medium"`), typesRule},
-		{member("instance_types", `{"standard": "t3.medium"}`), typesRule},
-		{member("instance_types", `null`), typesRule},
-		{member("instance_types", `["t3.medium", "m7i.large", "t3.medium"]`), typesOnce},
-		{member("instance_types", `["t3.medium", "t3.medium", "`+marker+`"]`), typesRule},
 		{withTags(`["` + marker + `"]`), tagsRule},
 		{withTags(`"` + marker + `"`), tagsRule},
 		{withTags(`null`), tagsRule},
@@ -233,18 +186,6 @@ func TestParseSettingsErrors(t *testing.T) {
 		{withTags(`{"qory:managed": "` + marker + `"}`), tagAdapter},
 		{withTags(`{"QORY:POOL": "` + marker + `"}`), tagAdapter},
 		{withTags(`{"qory:Key": "` + marker + `"}`), tagAdapter},
-		{withMaxRoot(`0`), maxRootRule},
-		{withMaxRoot(`-1`), maxRootRule},
-		{withMaxRoot(`16385`), maxRootRule},
-		{withMaxRoot(`99999999999999999999`), maxRootRule},
-		{withMaxRoot(`1.5`), maxRootRule},
-		{withMaxRoot(`500.0`), maxRootRule},
-		{withMaxRoot(`5e2`), maxRootRule},
-		{withMaxRoot(`"500"`), maxRootRule},
-		{withMaxRoot(`"` + marker + `"`), maxRootRule},
-		{withMaxRoot(`null`), maxRootRule},
-		{withMaxRoot(`[500]`), maxRootRule},
-		{withMaxRoot(`500, "max_root_gib": 600`), "Write each member once in " + file + "."},
 		// Of several faults, the error is the one of the first check, on every read.
 		{withTags(`{"aws:a": "x", "qory:key": "y", "b": "z!"}`), tagText},
 		{withTags(`{"qory:key": "y", "aws:a": "x"}`), tagAWS},

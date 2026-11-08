@@ -16,20 +16,33 @@ The changes to Hive that no release contains yet, in the shape of
   the answer of `list` contains none. The provisioner releases a claim with no
   `machine_spec`, with the reason "the machine was not made: the claim has no machine
   spec, so the provisioner cannot choose a machine".
-- The AWS EC2 adapter chooses the instance type by the machine spec. The answer of
-  `check` contains one offer per type in `instance_types`, in that order, each with a
-  disk of `max_root_gib`. `make` starts the smallest type that fits: by vCPUs, then
-  memory, then the order of `instance_types`. For a spec with `virtualization` on a
-  type that is not bare metal, it turns on nested virtualization with `CpuOptions`.
-  The root volume is gp3, encrypted and deleted with the machine, and its size is the
-  larger of `disk_gib` and the size of the image's root volume. When EC2 has no
-  capacity for a type in the subnet's zone, `make` tries the next type that fits, and
-  when every type fails that way, it returns the last error. The answer of `make`
+- The AWS EC2 adapter chooses the instance type by the machine spec, from the types
+  that AWS offers. `check` and `make` read the instance types of the region, the types
+  that the zone of `subnet_id` offers, and the types' on-demand Linux prices, and use
+  only the types that the zone offers on demand and that run the architecture of
+  `image_id`. The answer of `check` contains the offers that no other offer covers,
+  because Qory Apiary uses offers only to test whether any offer fits, each with a
+  disk of 16384 GiB. vCPUs above 1024 and memory above 8388608 MiB are cut to those
+  values, and at most 64 offers remain. `make` starts the first type that fits: the
+  fewest vCPUs, then the least memory, then the lowest price, then the name, with a
+  type that has no price after the priced types of its size. For a spec with
+  `virtualization` on a type that is not bare metal, it turns on nested virtualization
+  with `CpuOptions`. The root volume is gp3, encrypted and deleted with the machine,
+  and its size is the larger of `disk_gib` and the size of the image's root volume.
+  When EC2 has no capacity for a type in the subnet's zone, `make` tries the next type
+  that fits, at most 8 types, and then returns the last error. The answer of `make`
   contains the type it started.
-- The AWS EC2 adapter reads `max_root_gib` from `aws-ec2.json`: 1 to 16384, and 16384
-  when absent. `check` and `make` fail when it is smaller than the image's root volume,
-  and `make` fails for a larger `disk_gib`. The deploy sets it from `MaxRootVolumeGiB`,
-  the `ec2:VolumeSize` limit of the instance role.
+- The AWS EC2 adapter reads the prices with `pricing:GetProducts` of the AWS Price
+  List Query API at `api.pricing.us-east-1.amazonaws.com`, for virtual and bare
+  metal types, with a time limit of 20 seconds. When the lookup fails, `check` and
+  `make` log one line and go on with the cached prices, or none, and the adapter tries
+  no lookup for 1 hour.
+- The AWS EC2 adapter keeps the instance types, the types of each zone, and the prices
+  in `qory-machines-aws-ec2/<region>.json` in the folder of Go's `os.UserCacheDir`:
+  `$XDG_CACHE_HOME`, or else `$HOME/.cache`. Each part is read again from AWS after 24
+  hours, and the types also when the zone offers a type that the file lacks. A failed
+  read uses the part in the file, with one log line. When the folder cannot be
+  written, the adapter logs one line and reads from AWS on every call.
 - The machine's start script writes the steps of the machine's start to
   `/var/lib/qory-machine/steps.jsonl` just before it runs `qory run`: one JSON object
   per line with the step's name and its start and end in UTC to the millisecond, for
@@ -53,8 +66,9 @@ The changes to Hive that no release contains yet, in the shape of
 - The provisioner keeps checking a machine after its delete. Every 60 seconds it sends
   the delete again, also after a failed delete, until the machine adapter returns gone.
 - The journal of live dispatches has two more phases: `deleting`, for a machine whose
-  delete has not returned gone, and `ended`, for a machine that is gone while the post
-  of `gone` is pending.
+  delete has not returned gone, and `ended`, for a dispatch whose post of `gone` is
+  pending. An `ended` line has `-` for the machine id when the dispatch never had a
+  listed machine.
 - The licence: `LICENSE`, the Apache License, Version 2.0; `NOTICE`; and
   `TRADEMARKS.md`, with the rules for using the name Qory.
 - The machine's start script, `qory-machine-start`, prints one line to standard error at
@@ -74,16 +88,17 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
-- `aws-ec2.json` has `instance_types`, a list of 1 to 64 EC2 instance types, each
-  listed once, in place of `sizes`. Before, `sizes` set each size name of a make
-  request, such as `standard`, to an instance type, and the provisioner made the size
-  `standard` for a claim with no machine type.
-- `check` of the AWS EC2 adapter reads the instance types, the subnet's zone and the
-  types that zone offers, and fails with the kind `defect` when a type does not run the
-  image's architecture or the zone does not offer it. The error contains the type and
-  the region. It sends one `RunInstances` dry run per type, at most 8 at once.
-- The error of `InsufficientInstanceCapacity` starts with "Wait, or add a type that
-  fits to instance_types in aws-ec2.json". Before, it started with "Wait, or map the
+- `aws-ec2.json` has no `sizes`, and no list of instance types. Before, `sizes` set
+  each size name of a make request, such as `standard`, to an instance type, and the
+  provisioner made the size `standard` for a claim with no machine type. A file with
+  `sizes` or `instance_types` fails with the error `Remove every member other than
+  subnet_id, security_group_id, image_id and tags from aws-ec2.json.`
+- `check` of the AWS EC2 adapter fails with the kind `defect` when the subnet's zone
+  offers no on-demand instance type for the image's architecture. It sends at most two
+  `RunInstances` dry runs: one for the first type that `make` would start, and one
+  with `CpuOptions` for the first type that needs them.
+- The error of `InsufficientInstanceCapacity` starts with "Wait, or set subnet_id in
+  aws-ec2.json to a subnet in another zone". Before, it started with "Wait, or map the
   size to another instance type in aws-ec2.json".
 - A line of the journal of live dispatches has a fifth field, the machine type, or `-`
   for none: "dispatch_id phase machine_id max_lifetime_minutes machine_type". `serve`
@@ -101,23 +116,43 @@ The changes to Hive that no release contains yet, in the shape of
   `forager.yaml` are gone. The two lines about the token and user data requests moved to
   the EC2 unit with the same words. In two lines, "The user data" now reads "The start
   data".
-- A dispatch keeps its journal entry, and its place in `max_machines`, until the machine
-  adapter returns gone. Before, the entry left when the adapter accepted the delete. So
-  with `max_machines` of 1, the next run waits at least one more watch of 60 seconds,
-  and a delete that keeps failing holds its place while the provisioner retries it.
+- A dispatch keeps its journal entry until the machine adapter returns gone. Before,
+  the entry left when the adapter accepted the delete. A delete that keeps failing
+  keeps its entry while the provisioner retries it.
 - Each `machine-end` post has one try. After the first failed post in a watch, that
   watch sends no more `machine-end`, and its deletes and `dispatched` go on. So a Qory
   Apiary with no `machine-end` route costs one failed post per watch.
 - When the post of `gone` fails or waits for the next watch, the machine's entry stays
-  in the phase `ended`, which does not count toward `max_machines`. Each watch sends
-  `gone` again. After 24 hours the provisioner logs an error and removes the entry.
+  in the phase `ended` until Qory Apiary accepts `gone` with the signed 204, or
+  returns a signed 400, 403 or 404. Any other signed 2xx counts as a failure. The
+  provisioner sends `gone` again 1 minute after the first failure, and each later
+  failure doubles the wait, up to 1 hour. A restart starts the waits again.
 - A post of `deleting` or `delete_failed` that keeps failing stops 24 hours after its
   first failure. The provisioner logs an error, and a later state goes out as usual.
 - A machine that is deleting, or that is still not listed 5 minutes after its make, gets
   a delete, and `gone` is posted for it. Before, the provisioner removed its entry with
   no delete.
 - A listed machine with no journal entry and a key in the shape of a dispatch id gets a
-  journal entry, and `machine-end` as any other machine does.
+  journal entry, and `machine-end` as any other machine does, also when the list
+  shows it as deleting. A deleting machine gets no read of its log. When the journal
+  cannot be written, the machine gets one delete and then one `machine-end`: `gone`,
+  `deleting` or `delete_failed`, as the delete returned. Until the delete returns
+  gone, each watch deletes the machine again with no read of its log, also once the
+  list leaves it out. A `gone` that is not accepted is sent again with the waits of
+  an `ended` entry, until Qory Apiary accepts it or returns a signed 400, 403 or 404.
+  The provisioner keeps that machine and that `gone` in memory only, so a restart
+  loses them, and Qory Apiary then frees the slot by its time limit. A deleting
+  machine whose key is not a dispatch id is left as it is.
+- For 5 minutes after Qory Apiary accepts `gone` for a dispatch, a listed machine
+  with its key is not taken for a stray, because a vendor's list can still show a
+  machine whose delete returned gone.
+- A release of a claimed dispatch removes the journal entry only when it returns 204.
+  After `409 machine_exists`, `410 gone`, `409 lease_expired` or a failed request,
+  the entry stays in the phase `claimed`, both after a make that failed and after a
+  restart. The watch adopts a machine listed with its key. When a list that arrives
+  after the lifetime and 15 minutes from the claim has no machine with the key, the
+  dispatch gets `gone` with no delete. A failed list leads to no `gone`. Until Qory
+  Apiary accepts `gone`, the entry stays in the phase `ended`.
 - The README describes Hive as vendor-agnostic: Hive reaches each hosting vendor through
   that vendor's machine adapter, by `contracts/machines/v1` of qoryai/integrations, and
   the AWS EC2 adapter is the one machine adapter in this repository. It adds the
@@ -146,6 +181,20 @@ The changes to Hive that no release contains yet, in the shape of
   machine is deleted. After, it reads "Read the lines of docker.service above this line
   in the machine log for the cause".
 
+### Removed
+
+- The provisioner's settings have no `max_machines`, and the provisioner claims a
+  dispatch whatever the number of machines that exist. The pool's Machine limit in
+  Qory Apiary is the only limit on how many machines exist at once. Before, a settings
+  file without `max_machines` capped the provisioner at one machine. A settings file
+  that has `max_machines` fails with the error `Remove the unknown members from the
+  settings file: "max_machines".`
+- `aws-ec2.json` has no `max_root_gib`. The disk of each machine comes only from the
+  run's machine spec in Qory Apiary, and each offer of `check` has a disk of 16384
+  GiB, the largest gp3 volume. A file that has `max_root_gib` fails with the error
+  `Remove every member other than subnet_id, security_group_id, image_id and tags
+  from aws-ec2.json.`
+
 ### Fixed
 
 - `qory-machine.service` sets `SuccessAction=poweroff` and `FailureAction=poweroff` in
@@ -154,13 +203,26 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Upgrading
 
-- In `aws-ec2.json`, replace `sizes` with `instance_types`, a list of the instance
-  types that `sizes` had. Without it, `check` fails, and the error starts with the fix.
+- Remove `max_machines` from the provisioner's settings file, and set the Machine
+  limit of the node pool in Qory Apiary instead. With the key, `serve` exits with
+  status 1.
+- Remove `max_root_gib` from `aws-ec2.json`, and remove the `ec2:VolumeSize` condition
+  from the `LaunchVolume` statement of the instance role's policy. With the condition,
+  `make` fails with `UnauthorizedOperation` for a disk above its value.
+- Remove `sizes` from `aws-ec2.json`. With it, `check` and `make` fail, and the error
+  starts with the fix.
 - Add `ec2:DescribeInstanceTypes`, `ec2:DescribeInstanceTypeOfferings` and
-  `ec2:DescribeSubnets` to the `Describe` statement of the instance role policy, as the
-  README section "Instance role policy" lists. Without them, `check` fails with an
-  error that starts with "Give the instance role the EC2 rights that the EC2 machine
-  adapter needs".
+  `ec2:DescribeSubnets` to the `Describe` statement of the instance role policy, as
+  the README section "Instance role policy" lists. Without them, `check` and `make`
+  fail with an error that starts with "Give the instance role the EC2 rights that the
+  EC2 machine adapter needs".
+- Add the statement `ReadPrices`, `pricing:GetProducts` on `*`, to the instance role
+  policy, and allow HTTPS to `api.pricing.us-east-1.amazonaws.com`. Without them, the
+  adapter logs one line for each failed lookup, tries the next lookup 1 hour later,
+  and in between orders the types of one size by name.
+- Give the adapter a writable home folder, or set `XDG_CACHE_HOME`, so the cache file
+  stays between calls. Without one, each `check` and `make` reads the instance types
+  and prices from AWS.
 - Run this version with a Qory Apiary that sends `machine_spec` in each claim. The
   provisioner releases each claim without one.
 - In a machine image for EC2, install and enable `qory-machine-data-aws-ec2.service`
