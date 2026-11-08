@@ -64,6 +64,8 @@ func (l *loop) watchOnce(ctx context.Context) {
 		l.Log.Warn("listing the pool's machines failed", errorAttr(err, nil))
 		return
 	}
+	// The no-record gone of a claimed entry counts from the time the list arrived.
+	listedAt := l.Clock.Now()
 	byKey := machinesByKey(list.Machines)
 	for _, e := range before {
 		if ctx.Err() != nil {
@@ -83,7 +85,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 		m, found := byKey[e.DispatchID]
 		if e.Phase == journal.PhaseClaimed {
 			var ok bool
-			if e, ok = l.adopt(ctx, e, m, found); !ok {
+			if e, ok = l.adopt(ctx, e, m, found, listedAt); !ok {
 				continue
 			}
 		}
@@ -110,11 +112,12 @@ func (l *loop) watchOnce(ctx context.Context) {
 	}
 }
 
-// adopt acts on the claimed entry e, given the lookup of its machine m. It returns
-// the entry made with the machine's id and true when the machine is listed and not
-// deleting. Otherwise it cleans up the machine, sends gone for the entry or leaves
-// it, and returns false.
-func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, found bool) (journal.Entry, bool) {
+// adopt acts on the claimed entry e, given the lookup of its machine m in the list that
+// arrived at listedAt. It returns the entry made with the machine's id and true when
+// the machine is listed and not deleting. Otherwise it cleans up the machine, sends
+// gone for the entry or leaves it, and returns false. Gone with no machine needs a
+// list that arrived more than the entry's lifetime and 15 minutes after the claim.
+func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, found bool, listedAt time.Time) (journal.Entry, bool) {
 	attrs := []any{slog.String("dispatch_id", e.DispatchID)}
 	if found {
 		attrs = append(attrs, slog.String("machine_id", m.ID), slog.String("state", m.State))
@@ -126,7 +129,7 @@ func (l *loop) adopt(ctx context.Context, e journal.Entry, m contracts.Machine, 
 		e.MachineID = m.ID
 		l.cleanUpLogged(ctx, e)
 		return e, false
-	case !found && l.Clock.Now().Sub(l.claimedAt(e.DispatchID)) > lifetime:
+	case !found && listedAt.Sub(l.claimedAt(e.DispatchID)) > lifetime:
 		// The machine powered off at the end of its lifetime, if it ever started, so
 		// the dispatch ends with gone and no delete.
 		l.Log.Info("no machine is listed for the claimed dispatch after its lifetime and 15 minutes", attrs...)
@@ -506,10 +509,12 @@ func (l *loop) setEnded(e journal.Entry, attrs []any) bool {
 // sendMachineEnd sends state for the dispatch, with one try, and returns whether the
 // post is done. It sends a state only when it differs from the last one done for the
 // dispatch. A dispatch whose posts stopped gets none. A post that is not sent for those
-// reasons ends the count of any failing state. A post is done on 204,
-// [ErrMachineEndDone] and [ErrMachineEndStopped]. Any other failure pauses machine-end
-// until the next watch starts. While they are paused, a post is not sent and counts as
-// failed. The next watch sends the state again.
+// reasons ends the count of any failing state. A post is done on 204 and
+// [ErrMachineEndStopped], and on [ErrMachineEndUnusable] for deleting and
+// delete_failed. Gone is done only on 204 or [ErrMachineEndStopped], as the contract
+// requires, so [ErrMachineEndUnusable] to gone is a failure. Any other failure pauses
+// machine-end until the next watch starts. While they are paused, a post is not sent
+// and counts as failed. The next watch sends the state again.
 func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, attrs []any) bool {
 	last := l.lastMachineEnd(dispatchID)
 	if last == machineEndStopped || last == state {
@@ -531,7 +536,7 @@ func (l *loop) sendMachineEnd(ctx context.Context, dispatchID, state string, att
 	case errors.Is(err, ErrMachineEndStopped):
 		l.Log.Warn("sending machine-end failed, and the dispatch gets no more machine-end", append(attrs, errorAttr(err, nil))...)
 		record = machineEndStopped
-	case errors.Is(err, ErrMachineEndDone):
+	case errors.Is(err, ErrMachineEndUnusable) && state != contracts.MachineEndGone:
 		l.Log.Warn("sending machine-end failed, and a later try cannot change the answer", append(attrs, errorAttr(err, nil))...)
 	default:
 		l.Log.Warn("sending machine-end failed", append(attrs, errorAttr(err, nil))...)

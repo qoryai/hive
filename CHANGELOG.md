@@ -123,9 +123,10 @@ The changes to Hive that no release contains yet, in the shape of
   watch sends no more `machine-end`, and its deletes and `dispatched` go on. So a Qory
   Apiary with no `machine-end` route costs one failed post per watch.
 - When the post of `gone` fails or waits for the next watch, the machine's entry stays
-  in the phase `ended` until Qory Apiary accepts `gone`, or returns a signed 400, 403
-  or 404. The provisioner sends `gone` again 1 minute after the first failure, and
-  each later failure doubles the wait, up to 1 hour. A restart starts the waits again.
+  in the phase `ended` until Qory Apiary accepts `gone` with the signed 204, or
+  returns a signed 400, 403 or 404. Any other signed 2xx counts as a failure. The
+  provisioner sends `gone` again 1 minute after the first failure, and each later
+  failure doubles the wait, up to 1 hour. A restart starts the waits again.
 - A post of `deleting` or `delete_failed` that keeps failing stops 24 hours after its
   first failure. The provisioner logs an error, and a later state goes out as usual.
 - A machine that is deleting, or that is still not listed 5 minutes after its make, gets
@@ -148,9 +149,10 @@ The changes to Hive that no release contains yet, in the shape of
 - A release of a claimed dispatch removes the journal entry only when it returns 204.
   After `409 machine_exists`, `410 gone`, `409 lease_expired` or a failed request,
   the entry stays in the phase `claimed`, both after a make that failed and after a
-  restart. The watch adopts a machine listed with its key. When no machine is listed
-  by the end of the lifetime and 15 minutes, the dispatch gets `gone` with no delete.
-  Until Qory Apiary accepts `gone`, the entry stays in the phase `ended`.
+  restart. The watch adopts a machine listed with its key. When a list that arrives
+  after the lifetime and 15 minutes from the claim has no machine with the key, the
+  dispatch gets `gone` with no delete. A failed list leads to no `gone`. Until Qory
+  Apiary accepts `gone`, the entry stays in the phase `ended`.
 - The README describes Hive as vendor-agnostic: Hive reaches each hosting vendor through
   that vendor's machine adapter, by `contracts/machines/v1` of qoryai/integrations, and
   the AWS EC2 adapter is the one machine adapter in this repository. It adds the

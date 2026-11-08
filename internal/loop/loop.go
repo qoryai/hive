@@ -107,9 +107,11 @@ var (
 	// ErrMachineExists is 409 machine_exists: a release came after dispatched, or after
 	// the machine redeemed its run code.
 	ErrMachineExists = errors.New("409 machine_exists")
-	// ErrMachineEndDone is a signed answer to machine-end that breaks the contract. The
-	// post counts as done.
-	ErrMachineEndDone = errors.New("machine-end is done")
+	// ErrMachineEndUnusable is a signed answer to machine-end that breaks the
+	// contract, such as a 2xx other than 204. A post of deleting or delete_failed
+	// counts as done. A post of gone counts as failed and is sent again, because gone
+	// needs the 204.
+	ErrMachineEndUnusable = errors.New("a signed machine-end answer that breaks the contract")
 	// ErrMachineEndStopped is a signed 400, 403 or 404 to machine-end. The post counts as
 	// done, the dispatch gets no more machine-end, and its deletes go on.
 	ErrMachineEndStopped = errors.New("machine-end is stopped for the dispatch")
@@ -157,8 +159,8 @@ type Apiary interface {
 	// longer one.
 	MachineLog(ctx context.Context, dispatchID, log string, truncated bool) error
 	// MachineEnd sends how the removal of the dispatch's machine went, with one try and
-	// no retries: deleting, gone or delete_failed. Its error wraps [ErrMachineEndDone] or
-	// [ErrMachineEndStopped] for those answers.
+	// no retries: deleting, gone or delete_failed. Its error wraps
+	// [ErrMachineEndUnusable] or [ErrMachineEndStopped] for those answers.
 	MachineEnd(ctx context.Context, dispatchID, state string) error
 }
 

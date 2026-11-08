@@ -168,6 +168,8 @@ type fakeApiary struct {
 	// of tries.
 	endErr   map[string]error
 	endTries int
+	// onEnd, when set, runs after each machine-end is recorded, outside the lock.
+	onEnd func()
 }
 
 func newApiary() *fakeApiary {
@@ -219,10 +221,14 @@ func (a *fakeApiary) MachineLog(_ context.Context, dispatchID, log string, trunc
 
 func (a *fakeApiary) MachineEnd(_ context.Context, dispatchID, state string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.calls = append(a.calls, "machine-end "+dispatchID+" "+state)
 	a.endTries++
-	return a.endErr[state]
+	err, onEnd := a.endErr[state], a.onEnd
+	a.mu.Unlock()
+	if onEnd != nil {
+		onEnd()
+	}
+	return err
 }
 
 // takeEndTries returns the number of machine-end tries since the last takeEndTries.

@@ -350,7 +350,7 @@ func TestToLoop(t *testing.T) {
 func TestToLoopEnd(t *testing.T) {
 	for _, c := range []struct{ client, loop error }{
 		{provisioner.ErrMachineEndStopped, loop.ErrMachineEndStopped},
-		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndDone},
+		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndUnusable},
 	} {
 		err := fmt.Errorf("the machine end of dp_0123456789abcdef: %w", c.client)
 		if got := toLoopEnd(err); !errors.Is(got, c.loop) || !errors.Is(got, c.client) || got.Error() != err.Error() {
@@ -392,12 +392,12 @@ func TestApiaryMachineEnd(t *testing.T) {
 		t.Errorf("an unknown dispatch: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 200, Body: `{}`})
-	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndUnusable) {
 		t.Errorf("a signed 200: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 404, Unsigned: true})
 	err = a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone)
-	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndDone) {
+	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndUnusable) {
 		t.Errorf("an unsigned 404: %v, want a failure the loop retries", err)
 	}
 }

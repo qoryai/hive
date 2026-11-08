@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -637,6 +638,30 @@ func TestTheNoRecordGoneWaitsForAList(t *testing.T) {
 	h.machines.mu.Lock()
 	h.machines.listErr = nil
 	h.machines.mu.Unlock()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestTheNoRecordGoneCountsFromTheList sends no gone for a kept claimed entry when the
+// list arrived at its lifetime and 15 minutes, though the check runs a minute later:
+// the post of gone for an ended entry before it in the journal takes that minute. The
+// next list, which arrives after the limit, leads to gone.
+func TestTheNoRecordGoneCountsFromTheList(t *testing.T) {
+	h := newHarness(t)
+	h.setEntries(journal.Entry{DispatchID: dispatchB, Phase: journal.PhaseEnded, MachineID: "i-b", MaxLifetimeMinutes: lifetime}, keptClaimed)
+	h.apiary.releaseErr = machineExists
+	var once sync.Once
+	h.apiary.onEnd = func() { once.Do(func() { h.clock.Advance(time.Minute) }) }
+	h.start()
+	h.apiary.takeCalls()
+	h.clock.Advance(30 * time.Minute)
+	h.clock.waitPending(t, loop.WatchInterval)
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchB + " gone"})
+	equal(t, "the journal", h.entries(), []journal.Entry{keptClaimed})
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)

@@ -17,9 +17,9 @@ import (
 // The errors of a post of machine-end: one that a later try can change, one that the
 // client returns for a signed answer that breaks the contract, and one for a signed 403.
 var (
-	endFailed  = errors.New("no answer from Qory Apiary")
-	endDone    = fmt.Errorf("Qory Apiary's answer breaks the contract: %w", loop.ErrMachineEndDone)
-	endStopped = fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrMachineEndStopped)
+	endFailed   = errors.New("no answer from Qory Apiary")
+	endUnusable = fmt.Errorf("Qory Apiary's answer breaks the contract: %w", loop.ErrMachineEndUnusable)
+	endStopped  = fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrMachineEndStopped)
 )
 
 // stateLimitLine is the log line of a deleting or delete_failed dropped at
@@ -178,12 +178,11 @@ func TestAFailedPostIsRetried(t *testing.T) {
 }
 
 // TestAnUnusableAnswerCountsAsDone posts deleting once when the answer breaks the
-// contract, logs it once, and still removes the entry when gone gets the same answer.
+// contract, and logs it once.
 func TestAnUnusableAnswerCountsAsDone(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
-	h.apiary.setEnd("deleting", endDone)
-	h.apiary.setEnd("gone", endDone)
+	h.apiary.setEnd("deleting", endUnusable)
 	stoppedMachine(h)
 	h.tick()
 	h.tick()
@@ -192,8 +191,34 @@ func TestAnUnusableAnswerCountsAsDone(t *testing.T) {
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
 	equal(t, "the journal", h.entries(), nil)
-	if n := len(h.find("sending machine-end failed, and a later try cannot change the answer")); n != 2 {
-		t.Errorf("the log has %d lines for the two unusable answers", n)
+	if n := len(h.find("sending machine-end failed, and a later try cannot change the answer")); n != 1 {
+		t.Errorf("the log has %d lines for the unusable answer", n)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAnUnusableAnswerToGoneIsRetried keeps the entry in the phase ended when gone gets
+// a signed answer that breaks the contract, such as a 2xx other than 204, and sends
+// gone again with the waits until Qory Apiary accepts it.
+func TestAnUnusableAnswerToGoneIsRetried(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setEnd("gone", endUnusable)
+	stoppedMachine(h)
+	h.tick()
+	equal(t, "Qory Apiary's calls", withoutLogs(h.apiary.takeCalls()), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), []journal.Entry{ended(dispatchA, "i-a")})
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	h.apiary.setEnd("gone", nil)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), nil)
+	if n := len(h.find("sending machine-end failed, and a later try cannot change the answer")); n != 0 {
+		t.Errorf("the log has %d lines that count gone as done", n)
 	}
 	if err := h.stop(); err != nil {
 		t.Error(err)
