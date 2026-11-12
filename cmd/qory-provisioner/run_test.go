@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"github.com/qoryai/hive/internal/provisioner/provisionertest"
 	"github.com/qoryai/hive/internal/state"
 	"github.com/qoryai/integrations/contracts"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // The markers of the secrets. No log line, error, argument, file outside the state
@@ -323,6 +325,7 @@ func TestToLoop(t *testing.T) {
 		{provisioner.ErrGone, loop.ErrGone},
 		{provisioner.ErrLeaseExpired, loop.ErrLeaseExpired},
 		{provisioner.ErrMachineExists, loop.ErrMachineExists},
+		{provisioner.ErrForbidden, loop.ErrForbidden},
 	} {
 		err := fmt.Errorf("the release of dp_0123456789abcdef: %w", c.client)
 		got := toLoop(err)
@@ -331,9 +334,10 @@ func TestToLoop(t *testing.T) {
 		}
 	}
 	for _, err := range []error{
-		provisioner.ErrForbidden, provisioner.ErrNotFound, provisioner.ErrMachineLogExists, provisioner.ErrNoGateway,
+		provisioner.ErrNotFound, provisioner.ErrMachineLogExists, provisioner.ErrNoGateway,
 		provisioner.ErrRateLimited, provisioner.ErrUnsigned, provisioner.ErrTooLarge, provisioner.ErrUnreachable,
 		provisioner.ErrAnswerUnusable, context.Canceled,
+		&provisioner.Refusal{What: "the dispatched for dp_0123456789abcdef", Status: 403, Code: "forbidden"},
 	} {
 		if got := toLoop(err); got != err {
 			t.Errorf("%v: got %v, want it as it is", err, got)
@@ -402,6 +406,75 @@ func TestApiaryMachineEnd(t *testing.T) {
 	}
 }
 
+// TestARepeatDispatchedWithNoType sends dispatched with no machine type through the
+// wrapper and the fake Qory Apiary, as the watch does for a listed machine with no
+// journal entry, after a first dispatched with a type. The fake returns what Qory
+// Apiary returns to a repeat dispatched: a signed 204 for a dispatch that lives, 410
+// gone for one that ended, and a signed 403 forbidden for an unknown one. Each request
+// passes dispatched.schema.json of the pinned contracts, and the first dispatched's
+// type stays recorded.
+func TestARepeatDispatchedWithNoType(t *testing.T) {
+	srv := provisionertest.New(t)
+	a := apiary{client: srv.Client()}
+	ctx := context.Background()
+	srv.Offer(provisionertest.Work{}, provisionertest.Work{})
+	var ids []string
+	for range 2 {
+		c, ok, err := a.Claim(ctx, fakeOffers)
+		if !ok || err != nil {
+			t.Fatalf("claim: %v, %v", ok, err)
+		}
+		ids = append(ids, c.DispatchID)
+	}
+	const machine = "i-0123456789abcdef0"
+	for _, id := range ids {
+		if err := a.Dispatched(ctx, id, machine, fakeType); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv.End(ids[1])
+	if err := a.Dispatched(ctx, ids[0], machine, ""); err != nil {
+		t.Errorf("a repeat dispatched of a live dispatch: %v, want the 204", err)
+	}
+	for name, c := range map[string]struct {
+		id   string
+		want error
+	}{
+		"an ended dispatch":   {ids[1], loop.ErrGone},
+		"an unknown dispatch": {"dp_0123456789abcdef", loop.ErrForbidden},
+	} {
+		if err := a.Dispatched(ctx, c.id, machine, ""); !errors.Is(err, c.want) {
+			t.Errorf("a repeat dispatched of %s: %v, want %v", name, err, c.want)
+		}
+	}
+	if d, _ := srv.Dispatch(ids[0]); d.MachineType != fakeType {
+		t.Errorf("the dispatch has the machine type %q, want %q", d.MachineType, fakeType)
+	}
+	schema, err := contracts.CompileProvisioner("dispatched.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repeats int
+	for _, c := range srv.Calls() {
+		if c.Route != provisionertest.RouteDispatched {
+			continue
+		}
+		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(c.Body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := schema.Validate(doc); err != nil {
+			t.Errorf("a dispatched of %s fails dispatched.schema.json: %v", c.DispatchID, err)
+		}
+		if _, typed := doc.(map[string]any)["machine_type"]; !typed {
+			repeats++
+		}
+	}
+	if repeats != 3 {
+		t.Errorf("%d dispatched have no machine type, want 3", repeats)
+	}
+}
+
 // TestApiaryRefusals sends real refusals through the wrapper and the fake Qory Apiary.
 func TestApiaryRefusals(t *testing.T) {
 	srv := provisionertest.New(t)
@@ -444,7 +517,7 @@ func TestApiaryRefusals(t *testing.T) {
 		"release after dispatched":          {a.Release(ctx, ids[2], "the machine was not made"), loop.ErrMachineExists},
 		"release of an ended dispatch":      {a.Release(ctx, ids[0], "the machine was not made"), loop.ErrGone},
 		"release of a stale dispatch":       {a.Release(ctx, ids[1], "the machine was not made"), loop.ErrLeaseExpired},
-		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine, fakeType), provisioner.ErrForbidden},
+		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine, fakeType), loop.ErrForbidden},
 	} {
 		if !errors.Is(c.err, c.want) {
 			t.Errorf("%s: %v, want %v", name, c.err, c.want)

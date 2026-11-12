@@ -45,10 +45,12 @@ func (l *loop) watch(ctx context.Context) {
 //   - A made or dispatched entry whose machine is not listed is cleaned up only after
 //     [ListGrace]. Inside the grace, it gets dispatched as usual.
 //
-// Then the watch acts on each pending stray, as [loop.watchPending] does. Last, it
-// cleans up each listed machine whose key had no journal entry, neither before the
-// list nor after it: a make that starts during the list has a claimed entry after it.
-// The watch skips a machine whose key is a pending stray, and one whose key had gone
+// Then the watch acts on each pending stray, as [loop.watchPending] does. Last, it acts
+// on each listed machine whose key had no journal entry, neither before the list nor
+// after it: a make that starts during the list has a claimed entry after it. The
+// watch takes such a machine back for its dispatch when [loop.takeBack] does, and
+// cleans it up otherwise. A key gets at most one dispatched per watch. The
+// watch skips a machine whose key is a pending stray, and one whose key had gone
 // done in the last [ListGrace], because a vendor's list can show a machine for a while
 // after its delete returned gone. It also skips a deleting machine whose key is not a
 // dispatch id, because it has no dispatch to send machine-end for.
@@ -106,7 +108,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 		}
 		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
 		// A second machine with this key is listed as a stray once the entry has left.
-		if l.cleanUpStray(ctx, m) {
+		if l.takeBack(ctx, m) || l.cleanUpStray(ctx, m) {
 			known[m.Key] = true
 		}
 	}
@@ -300,6 +302,50 @@ func (l *loop) removeEnded(e journal.Entry) bool {
 func (l *loop) cleanUpLogged(ctx context.Context, e journal.Entry) {
 	l.setLogged(e.MachineID, true)
 	l.cleanUp(ctx, e)
+}
+
+// takeBack sends dispatched with no machine type for the listed machine m, whose key
+// has no journal entry, as the journal may have been lost while the machine runs a
+// dispatch. It returns whether the machine stays. A machine that is deleting or
+// stopped, or whose key is not a dispatch id, gets no dispatched and does not stay.
+//   - On 204, the machine gets a dispatched entry with the lifetime
+//     [journal.MaxLifetime], because the claim's lifetime is not known, and its make
+//     counts from now. The watch then acts on it as on any dispatched entry.
+//   - On 410 gone, 409 lease_expired or a signed 403 forbidden, the dispatch ended or
+//     is not the pool's, and the machine does not stay.
+//   - After any other failure, such as no answer, a server error or an answer with no
+//     valid signature, the machine stays and the next watch sends dispatched again,
+//     until the machine is older than [journal.MaxLifetime] by its start time in the
+//     list. Then it does not stay.
+//
+// After a failed write of the journal, the machine stays, and the next watch sends
+// dispatched again.
+func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
+	if !journal.IsDispatchID(m.Key) || m.State == contracts.MachineDeleting || m.State == contracts.MachineStopped {
+		return false
+	}
+	attrs := []any{slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID)}
+	err := l.Apiary.Dispatched(ctx, m.Key, m.ID, "")
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrGone), errors.Is(err, ErrLeaseExpired), errors.Is(err, ErrForbidden):
+		l.Log.Info("the dispatch of the machine ended or is not the pool's", append(attrs, errorAttr(err, nil))...)
+		return false
+	case l.Clock.Now().Sub(adapterio.Started(m)) > time.Duration(journal.MaxLifetime)*time.Minute:
+		l.Log.Warn("sending dispatched failed, and the machine is older than the longest lifetime", append(attrs, errorAttr(err, nil))...)
+		return false
+	default:
+		l.Log.Warn("sending dispatched failed, and the machine stays until the next watch", append(attrs, errorAttr(err, nil))...)
+		return true
+	}
+	e := journal.Entry{DispatchID: m.Key, Phase: journal.PhaseDispatched, MachineID: m.ID, MaxLifetimeMinutes: journal.MaxLifetime}
+	if err := l.Journal.Set(e); err != nil {
+		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
+		return true
+	}
+	l.setTime(l.made, m.Key)
+	l.Log.Info("took back the machine for its dispatch", attrs...)
+	return true
 }
 
 // cleanUpStray cleans up the listed machine m, whose key has no journal entry, and

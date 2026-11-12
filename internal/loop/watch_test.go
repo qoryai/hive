@@ -239,18 +239,19 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 	}
 }
 
-// TestAStrayIsCleanedUp cleans up a listed machine whose key has no journal entry,
-// with its key as the dispatch id, and leaves a deleting stray whose key is not a
-// dispatch id as it is, with no entry and no machine-end.
+// TestAStrayIsCleanedUp cleans up a listed machine whose key has no journal entry and
+// whose dispatch ended, with its key as the dispatch id, and leaves a deleting stray
+// whose key is not a dispatch id as it is, with no entry and no machine-end.
 func TestAStrayIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "stray log"
+	h.apiary.setDispatched(dispatchC, loop.ErrGone)
 	h.start()
 	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
 	h.machines.add("i-d", "not-a-dispatch", contracts.MachineDeleting, epoch)
 	h.machines.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s"), "machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-s", "delete i-s"})
 	equal(t, "the journal", h.entries(), nil)
 	lines := h.find("found a machine with no journal entry")
@@ -664,6 +665,186 @@ func TestTheNoRecordGoneCountsFromTheList(t *testing.T) {
 	equal(t, "the journal", h.entries(), []journal.Entry{keptClaimed})
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// strayDispatched is the dispatched that the watch sends for the listed machine of the
+// dispatch id when the journal has no entry for it: with no machine type, because the
+// list has none.
+func strayDispatched(id, machine string) string { return "dispatched " + id + " " + machine + " -" }
+
+// takenBack is the entry of a machine that the watch took back for the dispatch id.
+func takenBack(id, machine string) journal.Entry {
+	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: journal.MaxLifetime}
+}
+
+// TestAStrayOfALiveDispatchIsTakenBack takes back a listed machine with no journal
+// entry when dispatched for its key returns 204. The watch then sends dispatched for it
+// as for any dispatched entry, and once the dispatch ends, it cleans up the machine and
+// sends gone once.
+func TestAStrayOfALiveDispatchIsTakenBack(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch.Add(-2*time.Hour))
+	h.machines.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-s")})
+	lines := h.find("took back the machine for its dispatch")
+	if len(lines) != 1 || lines[0]["dispatch_id"] != dispatchC || lines[0]["machine_id"] != "i-s" || lines[0]["level"] != "INFO" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	h.apiary.setDispatched(dispatchC, loop.ErrGone)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s"), "machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-s", "delete i-s"})
+	equal(t, "the journal", h.entries(), nil)
+	for range 3 {
+		h.tick()
+	}
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	if n := len(h.find("found a machine with no journal entry")); n != 1 {
+		t.Errorf("the log has %d lines for a stray", n)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStrayOfAnEndedDispatchIsCleanedUp cleans up a listed machine with no journal
+// entry when dispatched for its key returns 410 gone, 409 lease_expired or a signed
+// 403 forbidden, and sends gone.
+func TestAStrayOfAnEndedDispatchIsCleanedUp(t *testing.T) {
+	for name, err := range map[string]error{
+		"410 gone":          fmt.Errorf("Qory Apiary returned 410 gone: %w", loop.ErrGone),
+		"409 lease_expired": fmt.Errorf("Qory Apiary returned 409 lease_expired: %w", loop.ErrLeaseExpired),
+		"signed 403":        fmt.Errorf("Qory Apiary returned 403 forbidden: %w", loop.ErrForbidden),
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.apiary.setDispatched(dispatchC, err)
+			h.start()
+			h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
+			h.machines.takeCalls()
+			h.tick()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s"), "machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
+			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-s", "delete i-s"})
+			equal(t, "the journal", h.entries(), nil)
+			if n := len(h.find("took back the machine for its dispatch")); n != 0 {
+				t.Errorf("the log has %d lines for a machine taken back", n)
+			}
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+// TestAStrayIsKeptWhileDispatchedFails keeps a listed machine with no journal entry
+// while dispatched for its key fails with no refusal, such as no answer, a server error
+// or an answer with no valid signature, and takes it back once dispatched returns 204.
+func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
+	h := newHarness(t)
+	h.apiary.setDispatched(dispatchC, errors.New("no answer from Qory Apiary"))
+	h.start()
+	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
+	h.machines.takeCalls()
+	for range 2 {
+		h.tick()
+		equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+		equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+		equal(t, "the journal", h.entries(), nil)
+	}
+	if n := len(h.find("sending dispatched failed, and the machine stays until the next watch")); n != 2 {
+		t.Errorf("the log has %d lines for a failed dispatched", n)
+	}
+	h.apiary.setDispatched(dispatchC, nil)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-s")})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStrayPastTheLongestLifetimeIsCleanedUp cleans up a listed machine with no
+// journal entry when dispatched for its key fails and the machine is older than the
+// longest lifetime by its start time in the list. A machine exactly at that bound
+// stays.
+func TestAStrayPastTheLongestLifetimeIsCleanedUp(t *testing.T) {
+	h := newHarness(t)
+	failed := errors.New("no answer from Qory Apiary")
+	h.apiary.setDispatched(dispatchC, failed)
+	h.apiary.setDispatched(dispatchD, failed)
+	// The watch runs at epoch + 60 s.
+	at := epoch.Add(loop.WatchInterval - journal.MaxLifetime*time.Minute)
+	h.start()
+	h.machines.add("i-old", dispatchC, contracts.MachineRunning, at.Add(-time.Second))
+	h.machines.add("i-edge", dispatchD, contracts.MachineRunning, at)
+	h.machines.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
+		strayDispatched(dispatchC, "i-old"), "machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone",
+		strayDispatched(dispatchD, "i-edge"),
+	})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-old", "delete i-old"})
+	equal(t, "the journal", h.entries(), nil)
+	lines := h.find("sending dispatched failed, and the machine is older than the longest lifetime")
+	if len(lines) != 1 || lines[0]["machine_id"] != "i-old" || lines[0]["level"] != "WARN" {
+		t.Errorf("the log lines are %v", lines)
+	}
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStrayWhoseTakeBackWriteFailsStays keeps a listed machine with no journal entry
+// when dispatched returns 204 and the journal cannot be written. The next watch sends
+// dispatched again and takes the machine back.
+func TestAStrayWhoseTakeBackWriteFailsStays(t *testing.T) {
+	h := newHarness(t)
+	failing := &setFailure{}
+	h.wrap = func(j loop.Journal) loop.Journal { failing.Journal = j; return failing }
+	h.start()
+	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
+	h.machines.takeCalls()
+	failing.setFail(true)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), nil)
+	if n := len(h.find("writing the journal failed")); n != 1 {
+		t.Errorf("the log has %d lines for a failed write", n)
+	}
+	failing.setFail(false)
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-s")})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAStoppedStrayGetsNoDispatched cleans up a listed machine with no journal entry
+// that is stopped, with no dispatched: its run is over.
+func TestAStoppedStrayGetsNoDispatched(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	h.machines.add("i-s", dispatchC, contracts.MachineStopped, epoch)
+	h.machines.takeCalls()
+	h.tick()
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-log " + dispatchC + " false", "machine-end " + dispatchC + " gone"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-s", "delete i-s"})
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)

@@ -88,6 +88,17 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
+- A listed machine with no journal entry and a key in the shape of a dispatch id gets
+  `dispatched`, with no machine type, before any delete, so a provisioner whose
+  journal was lost, or a new provisioner after a key rotation, keeps the machines that
+  still run a dispatch. On 204, the provisioner adds the machine to the journal in the
+  phase `dispatched`, with the lifetime 1470 minutes, logs "took back the machine for
+  its dispatch", and then acts on it as on any other dispatched machine. On
+  `410 gone`, `409 lease_expired` or a signed `403 forbidden`, it cleans up the
+  machine. After any other failure, it keeps the machine and sends `dispatched` again
+  at the next watch, until the machine has run longer than 1470 minutes by its start
+  time in the list; then it cleans up the machine. A stopped or deleting machine gets
+  no `dispatched`.
 - `aws-ec2.json` has no `sizes`, and no list of instance types. Before, `sizes` set
   each size name of a make request, such as `standard`, to an instance type, and the
   provisioner made the size `standard` for a claim with no machine type. A file with
@@ -132,17 +143,17 @@ The changes to Hive that no release contains yet, in the shape of
 - A machine that is deleting, or that is still not listed 5 minutes after its make, gets
   a delete, and `gone` is posted for it. Before, the provisioner removed its entry with
   no delete.
-- A listed machine with no journal entry and a key in the shape of a dispatch id gets a
-  journal entry, and `machine-end` as any other machine does, also when the list
-  shows it as deleting. A deleting machine gets no read of its log. When the journal
-  cannot be written, the machine gets one delete and then one `machine-end`: `gone`,
-  `deleting` or `delete_failed`, as the delete returned. Until the delete returns
-  gone, each watch deletes the machine again with no read of its log, also once the
-  list leaves it out. A `gone` that is not accepted is sent again with the waits of
-  an `ended` entry, until Qory Apiary accepts it or returns a signed 400, 403 or 404.
-  The provisioner keeps that machine and that `gone` in memory only, so a restart
-  loses them, and Qory Apiary then frees the slot by its time limit. A deleting
-  machine whose key is not a dispatch id is left as it is.
+- A listed machine with no journal entry and a key in the shape of a dispatch id that
+  the provisioner cleans up gets a journal entry, and `machine-end` as any other
+  machine does, also when the list shows it as deleting. A deleting machine gets no
+  read of its log. When the journal cannot be written, the machine gets one delete and
+  then one `machine-end`: `gone`, `deleting` or `delete_failed`, as the delete
+  returned. Until the delete returns gone, each watch deletes the machine again with
+  no read of its log, also once the list leaves it out. A `gone` that is not accepted
+  is sent again with the waits of an `ended` entry, until Qory Apiary accepts it or
+  returns a signed 400, 403 or 404. The provisioner keeps that machine and that `gone`
+  in memory only, so a restart loses them, and Qory Apiary then frees the slot by its
+  time limit. A deleting machine whose key is not a dispatch id is left as it is.
 - For 5 minutes after Qory Apiary accepts `gone` for a dispatch, a listed machine
   with its key is not taken for a stray, because a vendor's list can still show a
   machine whose delete returned gone.

@@ -21,8 +21,10 @@
 //     stopped, or that ran longer than its lifetime and 15 minutes. It also cleans up
 //     a machine that is deleting, or that is still not listed 5 minutes after its
 //     make, with no read of its log. It adopts the listed machine of a claimed entry
-//     that stays because its release did not return 204. It also cleans up each
-//     listed machine that has no journal entry.
+//     that stays because its release did not return 204. For each listed machine
+//     that has no journal entry and a key in the shape of a dispatch id, it sends
+//     dispatched and, on 204, takes the machine back with a journal entry. It cleans
+//     up every other listed machine that has no journal entry.
 //
 // To clean up a machine, the loop reads the machine's log through the adapter,
 // uploads it to Qory Apiary, deletes the machine and sends machine-end, which tells
@@ -107,6 +109,9 @@ var (
 	// ErrMachineExists is 409 machine_exists: a release came after dispatched, or after
 	// the machine redeemed its run code.
 	ErrMachineExists = errors.New("409 machine_exists")
+	// ErrForbidden is a signed 403 forbidden: the dispatch is unknown or of another node
+	// pool.
+	ErrForbidden = errors.New("403 forbidden")
 	// ErrMachineEndUnusable is a signed answer to machine-end that breaks the
 	// contract, such as a 2xx other than 204. A post of deleting or delete_failed
 	// counts as done. A post of gone counts as failed and is sent again, because gone
@@ -148,8 +153,8 @@ type Apiary interface {
 	// claim's wait.
 	Claim(ctx context.Context, offers []contracts.MachineSpec) (Claim, bool, error)
 	// Dispatched sends dispatched for the dispatch, whose machine is machineID, of the
-	// vendor's type machineType, or "" when the make returned none. Its error wraps
-	// [ErrGone] or [ErrLeaseExpired] for those refusals.
+	// vendor's type machineType, or "" when no make returned one. Its error wraps
+	// [ErrGone], [ErrLeaseExpired] or [ErrForbidden] for those refusals.
 	Dispatched(ctx context.Context, dispatchID, machineID, machineType string) error
 	// Release gives the dispatch back, with a reason of 1 to 200 characters. Its error
 	// wraps [ErrGone], [ErrLeaseExpired] or [ErrMachineExists] for those refusals.

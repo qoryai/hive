@@ -17,8 +17,9 @@ const claimWait = provisioner.MaxWaitSeconds
 
 // apiary is the provisioner's client of Qory Apiary as the loop uses it, see
 // [loop.Apiary]. Each error keeps the client's text, and the errors 410 gone, 409
-// lease_expired and 409 machine_exists also match the loop's sentinel of the same
-// refusal. A machine end's errors match the loop's sentinels through [toLoopEnd].
+// lease_expired, 409 machine_exists and the signed 403 forbidden also match the loop's
+// sentinel of the same refusal. A machine end's errors match the loop's sentinels
+// through [toLoopEnd].
 type apiary struct {
 	client *provisioner.Client
 }
@@ -79,6 +80,7 @@ var sentinels = []struct{ client, loop error }{
 	{provisioner.ErrGone, loop.ErrGone},
 	{provisioner.ErrLeaseExpired, loop.ErrLeaseExpired},
 	{provisioner.ErrMachineExists, loop.ErrMachineExists},
+	{provisioner.ErrForbidden, loop.ErrForbidden},
 }
 
 // toLoop is err as the loop reads it: a [refusal] when errors.Is matches err against a
