@@ -114,7 +114,7 @@ dispatched for the dispatch:
   - After any other failure, serve keeps the machine and sends dispatched again 60
     seconds later. Once the machine has run longer than 1470 minutes and 15 minutes,
     serve deletes it.
-A stopped or deleting machine, and a machine whose key is not a dispatch id, gets no
+A stopped or deleting machine, and a machine whose key is not a dispatch id, get no
 dispatched. serve deletes such a machine, except a deleting machine whose key is not
 a dispatch id, which it leaves as it is. serve logs "found a machine with no journal
 entry" once for a key, at the first of the watches in a row that find the key with no
