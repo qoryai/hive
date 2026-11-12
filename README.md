@@ -79,8 +79,9 @@ the least machine that its run needs, and `serve` passes the spec unchanged to `
 machine was not made: the claim has no machine spec, so the provisioner cannot choose
 a machine". The answer of `make` contains the machine's type, such as `m7i.large`.
 `serve` keeps the type in the journal and sends it in each `dispatched` of the
-dispatch. A machine that `serve` finds by its key after a restart has no type, because
-the answer of `list` contains none, and its `dispatched` contains no type.
+dispatch. A machine that `serve` finds by its key after a restart, or takes back with
+no journal entry, has no type, because the answer of `list` contains none, and its
+`dispatched` contains no type.
 
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
@@ -93,15 +94,35 @@ when `make` runs longer than 2 minutes, or another command longer than 1 minute.
 ## Run one provisioner per node pool
 
 Run one provisioner per node pool. Every 60 seconds, `serve` lists the node pool's
-machines and deletes each machine whose dispatch has no entry in the journal in the
-provisioner's state folder, with the log line `found a machine with no journal
-entry`. Two provisioners of one node pool therefore delete each other's machines,
-also machines that run a dispatch.
+machines. For each machine whose dispatch has no entry in the journal in the
+provisioner's state folder, `serve` sends `dispatched` for the dispatch, with no
+machine type:
+
+- On 204, the dispatch still runs. `serve` adds the machine to the journal and logs
+  `took back the machine for its dispatch`. The journal has no record of the claim's
+  lifetime, so `serve` gives the machine the longest lifetime, 1470 minutes.
+- On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, `serve` deletes the
+  machine.
+- After any other failure, such as no answer, a server error or an answer with no
+  valid signature, `serve` keeps the machine and sends `dispatched` again at the next
+  watch. Once the machine has run longer than 1470 minutes and 15 minutes by its start
+  time in the list, `serve` deletes it.
+
+A stopped or deleting machine, and a machine whose key is not a dispatch id, get no
+`dispatched`. `serve` deletes such a machine, except a deleting machine whose key is
+not a dispatch id, which it leaves as it is. `serve` logs `found a machine with no
+journal entry` once for a key, at the first of the watches in a row that find the key
+with no entry.
+
+Two provisioners of one node pool each take back the other's machines: each sends
+`dispatched` for them, deletes them and sends `gone` when their dispatch ends. A
+provisioner may also send the first `dispatched` of a machine that the other just
+made, with no machine type.
 
 When you rotate the key, which means a new provisioner with a new access key for the
 node pool, stop the old provisioner before you start the new one. A new provisioner
-with a new state folder starts with an empty journal, so it deletes the machines that
-the old one made, also those that run a dispatch.
+with a new state folder starts with an empty journal. It takes back each machine of
+the old one whose dispatch still runs, and deletes the others.
 
 ## Enrol the access key
 
