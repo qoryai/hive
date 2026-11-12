@@ -325,7 +325,11 @@ type loop struct {
 	// goneDone is the time at which gone was done for each dispatch id, for
 	// [ListGrace].
 	goneDone map[string]time.Time
-	start    time.Time
+	// strays are the keys of the listed machines with no journal entry that the last
+	// watch acted on, so that a key is logged once while it stays a stray. Only the
+	// watch reads and writes it.
+	strays map[string]bool
+	start  time.Time
 }
 
 // madeAt is the time from which the list grace of the dispatch id counts.

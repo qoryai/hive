@@ -766,6 +766,9 @@ func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
 	if n := len(h.find("sending dispatched failed, and the machine stays until the next watch")); n != 2 {
 		t.Errorf("the log has %d lines for a failed dispatched", n)
 	}
+	if n := len(h.find("found a machine with no journal entry")); n != 1 {
+		t.Errorf("the log has %d lines for a stray, want 1 for the key", n)
+	}
 	h.apiary.setDispatched(dispatchC, nil)
 	h.tick()
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-s")})
@@ -777,16 +780,16 @@ func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
 }
 
 // TestAStrayPastTheLongestLifetimeIsCleanedUp cleans up a listed machine with no
-// journal entry when dispatched for its key fails and the machine is older than the
-// longest lifetime by its start time in the list. A machine exactly at that bound
-// stays.
+// journal entry when dispatched for its key fails and the machine ran longer than the
+// longest lifetime and 15 minutes by its start time in the list, the bound of an entry
+// taken back. A machine exactly at that bound stays.
 func TestAStrayPastTheLongestLifetimeIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	failed := errors.New("no answer from Qory Apiary")
 	h.apiary.setDispatched(dispatchC, failed)
 	h.apiary.setDispatched(dispatchD, failed)
 	// The watch runs at epoch + 60 s.
-	at := epoch.Add(loop.WatchInterval - journal.MaxLifetime*time.Minute)
+	at := epoch.Add(loop.WatchInterval - journal.MaxLifetime*time.Minute - loop.LifetimeGrace)
 	h.start()
 	h.machines.add("i-old", dispatchC, contracts.MachineRunning, at.Add(-time.Second))
 	h.machines.add("i-edge", dispatchD, contracts.MachineRunning, at)
@@ -798,7 +801,7 @@ func TestAStrayPastTheLongestLifetimeIsCleanedUp(t *testing.T) {
 	})
 	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"log i-old", "delete i-old"})
 	equal(t, "the journal", h.entries(), nil)
-	lines := h.find("sending dispatched failed, and the machine is older than the longest lifetime")
+	lines := h.find("sending dispatched failed, and the machine ran longer than the longest lifetime and 15 minutes")
 	if len(lines) != 1 || lines[0]["machine_id"] != "i-old" || lines[0]["level"] != "WARN" {
 		t.Errorf("the log lines are %v", lines)
 	}
@@ -848,5 +851,69 @@ func TestAStoppedStrayGetsNoDispatched(t *testing.T) {
 	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
+	}
+}
+
+// TestATakenBackMachineGetsTheListGraceFromItsTakeBack takes back a machine more than
+// the list grace after the start of Run, and then lists it no more. The entry counts
+// the list grace from the take-back, so the watch cleans up the machine only once the
+// grace has passed since then.
+func TestATakenBackMachineGetsTheListGraceFromItsTakeBack(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	for range ticksInGrace + 1 {
+		h.tick()
+	}
+	h.machines.add("i-s", dispatchC, contracts.MachineRunning, epoch)
+	h.tick()
+	equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-s")})
+	h.machines.drop("i-s")
+	h.apiary.takeCalls()
+	h.machines.takeCalls()
+	for range ticksInGrace - 1 {
+		h.tick()
+	}
+	equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+	calls := h.apiary.takeCalls()
+	if len(calls) != ticksInGrace-1 || slices.ContainsFunc(calls, func(c string) bool { return c != strayDispatched(dispatchC, "i-s") }) {
+		t.Errorf("Qory Apiary's calls are %q", calls)
+	}
+	equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-s")})
+	h.tick()
+	h.tick()
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"delete i-s"})
+	equal(t, "the journal", h.entries(), nil)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestARunningStrayComesBeforeADeletingOneOfItsKey takes back the running machine of a
+// live dispatch when the list also has a deleting machine with its key, in either
+// order. The deleting machine gets no entry, and the dispatch gets no gone.
+func TestARunningStrayComesBeforeADeletingOneOfItsKey(t *testing.T) {
+	for name, deletingFirst := range map[string]bool{"deleting first": true, "running first": false} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.lingering = true
+			h.start()
+			if deletingFirst {
+				h.machines.add("i-old", dispatchC, contracts.MachineDeleting, epoch)
+			}
+			h.machines.add("i-new", dispatchC, contracts.MachineRunning, epoch)
+			if !deletingFirst {
+				h.machines.add("i-old", dispatchC, contracts.MachineDeleting, epoch)
+			}
+			h.machines.takeCalls()
+			for range 2 {
+				h.tick()
+			}
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{strayDispatched(dispatchC, "i-new"), strayDispatched(dispatchC, "i-new")})
+			equal(t, "the adapter's calls", h.machines.takeCalls(), nil)
+			equal(t, "the journal", h.entries(), []journal.Entry{takenBack(dispatchC, "i-new")})
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }

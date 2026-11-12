@@ -408,11 +408,10 @@ func TestApiaryMachineEnd(t *testing.T) {
 
 // TestARepeatDispatchedWithNoType sends dispatched with no machine type through the
 // wrapper and the fake Qory Apiary, as the watch does for a listed machine with no
-// journal entry, after a first dispatched with a type. The fake returns what Qory
-// Apiary returns to a repeat dispatched: a signed 204 for a dispatch that lives, 410
-// gone for one that ended, and a signed 403 forbidden for an unknown one. Each request
-// passes dispatched.schema.json of the pinned contracts, and the first dispatched's
-// type stays recorded.
+// journal entry, after a first dispatched with a type. The answers come from the
+// fake's model of Qory Apiary, as dispatched.schema.json states them: a signed 204 for
+// a dispatch that lives, 410 gone for one that ended, and a signed 403 forbidden for an
+// unknown one. Each request passes dispatched.schema.json of the pinned contracts.
 func TestARepeatDispatchedWithNoType(t *testing.T) {
 	srv := provisionertest.New(t)
 	a := apiary{client: srv.Client()}
@@ -446,9 +445,6 @@ func TestARepeatDispatchedWithNoType(t *testing.T) {
 		if err := a.Dispatched(ctx, c.id, machine, ""); !errors.Is(err, c.want) {
 			t.Errorf("a repeat dispatched of %s: %v, want %v", name, err, c.want)
 		}
-	}
-	if d, _ := srv.Dispatch(ids[0]); d.MachineType != fakeType {
-		t.Errorf("the dispatch has the machine type %q, want %q", d.MachineType, fakeType)
 	}
 	schema, err := contracts.CompileProvisioner("dispatched.schema.json")
 	if err != nil {

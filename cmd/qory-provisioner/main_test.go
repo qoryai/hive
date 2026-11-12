@@ -47,16 +47,25 @@ group may write them only when it is gid 0, wheel, admin, or the owner's primary
 with the owner's name. Otherwise serve exits with status 1.
 
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
-machines. For each machine whose dispatch has no entry in the journal, serve logs
-"found a machine with no journal entry" and sends dispatched for the dispatch:
+machines. For each machine whose dispatch has no entry in the journal, serve sends
+dispatched for the dispatch:
   - On 204, serve adds the machine to the journal, with the longest lifetime of 1470
     minutes, and logs "took back the machine for its dispatch".
   - On 410 gone, 409 lease_expired or a signed 403 forbidden, serve deletes the
     machine.
   - After any other failure, serve keeps the machine and sends dispatched again 60
-    seconds later. Once the machine has run longer than 1470 minutes, serve deletes it.
-serve deletes a stopped machine, or one whose key is not a dispatch id, with no
-dispatched. Two provisioners of one node pool therefore act on each other's machines.
+    seconds later. Once the machine has run longer than 1470 minutes and 15 minutes,
+    serve deletes it.
+A stopped or deleting machine, and a machine whose key is not a dispatch id, gets no
+dispatched. serve deletes such a machine, except a deleting machine whose key is not
+a dispatch id, which it leaves as it is. serve logs "found a machine with no journal
+entry" once for a key, at the first of the watches in a row that find the key with no
+entry.
+
+Two provisioners of one node pool each take back the other's machines: each sends
+dispatched for them, deletes them and sends gone when their dispatch ends. A
+provisioner may also send the first dispatched of a machine that the other just made,
+with no machine type.
 
 When you rotate the key, which means a new provisioner with a new access key for the
 node pool, stop the old provisioner before you start the new one. A new provisioner

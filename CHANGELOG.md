@@ -96,9 +96,12 @@ The changes to Hive that no release contains yet, in the shape of
   its dispatch", and then acts on it as on any other dispatched machine. On
   `410 gone`, `409 lease_expired` or a signed `403 forbidden`, it cleans up the
   machine. After any other failure, it keeps the machine and sends `dispatched` again
-  at the next watch, until the machine has run longer than 1470 minutes by its start
-  time in the list; then it cleans up the machine. A stopped or deleting machine gets
-  no `dispatched`.
+  at the next watch, until the machine has run longer than 1470 minutes and 15 minutes
+  by its start time in the list; then it cleans up the machine. A stopped or deleting
+  machine gets no `dispatched`. Within a key, a machine that is not deleting gets
+  `dispatched` before a deleting machine gets an entry. The provisioner logs "found a
+  machine with no journal entry" once for a key, at the first of the watches in a row
+  that find the key with no entry.
 - `aws-ec2.json` has no `sizes`, and no list of instance types. Before, `sizes` set
   each size name of a make request, such as `standard`, to an instance type, and the
   provisioner made the size `standard` for a claim with no machine type. A file with

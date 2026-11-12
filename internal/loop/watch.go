@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -48,9 +49,11 @@ func (l *loop) watch(ctx context.Context) {
 // Then the watch acts on each pending stray, as [loop.watchPending] does. Last, it acts
 // on each listed machine whose key had no journal entry, neither before the list nor
 // after it: a make that starts during the list has a claimed entry after it. The
-// watch takes such a machine back for its dispatch when [loop.takeBack] does, and
-// cleans it up otherwise. A key gets at most one dispatched per watch. The
-// watch skips a machine whose key is a pending stray, and one whose key had gone
+// watch acts on the machines of one key in the order of [keyOrder]. It takes such a
+// machine back for its dispatch when [loop.takeBack] does, and cleans it up otherwise.
+// A key gets at most one dispatched per watch. The watch logs a key with no journal
+// entry once, at the first of the watches in a row that find the key with no entry.
+// The watch skips a machine whose key is a pending stray, and one whose key had gone
 // done in the last [ListGrace], because a vendor's list can show a machine for a while
 // after its delete returned gone. It also skips a deleting machine whose key is not a
 // dispatch id, because it has no dispatch to send machine-end for.
@@ -99,19 +102,54 @@ func (l *loop) watchOnce(ctx context.Context) {
 	}
 	l.watchPending(ctx, known)
 	l.pruneGoneDone()
-	for _, m := range list.Machines {
+	strays := map[string]bool{}
+	defer func() { l.strays = strays }()
+	for _, m := range keyOrder(list.Machines) {
 		if ctx.Err() != nil {
 			return
 		}
 		if known[m.Key] || l.isPending(m.Key) || l.goneIsRecent(m.Key) || m.State == contracts.MachineDeleting && !journal.IsDispatchID(m.Key) {
 			continue
 		}
-		l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
-		// A second machine with this key is listed as a stray once the entry has left.
+		strays[m.Key] = true
+		if !l.strays[m.Key] {
+			l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
+		}
+		// Each later machine with this key waits for a later watch. While the key has
+		// a journal entry, the watch acts only on the entry's machine. Once the entry
+		// leaves, or when no entry was written, the next watch acts on the machines of
+		// the key again, in the order of keyOrder.
 		if l.takeBack(ctx, m) || l.cleanUpStray(ctx, m) {
 			known[m.Key] = true
 		}
 	}
+}
+
+// keyOrder is the machines of list grouped by key, with the keys in the order of
+// their first machine in list. Within a key, each machine that is not deleting comes
+// before each deleting one, so that a running machine of a live dispatch gets
+// dispatched before a deleting machine with its key gets an entry.
+func keyOrder(list []contracts.Machine) []contracts.Machine {
+	first := map[string]int{}
+	for i, m := range list {
+		if _, ok := first[m.Key]; !ok {
+			first[m.Key] = i
+		}
+	}
+	deleting := func(m contracts.Machine) int {
+		if m.State == contracts.MachineDeleting {
+			return 1
+		}
+		return 0
+	}
+	out := slices.Clone(list)
+	slices.SortStableFunc(out, func(a, b contracts.Machine) int {
+		if c := cmp.Compare(first[a.Key], first[b.Key]); c != 0 {
+			return c
+		}
+		return cmp.Compare(deleting(a), deleting(b))
+	})
+	return out
 }
 
 // adopt acts on the claimed entry e, given the lookup of its machine m in the list that
@@ -315,8 +353,9 @@ func (l *loop) cleanUpLogged(ctx context.Context, e journal.Entry) {
 //     is not the pool's, and the machine does not stay.
 //   - After any other failure, such as no answer, a server error or an answer with no
 //     valid signature, the machine stays and the next watch sends dispatched again,
-//     until the machine is older than [journal.MaxLifetime] by its start time in the
-//     list. Then it does not stay.
+//     until the machine has run longer than [journal.MaxLifetime] and [LifetimeGrace]
+//     by its start time in the list, the bound of a dispatched entry with that
+//     lifetime. Then it does not stay.
 //
 // After a failed write of the journal, the machine stays, and the next watch sends
 // dispatched again.
@@ -331,8 +370,8 @@ func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
 	case errors.Is(err, ErrGone), errors.Is(err, ErrLeaseExpired), errors.Is(err, ErrForbidden):
 		l.Log.Info("the dispatch of the machine ended or is not the pool's", append(attrs, errorAttr(err, nil))...)
 		return false
-	case l.Clock.Now().Sub(adapterio.Started(m)) > time.Duration(journal.MaxLifetime)*time.Minute:
-		l.Log.Warn("sending dispatched failed, and the machine is older than the longest lifetime", append(attrs, errorAttr(err, nil))...)
+	case l.Clock.Now().After(adapterio.Started(m).Add(time.Duration(journal.MaxLifetime)*time.Minute + LifetimeGrace)):
+		l.Log.Warn("sending dispatched failed, and the machine ran longer than the longest lifetime and 15 minutes", append(attrs, errorAttr(err, nil))...)
 		return false
 	default:
 		l.Log.Warn("sending dispatched failed, and the machine stays until the next watch", append(attrs, errorAttr(err, nil))...)
