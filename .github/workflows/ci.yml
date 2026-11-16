@@ -18,5 +18,6 @@ jobs:
     # request, a fork's next among them, runs.
     if: github.event_name != 'pull_request' || github.head_ref != 'next' || github.event.pull_request.head.repo.full_name != github.repository
     # A main commit of integrations until its release; then the release tag.
-    # That commit sets GOTOOLCHAIN for Go 1.27.3, which go.mod requires.
+    # That commit sets GOTOOLCHAIN=go1.27.3+auto, so Go switches to the go1.27.4 that
+    # go.mod requires.
     uses: qoryai/integrations/.github/workflows/go.yml@f5bc79a410348ce50d42979166f456adcf93b798
