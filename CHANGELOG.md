@@ -211,6 +211,8 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Fixed
 
+- Build with Go 1.27.4, which fixes GO-2026-6859 in the standard library: an HTTP/1
+  server crash in `net/http`, from a race on `MaxBytesReader` headers.
 - `qory-machine.service` sets `SuccessAction=poweroff` and `FailureAction=poweroff` in
   `[Unit]`. In `[Service]`, systemd ignores both, so a machine whose start script was
   killed before its exit handler ran did not power off when the script ended.
