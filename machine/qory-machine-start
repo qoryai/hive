@@ -22,7 +22,7 @@
 #   apiary <url>        https://<host>[:<port>], or http:// when the host is localhost or
 #                       a 127.x.x.x address; the scheme is in lowercase; no user, path,
 #                       query or fragment
-#   runtimes <folder>   an absolute path with no //, ., .. or trailing /
+#   runtimes <folder>   an absolute path with no //, ., .. or trailing /, except the root /
 # One newline after the last line may be left out. The file has printable ASCII only,
 # contains no qecr_, qak_ or qrk_ in any case, and together with the run code and the
 # newline between them it makes at most 1024 bytes, qory's limit for the run code file.
@@ -285,7 +285,7 @@ read_run_code_lines() {
 			case $key in
 			registry) fail "Fix line $n of $file. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535." ;;
 			apiary) fail "Fix line $n of $file. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with the scheme in lowercase, a port from 1 to 65535 and no user, path, query or fragment." ;;
-			*) fail "Fix line $n of $file. The runtimes value must be an absolute path with no //, ., .. or trailing /." ;;
+			*) fail "Fix line $n of $file. The runtimes value must be an absolute path with no //, ., .. or trailing /, except the root /." ;;
 			esac
 		fi
 		if [[ $seen == *" $key "* ]]; then

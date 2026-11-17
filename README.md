@@ -432,16 +432,18 @@ lines, each of a different kind and none blank:
 - `apiary <url>`: the address of the Qory Apiary instance, `https://<host>[:<port>]`,
   or `http://` when the host is `localhost` or a `127.x.x.x` address. The scheme is in
   lowercase. The address has no user, path, query or fragment.
-- `runtimes <folder>`: an absolute path with no `//`, `.`, `..` or trailing `/`.
+- `runtimes <folder>`: an absolute path with no `//`, `.`, `..` or trailing `/`, except
+  the root `/`.
 
 The deploy recipe bakes the file into the image. Without the file, the run code file
 contains the run code alone. The start unit fails on every file that `qory run`
 would refuse, and on a few more: a symbolic link, a file that is not regular or that
 another user owns, a file that root cannot read, an empty file, a blank line, a
 repeated line, any other line, a control character or a byte above 126, a `qecr_`,
-`qak_` or `qrk_` in any letter case, or a run code file of more than 1024 bytes. It prints one line to the console that starts with the fix and shows
-the file's path and the broken rule, and no line of the file. Then it powers the
-machine off before `qory run` starts.
+`qak_` or `qrk_` in any letter case, or a run code file of more than 1024 bytes. It
+prints one line to the console that starts with the fix and shows the file's path and
+the broken rule, and no line of the file. Then it powers the machine off before
+`qory run` starts.
 
 ## Licence
 
