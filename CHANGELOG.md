@@ -54,7 +54,7 @@ The changes to Hive that no release contains yet, in the shape of
   machine image contains `/etc/qory/run-code-lines`, the start script, `qory-machine-start`,
   writes a newline and the file's lines (`registry`, `apiary` and `runtimes`) after the
   run code in the run code file, so `qory run` reads them. Without the file, the run code
-  file is the run code alone. The script refuses a file that `qory run` would refuse,
+  file is the run code alone. The script fails on every file that `qory run` would refuse,
   with one line that starts with the fix and shows no line of the file, and powers the
   machine off. The start data has no new member. Deploy: the deploy recipe bakes
   `/etc/qory/run-code-lines` into the machine image.

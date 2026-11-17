@@ -801,16 +801,16 @@ func TestStartUnitRunCodeLinesFails(t *testing.T) {
 	registry, apiary := "registry registry.example.com", "apiary https://apiary.example.com"
 	const (
 		other   = "Write each line of {file} as registry <host>, apiary <url> or runtimes <folder>. Line %d has another form."
-		blank   = "Remove the blank line, line %d, from {file}. qory refuses a blank line after the run code."
+		blank   = "Remove the blank line, line %d, from {file}. The run code file may have no blank line."
 		badReg  = "Fix line %d of {file}. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535."
 		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with a port from 1 to 65535 and no user, path, query or fragment."
 		badRun  = "Fix line %d of {file}. The runtimes value must be an absolute path with no //, ., .. or trailing /."
 		twice   = "Remove the second %s line, line %d, from {file}. Each of the lines registry, apiary and runtimes may appear once."
 		tooMany = "Keep at most 3 lines in {file}, one each of registry, apiary and runtimes. The file has more."
 		control = "Remove every control character and every byte above 126 from {file}. It may contain printable ASCII lines only."
-		secret  = "Remove the run code, run key or access key secret from {file}. It may contain the lines registry, apiary and runtimes only."
+		secret  = "Remove the text qecr_, qak_ or qrk_, in any letter case, from {file}. It looks like a run code, a run key or an access key secret."
 		empty   = "Write the lines registry, apiary or runtimes into {file}, or remove it. The file is empty."
-		tooLong = "Shorten {file}. With the run code, the run code file would be %d bytes, and qory reads at most 1024."
+		tooLong = "Shorten {file} so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
 	)
 	cases := []struct{ name, content, want string }{
 		{"empty file", "", empty},
@@ -857,9 +857,9 @@ func TestStartUnitRunCodeLinesFails(t *testing.T) {
 		{"an access key secret", "registry qak_abc.example.com\n", secret},
 		{"a run key", "apiary https://qrk_abc.example.com\n", secret},
 		{"a secret in a mixed case", "registry x.QaK_1.example.com\n", secret},
-		{"1 KiB and 1 byte with a newline", paddedRegistry(1025, true), fmt.Sprintf(tooLong, 1025)},
-		{"1 KiB and 1 byte without a newline", paddedRegistry(1025, false), fmt.Sprintf(tooLong, 1025)},
-		{"far above 1 KiB", strings.Repeat(registry+"\n", 100), fmt.Sprintf(tooLong, len(runCode)+1+1025)},
+		{"1 KiB and 1 byte with a newline", paddedRegistry(1025, true), tooLong},
+		{"1 KiB and 1 byte without a newline", paddedRegistry(1025, false), tooLong},
+		{"far above 1 KiB", strings.Repeat(registry+"\n", 100), tooLong},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
