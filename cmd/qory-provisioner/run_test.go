@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,7 +22,6 @@ import (
 	"github.com/qoryai/hive/internal/provisioner/provisionertest"
 	"github.com/qoryai/hive/internal/state"
 	"github.com/qoryai/integrations/contracts"
-	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // The markers of the secrets. No log line, error, argument, file outside the state
@@ -73,6 +71,7 @@ func newProvisionerFixture(t *testing.T) *provisionerFixture {
 	b, _ = json.Marshal(map[string]any{
 		"apiary_url":      srv.URL,
 		"gateway_address": "::ffff:10.0.1.5",
+		"max_machines":    1,
 		"adapter":         map[string]string{"command": exe, "settings": adapterSettings},
 	})
 	f.settings = writeFile(t, dir, "settings.json", string(b))
@@ -172,17 +171,12 @@ func (f *provisionerFixture) checkNoLeak(t *testing.T, stderr string) {
 }
 
 // TestServeRuns runs serve against the fake Qory Apiary and the fake adapter: it
-// claims the one work with the check's offers, makes its machine with the claim's
-// machine spec and the start data, sends dispatched with the machine type, and on
-// SIGTERM stops with exit status 0 and leaves the machine. A restart then resumes the
-// dispatch from the journal and makes no machine.
+// claims the one work, makes its machine with the start data, sends dispatched, and
+// on SIGTERM stops with exit status 0 and leaves the machine. A restart then resumes
+// the dispatch from the journal and makes no machine.
 func TestServeRuns(t *testing.T) {
 	f := newProvisionerFixture(t)
-	spec := contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 40, Arch: "amd64"}
-	work := f.srv.Offer(provisionertest.Work{
-		RunCode: markerRunCode, GatewayURL: "https://gateway.example.com:8443", MaxLifetimeMinutes: 60,
-		Machine: "standard", MachineSpec: &spec,
-	})[0]
+	work := f.srv.Offer(provisionertest.Work{RunCode: markerRunCode, GatewayURL: "https://gateway.example.com:8443", MaxLifetimeMinutes: 60})[0]
 
 	s := f.start()
 	// The loop logs sent dispatched after the client got the 204 and the journal
@@ -201,12 +195,6 @@ func TestServeRuns(t *testing.T) {
 	if d.External != nil {
 		t.Errorf("dispatched sent the external %+v, want none", *d.External)
 	}
-	if d.MachineType != fakeType {
-		t.Errorf("dispatched sent the machine type %q, want %q", d.MachineType, fakeType)
-	}
-	if !slices.Equal(d.Offers, fakeOffers) {
-		t.Errorf("the claim sent the offers %+v, want %+v", d.Offers, fakeOffers)
-	}
 	if got, want := f.commands(t), []string{"check", "list", "make"}; !slices.Equal(got, want) {
 		t.Errorf("the adapter ran %q, want %q", got, want)
 	}
@@ -220,7 +208,7 @@ func TestServeRuns(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(work.RunCode))
 	want := made{
-		Key: d.ID, Pool: provisionertest.PoolID, MachineSpec: spec, RunCodeSHA256: hex.EncodeToString(sum[:]),
+		Key: d.ID, Pool: provisionertest.PoolID, Size: loop.DefaultSize, RunCodeSHA256: hex.EncodeToString(sum[:]),
 		GatewayURL: "https://gateway.example.com:8443", GatewayAddress: "10.0.1.5", MaxLifetimeMinutes: 60,
 	}
 	if m != want {
@@ -230,7 +218,7 @@ func TestServeRuns(t *testing.T) {
 		`level=INFO msg="Remove QORY_ENROLMENT_CODE from the environment: the state folder has an access key, so the code is not used"`,
 		`level=INFO msg="started the provisioner" version=`,
 		`apiary_url=` + f.srv.URL + ` pool_id=` + provisionertest.PoolID + ` access_key_id=` + provisionertest.KeyID,
-		` gateway_address=10.0.1.5 state_dir=` + f.state,
+		`max_machines=1 gateway_address=10.0.1.5 state_dir=` + f.state,
 		`level=INFO msg="sent dispatched" dispatch_id=` + d.ID + ` machine_id=i-00000000000000001`,
 		`level=INFO msg="received a stop signal: the provisioner stops claiming" signal=terminated`,
 		`level=INFO msg="stopped claiming"`,
@@ -244,7 +232,7 @@ func TestServeRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := d.ID + " dispatched i-00000000000000001 60 " + fakeType + "\n"; string(journal) != want {
+	if want := d.ID + " dispatched i-00000000000000001 60\n"; string(journal) != want {
 		t.Errorf("the journal is %q, want %q", journal, want)
 	}
 
@@ -258,12 +246,8 @@ func TestServeRuns(t *testing.T) {
 	if got, want := f.commands(t), []string{"check", "list", "make", "check", "list"}; !slices.Equal(got, want) {
 		t.Errorf("the adapter ran %q, want %q", got, want)
 	}
-	// The restart claims again, and sends nothing for the resumed dispatch before the
-	// first watch.
-	for _, c := range f.srv.Calls()[calls:] {
-		if c.Route != provisionertest.RouteClaim {
-			t.Errorf("the restart sent a %s request to Qory Apiary, want only claims", c.Route)
-		}
+	if n := len(f.srv.Calls()); n != calls {
+		t.Errorf("the restart sent %d requests to Qory Apiary, want none: the journal is full", n-calls)
 	}
 }
 
@@ -325,7 +309,6 @@ func TestToLoop(t *testing.T) {
 		{provisioner.ErrGone, loop.ErrGone},
 		{provisioner.ErrLeaseExpired, loop.ErrLeaseExpired},
 		{provisioner.ErrMachineExists, loop.ErrMachineExists},
-		{provisioner.ErrForbidden, loop.ErrForbidden},
 	} {
 		err := fmt.Errorf("the release of dp_0123456789abcdef: %w", c.client)
 		got := toLoop(err)
@@ -334,10 +317,9 @@ func TestToLoop(t *testing.T) {
 		}
 	}
 	for _, err := range []error{
-		provisioner.ErrNotFound, provisioner.ErrMachineLogExists, provisioner.ErrNoGateway,
+		provisioner.ErrForbidden, provisioner.ErrNotFound, provisioner.ErrMachineLogExists, provisioner.ErrNoGateway,
 		provisioner.ErrRateLimited, provisioner.ErrUnsigned, provisioner.ErrTooLarge, provisioner.ErrUnreachable,
 		provisioner.ErrAnswerUnusable, context.Canceled,
-		&provisioner.Refusal{What: "the dispatched for dp_0123456789abcdef", Status: 403, Code: "forbidden"},
 	} {
 		if got := toLoop(err); got != err {
 			t.Errorf("%v: got %v, want it as it is", err, got)
@@ -354,7 +336,7 @@ func TestToLoop(t *testing.T) {
 func TestToLoopEnd(t *testing.T) {
 	for _, c := range []struct{ client, loop error }{
 		{provisioner.ErrMachineEndStopped, loop.ErrMachineEndStopped},
-		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndUnusable},
+		{provisioner.ErrAnswerUnusable, loop.ErrMachineEndDone},
 	} {
 		err := fmt.Errorf("the machine end of dp_0123456789abcdef: %w", c.client)
 		if got := toLoopEnd(err); !errors.Is(got, c.loop) || !errors.Is(got, c.client) || got.Error() != err.Error() {
@@ -379,7 +361,7 @@ func TestApiaryMachineEnd(t *testing.T) {
 	a := apiary{client: srv.Client()}
 	ctx := context.Background()
 	srv.Offer(provisionertest.Work{})
-	c, ok, err := a.Claim(ctx, fakeOffers)
+	c, ok, err := a.Claim(ctx)
 	if !ok || err != nil {
 		t.Fatalf("claim: %v, %v", ok, err)
 	}
@@ -396,78 +378,13 @@ func TestApiaryMachineEnd(t *testing.T) {
 		t.Errorf("an unknown dispatch: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 200, Body: `{}`})
-	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndUnusable) {
+	if err := a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone); !errors.Is(err, loop.ErrMachineEndDone) {
 		t.Errorf("a signed 200: %v", err)
 	}
 	srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: 404, Unsigned: true})
 	err = a.MachineEnd(ctx, c.DispatchID, contracts.MachineEndGone)
-	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndUnusable) {
+	if err == nil || errors.Is(err, loop.ErrMachineEndStopped) || errors.Is(err, loop.ErrMachineEndDone) {
 		t.Errorf("an unsigned 404: %v, want a failure the loop retries", err)
-	}
-}
-
-// TestARepeatDispatchedWithNoType sends dispatched with no machine type through the
-// wrapper and the fake Qory Apiary, as the watch does for a listed machine with no
-// journal entry, after a first dispatched with a type. The answers come from the
-// fake's model of Qory Apiary, as dispatched.schema.json states them: a signed 204 for
-// a dispatch that lives, 410 gone for one that ended, and a signed 403 forbidden for an
-// unknown one. Each request passes dispatched.schema.json of the pinned contracts.
-func TestARepeatDispatchedWithNoType(t *testing.T) {
-	srv := provisionertest.New(t)
-	a := apiary{client: srv.Client()}
-	ctx := context.Background()
-	srv.Offer(provisionertest.Work{}, provisionertest.Work{})
-	var ids []string
-	for range 2 {
-		c, ok, err := a.Claim(ctx, fakeOffers)
-		if !ok || err != nil {
-			t.Fatalf("claim: %v, %v", ok, err)
-		}
-		ids = append(ids, c.DispatchID)
-	}
-	const machine = "i-0123456789abcdef0"
-	for _, id := range ids {
-		if err := a.Dispatched(ctx, id, machine, fakeType); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv.End(ids[1])
-	if err := a.Dispatched(ctx, ids[0], machine, ""); err != nil {
-		t.Errorf("a repeat dispatched of a live dispatch: %v, want the 204", err)
-	}
-	for name, c := range map[string]struct {
-		id   string
-		want error
-	}{
-		"an ended dispatch":   {ids[1], loop.ErrGone},
-		"an unknown dispatch": {"dp_0123456789abcdef", loop.ErrForbidden},
-	} {
-		if err := a.Dispatched(ctx, c.id, machine, ""); !errors.Is(err, c.want) {
-			t.Errorf("a repeat dispatched of %s: %v, want %v", name, err, c.want)
-		}
-	}
-	schema, err := contracts.CompileProvisioner("dispatched.schema.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var repeats int
-	for _, c := range srv.Calls() {
-		if c.Route != provisionertest.RouteDispatched {
-			continue
-		}
-		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(c.Body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := schema.Validate(doc); err != nil {
-			t.Errorf("a dispatched of %s fails dispatched.schema.json: %v", c.DispatchID, err)
-		}
-		if _, typed := doc.(map[string]any)["machine_type"]; !typed {
-			repeats++
-		}
-	}
-	if repeats != 3 {
-		t.Errorf("%d dispatched have no machine type, want 3", repeats)
 	}
 }
 
@@ -477,13 +394,13 @@ func TestApiaryRefusals(t *testing.T) {
 	srv.Hold = 10 * time.Millisecond
 	a := apiary{client: srv.Client()}
 	ctx := context.Background()
-	if _, ok, err := a.Claim(ctx, fakeOffers); ok || err != nil {
+	if _, ok, err := a.Claim(ctx); ok || err != nil {
 		t.Fatalf("a claim with no work: %v, %v, want false and no error", ok, err)
 	}
 	srv.Offer(provisionertest.Work{RunCode: markerRunCode}, provisionertest.Work{}, provisionertest.Work{}, provisionertest.Work{})
 	var ids []string
 	for range 4 {
-		c, ok, err := a.Claim(ctx, fakeOffers)
+		c, ok, err := a.Claim(ctx)
 		if !ok || err != nil {
 			t.Fatalf("claim: %v, %v", ok, err)
 		}
@@ -498,22 +415,19 @@ func TestApiaryRefusals(t *testing.T) {
 	const machine = "i-0123456789abcdef0"
 	srv.End(ids[0])
 	srv.Expire(ids[1])
-	if err := a.Dispatched(ctx, ids[2], machine, fakeType); err != nil {
+	if err := a.Dispatched(ctx, ids[2], machine); err != nil {
 		t.Fatal(err)
-	}
-	if d, _ := srv.Dispatch(ids[2]); d.MachineType != fakeType || !slices.Equal(d.Offers, fakeOffers) {
-		t.Errorf("the dispatch has the machine type %q and the offers %+v", d.MachineType, d.Offers)
 	}
 	for name, c := range map[string]struct {
 		err  error
 		want error
 	}{
-		"dispatched of an ended dispatch":   {a.Dispatched(ctx, ids[0], machine, ""), loop.ErrGone},
-		"dispatched of a stale dispatch":    {a.Dispatched(ctx, ids[1], machine, fakeType), loop.ErrLeaseExpired},
+		"dispatched of an ended dispatch":   {a.Dispatched(ctx, ids[0], machine), loop.ErrGone},
+		"dispatched of a stale dispatch":    {a.Dispatched(ctx, ids[1], machine), loop.ErrLeaseExpired},
 		"release after dispatched":          {a.Release(ctx, ids[2], "the machine was not made"), loop.ErrMachineExists},
 		"release of an ended dispatch":      {a.Release(ctx, ids[0], "the machine was not made"), loop.ErrGone},
 		"release of a stale dispatch":       {a.Release(ctx, ids[1], "the machine was not made"), loop.ErrLeaseExpired},
-		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine, fakeType), loop.ErrForbidden},
+		"dispatched of an unknown dispatch": {a.Dispatched(ctx, "dp_0123456789abcdef", machine), provisioner.ErrForbidden},
 	} {
 		if !errors.Is(c.err, c.want) {
 			t.Errorf("%s: %v, want %v", name, c.err, c.want)

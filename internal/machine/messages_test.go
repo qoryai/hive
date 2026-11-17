@@ -47,8 +47,6 @@ func TestMessagesFit(t *testing.T) {
 		longOp     = "DescribeInstances dry run"
 		instanceID = "i-0123456789abcdef0"
 		imageID    = "ami-0123456789abcdef0"
-		subnetID   = "subnet-0123456789abcdef0"
-		region     = "ap-southeast-4"
 	)
 	sdk := func(code string) error {
 		return &smithy.GenericAPIError{Code: code, Message: "The request failed."}
@@ -132,30 +130,17 @@ func TestMessagesFit(t *testing.T) {
 	_, err = New(bad).Console(ctx, instanceID)
 	wantFits(t, err.Error(), b64.Error())
 
-	// Image.
-	_, err = New(&fakeAPI{}).Image(ctx, "")
+	// RootDevice.
+	_, err = New(&fakeAPI{}).RootDevice(ctx, "")
 	wantFits(t, err.Error(), "")
 	missing := sdk(codeImageNotFound)
-	_, err = NewInRegion(&fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) { return nil, missing }}, region).Image(ctx, imageID)
+	_, err = New(&fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) { return nil, missing }}).RootDevice(ctx, imageID)
 	wantFits(t, err.Error(), missing.Error())
-	for _, img := range []types.Image{
-		{ImageId: aws.String(imageID)},
-		{ImageId: aws.String(imageID), RootDeviceName: aws.String("/dev/sda1"), Architecture: "x86_64_mac"},
-		{ImageId: aws.String(imageID), RootDeviceName: aws.String("/dev/sda1"), Architecture: "x86_64"},
-	} {
-		one := &fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) {
-			return &ec2.DescribeImagesOutput{Images: []types.Image{img}}, nil
-		}}
-		_, err = NewInRegion(one, region).Image(ctx, imageID)
-		wantFits(t, err.Error(), "")
-	}
-	_, err = NewInRegion(&fakeAPI{}, region).Image(ctx, imageID)
+	noRoot := &fakeAPI{image: func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error) {
+		return &ec2.DescribeImagesOutput{Images: []types.Image{{ImageId: aws.String(imageID)}}}, nil
+	}}
+	_, err = New(noRoot).RootDevice(ctx, imageID)
 	wantFits(t, err.Error(), "")
-
-	// SubnetZone.
-	noSubnet := sdk(codeSubnetNotFound)
-	_, err = NewInRegion(&fakeAPI{subnet: func(*ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error) { return nil, noSubnet }}, region).SubnetZone(ctx, subnetID)
-	wantFits(t, err.Error(), noSubnet.Error())
-	_, err = NewInRegion(&fakeAPI{}, region).SubnetZone(ctx, subnetID)
+	_, err = New(&fakeAPI{}).RootDevice(ctx, imageID)
 	wantFits(t, err.Error(), "")
 }

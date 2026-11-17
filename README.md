@@ -1,6 +1,4 @@
-# Qory Hive
-
-This repository is part of [Qory](https://github.com/qoryai/qory). Its README lists every part and how to install Qory.
+# Hive
 
 Hive makes and deletes the machines of Qory Apiary's node pools. A node pool is a
 group of machines in Qory Apiary, and one provisioner serves it. Hive is
@@ -35,6 +33,7 @@ one node pool; see
 {
   "apiary_url": "https://apiary.example.com",
   "gateway_address": "10.0.1.5",
+  "max_machines": 2,
   "adapter": {
     "command": "/usr/local/bin/qory-machines-aws-ec2",
     "settings": "/etc/qory-provisioner/aws-ec2.json"
@@ -48,13 +47,12 @@ one node pool; see
 - `gateway_address`: the IPv4 or IPv6 address of the gateway on the machines'
   network, with no zone and no port, and not an unspecified, multicast or loopback
   address. The provisioner passes it to each machine that it makes. Required.
+- `max_machines`: the most machines that exist at once, 1 to 100. Optional, 1 when
+  you leave it out.
 - `adapter`: the machine adapter. `command` is the path of the adapter's program, and
   `settings` is the path of the adapter's settings file. Required.
 - `enrolment_code_file`: the path of the file with the node pool's enrolment code.
   Optional. See [Enrol the access key](#enrol-the-access-key).
-
-The pool's Machine limit in Qory Apiary is the only limit on how many machines exist
-at once: the provisioner makes a machine for each dispatch that it claims.
 
 Write each path as an absolute path of at most 4096 bytes, with no `.` or `..`
 element, no double slash, no trailing slash, and no NUL byte. Keep secrets out of
@@ -71,18 +69,6 @@ the answer from its standard output, in the documents of `contracts/machines/v1`
 `serve` starts, it runs `check` before it claims a dispatch, and it exits with status 1
 when `check` fails.
 
-The answer of `check` contains offers: the machines that the adapter can make, each
-with its vCPUs, memory, disk, architecture and whether it runs virtual machines.
-`serve` sends these offers in every claim. Each claimed dispatch has a machine spec,
-the least machine that its run needs, and `serve` passes the spec unchanged to `make`.
-`serve` releases a claimed dispatch that has no machine spec, with the reason "the
-machine was not made: the claim has no machine spec, so the provisioner cannot choose
-a machine". The answer of `make` contains the machine's type, such as `m7i.large`.
-`serve` keeps the type in the journal and sends it in each `dispatched` of the
-dispatch. A machine that `serve` finds by its key after a restart, or takes back with
-no journal entry, has no type, because the answer of `list` contains none, and its
-`dispatched` contains no type.
-
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
 cuts each line at 4096 bytes. It replaces a line with a fixed text when the line
@@ -94,35 +80,15 @@ when `make` runs longer than 2 minutes, or another command longer than 1 minute.
 ## Run one provisioner per node pool
 
 Run one provisioner per node pool. Every 60 seconds, `serve` lists the node pool's
-machines. For each machine whose dispatch has no entry in the journal in the
-provisioner's state folder, `serve` sends `dispatched` for the dispatch, with no
-machine type:
-
-- On 204, the dispatch still runs. `serve` adds the machine to the journal and logs
-  `took back the machine for its dispatch`. The journal has no record of the claim's
-  lifetime, so `serve` gives the machine the longest lifetime, 1470 minutes.
-- On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, `serve` deletes the
-  machine.
-- After any other failure, such as no answer, a server error or an answer with no
-  valid signature, `serve` keeps the machine and sends `dispatched` again at the next
-  watch. Once the machine has run longer than 1470 minutes and 15 minutes by its start
-  time in the list, `serve` deletes it.
-
-A stopped or deleting machine, and a machine whose key is not a dispatch id, get no
-`dispatched`. `serve` deletes such a machine, except a deleting machine whose key is
-not a dispatch id, which it leaves as it is. `serve` logs `found a machine with no
-journal entry` once for a key, at the first of the watches in a row that find the key
-with no entry.
-
-Two provisioners of one node pool each take back the other's machines: each sends
-`dispatched` for them, deletes them and sends `gone` when their dispatch ends. A
-provisioner may also send the first `dispatched` of a machine that the other just
-made, with no machine type.
+machines and deletes each machine whose dispatch has no entry in the journal in the
+provisioner's state folder, with the log line `found a machine with no journal
+entry`. Two provisioners of one node pool therefore delete each other's machines,
+also machines that run a dispatch.
 
 When you rotate the key, which means a new provisioner with a new access key for the
 node pool, stop the old provisioner before you start the new one. A new provisioner
-with a new state folder starts with an empty journal. It takes back each machine of
-the old one whose dispatch still runs, and deletes the others.
+with a new state folder starts with an empty journal, so it deletes the machines that
+the old one made, also those that run a dispatch.
 
 ## Enrol the access key
 
@@ -194,6 +160,7 @@ JSON object:
   "subnet_id": "subnet-0123456789abcdef0",
   "security_group_id": "sg-0123456789abcdef0",
   "image_id": "ami-0123456789abcdef0",
+  "sizes": {"standard": "t3.medium", "large": "m7g.large"},
   "tags": {"qory:stack": "example-stack"}
 }
 ```
@@ -201,6 +168,8 @@ JSON object:
 - `subnet_id` and `security_group_id`: the run subnet and the security group of each
   machine's network interface. Required.
 - `image_id`: the image that each machine starts from. Required.
+- `sizes`: 1 to 20 entries, each a size name of a make request set to an EC2 instance
+  type. Required.
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
   and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
   dry run of `check` sends them too.
@@ -209,80 +178,7 @@ A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of lette
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
 `qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
 a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
-member breaks a rule, `check` and `make` fail, and the error starts with the fix. A
-file with another member, such as `instance_types`, fails with the error "Remove every
-member other than subnet_id, security_group_id, image_id and tags from aws-ec2.json."
-
-### Instance types
-
-The adapter has no list of instance types. `check` and `make` read the architecture
-of `image_id` with `ec2:DescribeImages`, the zone of `subnet_id` with
-`ec2:DescribeSubnets`, the instance types of the region with
-`ec2:DescribeInstanceTypes`, and the types that the zone offers with
-`ec2:DescribeInstanceTypeOfferings`. They use only the types that the zone offers,
-that are sold on demand, and that run the image's architecture. With an x86_64 image,
-a machine spec for arm64 gets no offer and no machine; with an arm64 image, arm64
-types work the same way.
-
-The answer of `check` contains the offers that no other offer covers. One offer covers
-another when it has at least its vCPUs and memory, the same architecture, and
-virtualization when the other has it. Qory Apiary uses offers only to test whether
-any offer fits a run's machine type, so a covered offer adds no machine type. Each
-offer has a disk of 16384 GiB, the largest gp3 volume, because `make` sizes the root
-volume to the machine spec. vCPUs above 1024 and memory above 8388608 MiB are cut to
-those values, the most that an offer may have. `check` fails with the kind `defect`
-when the zone offers no type for the image's architecture. It sends at most two
-`ec2:RunInstances` dry runs: one for the first type that `make` would start, and one
-with `CpuOptions` for the first type that needs them for nested virtualization.
-
-`make` starts the first type that fits the machine spec: the type with the fewest
-vCPUs, then the least memory, then the lowest on-demand Linux price in the region,
-then the first by name. A type with no price comes after the types of its size that
-have one. A type fits when it has at least the spec's vCPUs and memory, runs the
-spec's architecture, and, when the spec sets `virtualization`, is a bare metal type or
-has nested virtualization. When the spec's `disk_gib` is larger than 16384, the
-largest gp3 volume, `make` fails with the kind `defect` before any EC2 call. For
-virtualization on a type that is not bare metal, `make` turns on nested virtualization
-with `CpuOptions`. The root volume is gp3 and encrypted, is deleted with the machine,
-and its size is the larger of the spec's `disk_gib` and the size of the root volume of
-`image_id`. When EC2 has no capacity for a type in the subnet's zone
-(`InsufficientInstanceCapacity`), `make` tries the next type that fits, at most 8
-types, and then returns the last error. When no type fits, `make` fails with the kind
-`defect`. A key gets one machine: each start sends a client token made of the key and
-the type, and before the first start, `make` looks for a machine with the key's tags.
-EC2 lists a new machine after a short delay, so a second `make` with the same key
-right after the first can start a second machine of another type.
-
-### Prices
-
-The adapter reads the prices with `pricing:GetProducts` of the AWS Price List Query
-API, at `https://api.pricing.us-east-1.amazonaws.com`, whatever the region of the
-machines: the API runs only in a few regions, and us-east-1 returns the prices of
-every region. It reads the hourly on-demand price in USD for the region, Linux,
-shared tenancy, no software, and capacity status `Used`, for the product families
-`Compute Instance` and `Compute Instance (bare metal)`. One lookup has a time limit of
-20 seconds. When the lookup fails, `check` and `make` go on: they log one line that
-starts with "Give the instance role pricing:GetProducts", and use the prices of the
-cache, or no prices. The cache file records the time of the failed lookup, and
-`check` and `make` try no lookup until 1 hour after it.
-
-### Cache
-
-The adapter keeps the instance types, the types of each zone, and the prices in one
-JSON file per region, `qory-machines-aws-ec2/<region>.json`, in the folder that Go's
-`os.UserCacheDir` returns: `$XDG_CACHE_HOME`, or else `$HOME/.cache`. In the image,
-which runs as the user `nonroot`, that is
-`/home/nonroot/.cache/qory-machines-aws-ec2/<region>.json`. The folder has mode 0700
-and the file 0600.
-
-- Each of the three parts is read again from AWS when it is 24 hours old. The types of
-  the region are also read again when the zone offers a type that the file lacks.
-- When a read fails, the adapter uses the part in the file and logs one line. A failed
-  read of the types or of the zone's types with no part in the file fails the command.
-- When `HOME` and `XDG_CACHE_HOME` are both unset, or the folder cannot be written,
-  `check` and `make` still work: they log one line, and read the types and prices from
-  AWS on every call. Give the adapter a writable home folder, or set
-  `XDG_CACHE_HOME` to a writable folder, to keep the file between calls.
+member breaks a rule, `check` and `make` fail, and the error starts with the fix.
 
 ### Instance role policy
 
@@ -375,19 +271,7 @@ example values before you attach it to the instance role:
     {
       "Sid": "Describe",
       "Effect": "Allow",
-      "Action": [
-        "ec2:DescribeInstances",
-        "ec2:DescribeImages",
-        "ec2:DescribeInstanceTypes",
-        "ec2:DescribeInstanceTypeOfferings",
-        "ec2:DescribeSubnets"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "ReadPrices",
-      "Effect": "Allow",
-      "Action": "pricing:GetProducts",
+      "Action": ["ec2:DescribeInstances", "ec2:DescribeImages"],
       "Resource": "*"
     },
     {
@@ -424,25 +308,15 @@ What each statement allows, and why:
 - `TagAtLaunch` allows `ec2:CreateTags` only inside `ec2:RunInstances`, which tags the
   instance and its volume as it makes them. The adapter tags nothing after a launch.
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
-  finds a machine by its key; `ec2:DescribeImages`, which reads the image's root
-  device, the size of its root volume and its architecture;
-  `ec2:DescribeInstanceTypes`, which reads the vCPUs, memory, architectures,
-  virtualization and usage classes of every type in the region;
-  `ec2:DescribeSubnets`, which reads the zone of `subnet_id`; and
-  `ec2:DescribeInstanceTypeOfferings`, which reads the types that zone offers. None of
-  these actions accepts a limit to a resource, so the resource is `*`.
-- `ReadPrices` allows `pricing:GetProducts`, which reads the on-demand prices of the
-  instance types. The action accepts no limit to a resource, so the resource is `*`.
+  finds a machine by its key, and `ec2:DescribeImages`, which reads the image's root
+  device name. Neither action accepts a limit to a resource, so the resource is `*`.
 - `TerminateAndReadConsole` allows `ec2:TerminateInstances` and
   `ec2:GetConsoleOutput` only on instances with the tags `qory:managed` set to `true`
   and `qory:pool` set to the node pool's id. The adapter deletes machines and reads
   their logs with these actions.
 
-`qory-machines-aws-ec2 check` sends `ec2:RunInstances`, at most twice, and
-`ec2:DescribeInstances` as dry runs, and a dry run needs the same permissions as the
-call. The policy has no condition on `ec2:InstanceType`: if you add one, allow every
-type that a machine spec of your machine types may fit, or `check` or `make` fails
-with `UnauthorizedOperation`. The dry run of
+`qory-machines-aws-ec2 check` sends `ec2:RunInstances` and `ec2:DescribeInstances`
+as dry runs, and a dry run needs the same permissions as the call. The dry run of
 `ec2:RunInstances` sends the placeholder pool id `np_0000000000000000` as the
 `qory:pool` tag. Keep the `RunInstances` statements free of a condition on the value
 of `qory:pool`: if they require the node pool's id, `check` fails with
@@ -450,13 +324,9 @@ of `qory:pool`: if they require the node pool's id, `check` fails with
 
 The policy contains no `iam:PassRole`, so no machine gets an instance role.
 
-When the instance role lacks an EC2 permission, the adapter's error starts with "Give
-the instance role the EC2 rights that the EC2 machine adapter needs" and contains the
+When the instance role lacks a permission, the adapter's error starts with "Give the
+instance role the EC2 rights that the EC2 machine adapter needs" and contains the
 action that failed.
-
-The adapter calls these endpoints over HTTPS: `ec2.<region>.amazonaws.com` and
-`api.pricing.us-east-1.amazonaws.com`. It also reads the instance metadata service at
-`169.254.169.254`, or `[fd00:ec2::254]` with IPv6.
 
 If the account's default EBS encryption key is a customer managed KMS key, also allow
 `kms:CreateGrant`, `kms:GenerateDataKeyWithoutPlaintext` and `kms:Decrypt` on that
@@ -474,7 +344,7 @@ does not start.
 
 ## Build
 
-Use Go 1.27.4, the version in `go.mod` and `mise.toml`.
+Use Go 1.27.3, the version in `go.mod` and `mise.toml`.
 
 ```
 go build -o qory-provisioner ./cmd/qory-provisioner
@@ -565,39 +435,13 @@ lines, each of a different kind and none blank:
 - `runtimes <folder>`: an absolute path with no `//`, `.`, `..` or trailing `/`.
 
 The deploy recipe bakes the file into the image. Without the file, the run code file
-contains the run code alone. The start unit fails on
-every file that `qory run` would refuse, and on a few more: a symbolic link, a file
-that is not regular or that another user owns, a file that root cannot read, an empty
-file, a blank line, a repeated line, any other line, a control character or a byte
-above 126, a `qecr_`, `qak_` or `qrk_` in any letter case, or a run code file of more
-than 1024 bytes. It prints one line to the console that starts with the fix and shows
+contains the run code alone. The start unit fails on every file that `qory run`
+would refuse, and on a few more: a symbolic link, a file that is not regular or that
+another user owns, a file that root cannot read, an empty file, a blank line, a
+repeated line, any other line, a control character or a byte above 126, a `qecr_`,
+`qak_` or `qrk_` in any letter case, or a run code file of more than 1024 bytes. It prints one line to the console that starts with the fix and shows
 the file's path and the broken rule, and no line of the file. Then it powers the
 machine off before `qory run` starts.
-
-Just before `qory run`, the start unit writes the steps of the machine's start to
-`/var/lib/qory-machine/steps.jsonl`, owner root, mode 0644, and passes the file to
-`qory run` with `--machine-steps-file`. Each line is one JSON object, in the order the
-steps ran, with times in UTC to the millisecond:
-
-```
-{"name":"start Docker","started":"2026-11-06T00:31:44.120Z","ended":"2026-11-06T00:31:58.904Z"}
-```
-
-The steps are `boot`, `read start data`, `set firewall`, `start Docker` and
-`write run code`. `boot` runs from the kernel's start to the start of the script. Each
-other step runs from the end of the step before it, or from the start of the script
-when there is no boot line, to its stage line. The times come from `/proc/uptime`, so a
-change of the clock during the start does not reorder the steps. When `/proc/uptime`
-cannot be read or has no number, the times come from the clock, and the file has no
-`boot` line. The file contains no value of the start data.
-
-The start unit first removes any `steps.jsonl`, so a file from the machine image never
-stays. It writes the file only when `/var/lib/qory-machine` is a folder, not a link,
-that root owns and that no group or other user can write. When the write fails or is
-skipped, the start unit prints one line to the console that starts with the fix, leaves
-no `steps.jsonl`, and runs `qory run` without `--machine-steps-file`. When
-`/var/lib/qory-machine` is a link, the start unit removes and writes no `steps.jsonl`
-in the folder that it links to.
 
 ## Licence
 

@@ -2,11 +2,10 @@
 // <state folder>/dispatches, with one line per live dispatch, and [Recover], which
 // returns what to do with each line after a restart.
 //
-// An entry has five fields, a dispatch id, a phase, a machine id, the machine's
-// lifetime in minutes and the machine's type at the vendor, and no field for a secret
-// or for inputs. Each field is checked against a fixed shape before it is written and
-// after it is read. A machine id or a machine type that contains qak_, qrk_, qecr_ or
-// qecp_, the start of a secret, is out of shape.
+// An entry has four fields, a dispatch id, a phase, a machine id and the machine's
+// lifetime in minutes, and no field for a secret or for inputs. Each field is checked
+// against a fixed shape before it is written and after it is read. A machine id that
+// contains qak_, qrk_, qecr_ or qecp_, the start of a secret, is out of shape.
 package journal
 
 import (
@@ -30,8 +29,7 @@ const File = "dispatches"
 // machines one provisioner runs at once.
 const maxSize = 1 << 20
 
-// noMachine is the machine id field of a line whose dispatch has no machine id, and
-// the machine type field of a line whose machine has no type.
+// noMachine is the machine id field of a line whose dispatch has no machine id.
 const noMachine = "-"
 
 // The bounds of a machine's lifetime in minutes, as the provisioner contract states
@@ -48,7 +46,7 @@ const (
 // the adapter's list by its key, the dispatch id. From made on, the entry has the
 // machine id that the adapter's make returned. An entry can enter deleting or ended
 // from any phase, with the machine id that the adapter's list returned when the entry
-// had none. A claimed entry can also enter ended with no machine id.
+// had none.
 const (
 	// PhaseClaimed is a claimed dispatch for which no make has returned.
 	PhaseClaimed = "claimed"
@@ -60,15 +58,13 @@ const (
 	// PhaseDeleting is a dispatch whose machine is being deleted. The entry stays until
 	// the adapter's delete returns gone.
 	PhaseDeleting = "deleting"
-	// PhaseEnded is a dispatch whose machine the adapter's delete returned as gone, or a
-	// claimed dispatch for which no machine was listed by the end of its lifetime and
-	// 15 minutes, while the post of gone to Qory Apiary is pending. The entry gets no
-	// more deletes. Its machine id is empty for a claimed dispatch with no machine.
+	// PhaseEnded is a dispatch whose machine the adapter's delete returned as gone,
+	// while the post of gone to Qory Apiary is pending. The entry gets no more deletes.
 	PhaseEnded = "ended"
 )
 
 // secretPrefixes are the starts of an access key secret, a run key, a run code and an
-// enrolment code. A machine id or a machine type that contains one is out of shape.
+// enrolment code. A machine id that contains one is out of shape.
 var secretPrefixes = []string{"qak_", "qrk_", "qecr_", "qecp_"}
 
 // phases is every phase, in order.
@@ -82,48 +78,29 @@ var (
 	machineIDShape = regexp.MustCompile(`^[!-~]{1,128}$`)
 	// lifetimeShape is a whole number of 1 to 4 digits with no leading zero.
 	lifetimeShape = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
-	// machineTypeShape is the machine_type of the provisioner contract: 1 to 64
-	// printable ASCII characters other than a space.
-	machineTypeShape = regexp.MustCompile(`^[!-~]{1,64}$`)
 )
 
 // IsDispatchID is whether s has the shape of a dispatch id.
 func IsDispatchID(s string) bool { return dispatchIDShape.MatchString(s) }
 
-// IsMachineType is whether an entry may have s as its machine type: 1 to 64 printable
-// ASCII characters other than a space, not -, and without qak_, qrk_, qecr_ or qecp_.
-func IsMachineType(s string) bool {
-	return machineTypeShape.MatchString(s) && s != noMachine &&
-		!slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(s, p) })
-}
-
 // Entry is one live dispatch. MachineID is empty in [PhaseClaimed], is the machine id
 // that the adapter's make returned in [PhaseMade] and [PhaseDispatched], and is the id
-// of the machine being deleted in [PhaseDeleting] and [PhaseEnded]. In [PhaseEnded] it
-// is empty for a dispatch that never had a listed machine. The journal treats a
-// machine id as opaque. MaxLifetimeMinutes is the machine's lifetime from the claim
-// answer, [MinLifetime] to [MaxLifetime], in every phase. MachineType is the vendor's
-// type of the machine that the adapter's make returned, such as t3.medium, which each
-// dispatched sends; it is empty when the make returned none or the entry has no machine
-// of a make. An entry has no field for a secret or for inputs.
+// of the machine being deleted in [PhaseDeleting] and [PhaseEnded]. The journal treats a machine id as
+// opaque. MaxLifetimeMinutes is the machine's lifetime from the claim
+// answer, [MinLifetime] to [MaxLifetime], in every phase. An entry has no field for a
+// secret or for inputs.
 type Entry struct {
 	DispatchID, Phase, MachineID string
 	MaxLifetimeMinutes           int
-	MachineType                  string
 }
 
-// line is e as the journal writes it: the five fields, with - for no machine id and
-// for no machine type.
+// line is e as the journal writes it: the four fields, with - for no machine id.
 func (e Entry) line() string {
-	return e.DispatchID + " " + e.Phase + " " + orNone(e.MachineID) + " " + strconv.Itoa(e.MaxLifetimeMinutes) + " " + orNone(e.MachineType) + "\n"
-}
-
-// orNone is s, or - when s is empty.
-func orNone(s string) string {
-	if s == "" {
-		return noMachine
+	machine := e.MachineID
+	if machine == "" {
+		machine = noMachine
 	}
-	return s
+	return e.DispatchID + " " + e.Phase + " " + machine + " " + strconv.Itoa(e.MaxLifetimeMinutes) + "\n"
 }
 
 // check returns the first field of e that is out of shape, as a phrase that quotes no
@@ -136,20 +113,14 @@ func (e Entry) check() string {
 		return "the phase is not claimed, made, dispatched, deleting or ended"
 	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.MachineID, p) }):
 		return "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
-	case slices.ContainsFunc(secretPrefixes, func(p string) bool { return strings.Contains(e.MachineType, p) }):
-		return "the machine type contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
-	case e.MachineType != "" && (!machineTypeShape.MatchString(e.MachineType) || e.MachineType == noMachine):
-		return "the machine type is not 1 to 64 printable ASCII characters other than a space, or is -"
 	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
 		return "the lifetime is not 15 to 1470 minutes"
 	case e.Phase == PhaseClaimed && e.MachineID != "":
 		return "the machine id is set in the phase claimed"
 	case e.Phase == PhaseClaimed:
 		return ""
-	case e.Phase == PhaseEnded && e.MachineID == "":
-		return ""
 	case e.MachineID == "":
-		return "the phase made, dispatched or deleting has no machine id"
+		return "the phase made, dispatched, deleting or ended has no machine id"
 	case !machineIDShape.MatchString(e.MachineID):
 		return "the machine id is not 1 to 128 printable ASCII characters other than a space"
 	case e.MachineID == noMachine:
@@ -158,13 +129,11 @@ func (e Entry) check() string {
 	return ""
 }
 
-// Journal is the file <state folder>/dispatches, mode 0600, of at most 1 MiB: one
-// line per live dispatch, "dispatch_id phase machine_id max_lifetime_minutes
-// machine_type", in the order of their claims. Open also reads a line without
-// machine_type, which an earlier version wrote, as an entry with no machine type.
-// Each change writes the whole file to a new file, synced, renames it over the
-// journal and syncs the folder, so a crash leaves the journal before the change or
-// after it. A Journal is safe for use from several goroutines.
+// Journal is the file <state folder>/dispatches, mode 0600, of at most 1 MiB: one line
+// per live dispatch, "dispatch_id phase machine_id max_lifetime_minutes", in the order
+// of their claims. Each change writes the whole file to a new file, synced, renames it
+// over the journal and syncs the folder, so a crash leaves the journal before the
+// change or after it. A Journal is safe for use from several goroutines.
 type Journal struct {
 	path    string
 	mu      sync.Mutex
@@ -217,11 +186,10 @@ func Open(dir string) (*Journal, error) {
 }
 
 // parse takes the first line off b and splits it into an entry. The cause is not ""
-// when the line has no line feed, is not four or five fields that are not empty,
-// separated by single spaces, or has a lifetime that is not a whole number. A line of
-// four fields, which an earlier version wrote, has no machine type.
+// when the line has no line feed, is not four fields that are not empty, separated by
+// single spaces, or has a lifetime that is not a whole number.
 func parse(b *[]byte) (Entry, string) {
-	const cause = "the line is not four or five fields separated by single spaces and ended by a line feed"
+	const cause = "the line is not four fields separated by single spaces and ended by a line feed"
 	i := bytes.IndexByte(*b, '\n')
 	if i < 0 {
 		*b = nil
@@ -229,15 +197,12 @@ func parse(b *[]byte) (Entry, string) {
 	}
 	fields := strings.Split(string((*b)[:i]), " ")
 	*b = (*b)[i+1:]
-	if len(fields) < 4 || len(fields) > 5 || slices.Contains(fields, "") {
+	if len(fields) != 4 || slices.Contains(fields, "") {
 		return Entry{}, cause
 	}
 	e := Entry{DispatchID: fields[0], Phase: fields[1], MachineID: fields[2]}
 	if e.MachineID == noMachine {
 		e.MachineID = ""
-	}
-	if len(fields) == 5 && fields[4] != noMachine {
-		e.MachineType = fields[4]
 	}
 	if !lifetimeShape.MatchString(fields[3]) {
 		return Entry{}, "the lifetime is not a whole number of minutes"

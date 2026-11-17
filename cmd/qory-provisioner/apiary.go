@@ -7,7 +7,6 @@ import (
 
 	"github.com/qoryai/hive/internal/loop"
 	"github.com/qoryai/hive/internal/provisioner"
-	"github.com/qoryai/integrations/contracts"
 )
 
 // claimWait is the wait_seconds of every claim: the most that claim.schema.json of
@@ -17,20 +16,18 @@ const claimWait = provisioner.MaxWaitSeconds
 
 // apiary is the provisioner's client of Qory Apiary as the loop uses it, see
 // [loop.Apiary]. Each error keeps the client's text, and the errors 410 gone, 409
-// lease_expired, 409 machine_exists and the signed 403 forbidden also match the loop's
-// sentinel of the same refusal. A machine end's errors match the loop's sentinels
-// through [toLoopEnd].
+// lease_expired and 409 machine_exists also match the loop's sentinel of the same
+// refusal. A machine end's errors match the loop's sentinels through [toLoopEnd].
 type apiary struct {
 	client *provisioner.Client
 }
 
 var _ loop.Apiary = apiary{}
 
-// Claim claims a request for one machine, with a wait of [claimWait] and offers, the
-// machines the adapter can make. It copies the run code into the loop's claim and
-// clears the client's copy.
-func (a apiary) Claim(ctx context.Context, offers []contracts.MachineSpec) (loop.Claim, bool, error) {
-	c, ok, err := a.client.Claim(ctx, claimWait, offers)
+// Claim claims a request for one machine, with a wait of [claimWait]. It copies the
+// run code into the loop's claim and clears the client's copy.
+func (a apiary) Claim(ctx context.Context) (loop.Claim, bool, error) {
+	c, ok, err := a.client.Claim(ctx, claimWait)
 	if err != nil || !ok {
 		return loop.Claim{}, false, toLoop(err)
 	}
@@ -44,18 +41,17 @@ func (a apiary) Claim(ctx context.Context, offers []contracts.MachineSpec) (loop
 		PoolID:             c.PoolID,
 		LeaseUntil:         c.LeaseUntil,
 		Machine:            c.Machine,
-		MachineSpec:        c.MachineSpec,
 		RunCode:            loop.NewRunCode(code.String()),
 		GatewayURL:         c.GatewayURL,
 		MaxLifetimeMinutes: c.MaxLifetimeMinutes,
 	}, true, nil
 }
 
-// Dispatched sends dispatched for the dispatch with machineType and no external. The
-// contract's external needs the job's system, its ref and its https page together,
-// and the machine adapter returns a machine id alone, so the machine id is not sent.
-func (a apiary) Dispatched(ctx context.Context, dispatchID, _, machineType string) error {
-	return toLoop(a.client.Dispatched(ctx, dispatchID, nil, machineType))
+// Dispatched sends dispatched for the dispatch with no external. The contract's
+// external needs the job's system, its ref and its https page together, and the
+// machine adapter returns a machine id alone, so the machine id is not sent.
+func (a apiary) Dispatched(ctx context.Context, dispatchID, _ string) error {
+	return toLoop(a.client.Dispatched(ctx, dispatchID, nil))
 }
 
 // Release gives the dispatch back with reason.
@@ -80,7 +76,6 @@ var sentinels = []struct{ client, loop error }{
 	{provisioner.ErrGone, loop.ErrGone},
 	{provisioner.ErrLeaseExpired, loop.ErrLeaseExpired},
 	{provisioner.ErrMachineExists, loop.ErrMachineExists},
-	{provisioner.ErrForbidden, loop.ErrForbidden},
 }
 
 // toLoop is err as the loop reads it: a [refusal] when errors.Is matches err against a
@@ -99,15 +94,14 @@ func toLoop(err error) error {
 
 // toLoopEnd is err of a machine end as the loop reads it: a [refusal] with
 // [loop.ErrMachineEndStopped] for a signed 400, 403 or 404, a [refusal] with
-// [loop.ErrMachineEndUnusable] for a signed answer that breaks the contract, which the
-// loop counts as done for deleting and delete_failed and as failed for gone, and err
-// as it is otherwise, nil included, so the loop sends the post again.
+// [loop.ErrMachineEndDone] for a signed answer that breaks the contract, and err as it
+// is otherwise, nil included, so the loop sends the post again.
 func toLoopEnd(err error) error {
 	switch {
 	case errors.Is(err, provisioner.ErrMachineEndStopped):
 		return &refusal{err: err, sentinel: loop.ErrMachineEndStopped}
 	case errors.Is(err, provisioner.ErrAnswerUnusable):
-		return &refusal{err: err, sentinel: loop.ErrMachineEndUnusable}
+		return &refusal{err: err, sentinel: loop.ErrMachineEndDone}
 	}
 	return err
 }

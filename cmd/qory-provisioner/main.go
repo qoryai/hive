@@ -105,30 +105,14 @@ group may write them only when it is gid 0, wheel, admin, or the owner's primary
 with the owner's name. Otherwise serve exits with status 1.
 
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
-machines. For each machine whose dispatch has no entry in the journal, serve sends
-dispatched for the dispatch:
-  - On 204, serve adds the machine to the journal, with the longest lifetime of 1470
-    minutes, and logs "took back the machine for its dispatch".
-  - On 410 gone, 409 lease_expired or a signed 403 forbidden, serve deletes the
-    machine.
-  - After any other failure, serve keeps the machine and sends dispatched again 60
-    seconds later. Once the machine has run longer than 1470 minutes and 15 minutes,
-    serve deletes it.
-A stopped or deleting machine, and a machine whose key is not a dispatch id, get no
-dispatched. serve deletes such a machine, except a deleting machine whose key is not
-a dispatch id, which it leaves as it is. serve logs "found a machine with no journal
-entry" once for a key, at the first of the watches in a row that find the key with no
-entry.
-
-Two provisioners of one node pool each take back the other's machines: each sends
-dispatched for them, deletes them and sends gone when their dispatch ends. A
-provisioner may also send the first dispatched of a machine that the other just made,
-with no machine type.
+machines and deletes each machine whose dispatch has no entry in the journal, with the
+log line "found a machine with no journal entry". Two provisioners of one node pool
+therefore delete each other's machines, also machines that run a dispatch.
 
 When you rotate the key, which means a new provisioner with a new access key for the
 node pool, stop the old provisioner before you start the new one. A new provisioner
-with a new state folder starts with an empty journal. It takes back each machine of
-the old one whose dispatch still runs, and deletes the others.
+with a new state folder starts with an empty journal, so it deletes the machines that
+the old one made, also those that run a dispatch.
 
 serve runs until SIGTERM or SIGINT. It then stops claiming, leaves every machine as it
 is, and exits with status 0. A second SIGTERM or SIGINT ends serve at once. serve exits
@@ -217,13 +201,14 @@ func start(ctx context.Context, f serveFlags, e env, log *slog.Logger) int {
 	log.Info("started the provisioner",
 		slog.String("version", version), slog.String("apiary_url", st.ApiaryURL), slog.String("pool_id", st.PoolID),
 		slog.String("access_key_id", st.AccessKeyID), slog.String("instance_id", st.InstanceID),
-		slog.String("gateway_address", gateway.String()),
+		slog.Int("max_machines", s.MaxMachines), slog.String("gateway_address", gateway.String()),
 		slog.String("state_dir", f.stateDir), slog.String("adapter", s.Adapter.Command))
 	err = loop.Run(ctx, loop.Config{
 		Apiary:         apiary{client: client},
 		Machines:       adapter.New(s.Adapter.Command, s.Adapter.Settings, e.stderr),
 		Journal:        j,
 		PoolID:         st.PoolID,
+		MaxMachines:    s.MaxMachines,
 		GatewayAddress: gateway,
 		Log:            log,
 	})
