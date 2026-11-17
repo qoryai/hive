@@ -803,7 +803,7 @@ func TestStartUnitRunCodeLinesFails(t *testing.T) {
 		other   = "Write each line of {file} as registry <host>, apiary <url> or runtimes <folder>. Line %d has another form."
 		blank   = "Remove the blank line, line %d, from {file}. The run code file may have no blank line."
 		badReg  = "Fix line %d of {file}. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535."
-		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with a port from 1 to 65535 and no user, path, query or fragment."
+		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with the scheme in lowercase, a port from 1 to 65535 and no user, path, query or fragment."
 		badRun  = "Fix line %d of {file}. The runtimes value must be an absolute path with no //, ., .. or trailing /."
 		twice   = "Remove the second %s line, line %d, from {file}. Each of the lines registry, apiary and runtimes may appear once."
 		tooMany = "Keep at most 3 lines in {file}, one each of registry, apiary and runtimes. The file has more."
@@ -839,6 +839,8 @@ func TestStartUnitRunCodeLinesFails(t *testing.T) {
 		{"an apiary with a user", "apiary https://user@apiary.example.com\n", fmt.Sprintf(badAp, 1)},
 		{"an apiary on http for a remote host", "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
 		{"an apiary with another scheme", "apiary ftp://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in capitals", "apiary HTTPS://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in mixed case", "apiary Https://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
 		{"an apiary with no scheme", "apiary apiary.example.com\n", fmt.Sprintf(badAp, 1)},
 		{"an apiary with port 0", "apiary https://apiary.example.com:0\n", fmt.Sprintf(badAp, 1)},
 		{"a runtimes folder that is relative", "runtimes var/runtimes\n", fmt.Sprintf(badRun, 1)},
@@ -920,12 +922,110 @@ func TestStartUnitRunCodeLinesFails(t *testing.T) {
 	})
 }
 
-// expectRefused runs the script and checks that it refuses with the line want and no
-// other line, exits 1, prints no stage after "Docker started", runs no qory, and prints
-// none of the lines of the file, content.
-func (e *env) expectRefused(t *testing.T, sh, want, content string) {
+// watchHead returns path with a folder before the others that has a head command. It logs
+// to $STUB_LOG one line "head-watch <state> <arguments>" for each call, where state is
+// present or absent for the file $HEAD_WATCH_FILE at the time of the call, and then runs
+// the real head. A test that sets HEAD_WATCH_FILE to the run code file sees whether the
+// script wrote the file before a call.
+func watchHead(t *testing.T, sh, path string) string {
 	t.Helper()
-	r := e.run(t, sh, "STUB_QORY_OUTPUT=1")
+	real := resolve(path, "head")
+	if real == "" {
+		t.Skip("install head to run this test")
+	}
+	dir := t.TempDir()
+	body := "#!" + sh + "\n" +
+		"if [[ -e $HEAD_WATCH_FILE ]]; then state=present; else state=absent; fi\n" +
+		"printf 'head-watch %s %s\\n' \"$state\" \"$*\" >>\"$STUB_LOG\"\n" +
+		"exec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "head"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(filepath.ListSeparator) + path
+}
+
+// watched returns the lines that watchHead logged for calls that read file.
+func watched(r result, file string) []string {
+	var calls []string
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "head-watch ") && strings.HasSuffix(line, " "+file) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// TestStartUnitRunCodeLinesOrder checks that the script reads and validates the file
+// before it writes the run code file: at the time of the read, the run code file does not
+// exist, for a file that the script accepts and for one that it refuses.
+func TestStartUnitRunCodeLinesOrder(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	for _, c := range []struct {
+		name, content string
+		status        int
+	}{
+		{"accepted", "registry registry.example.com\n", 0},
+		{"refused", "registry registry\n", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			r := e.run(t, sh, "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+			if r.status != c.status {
+				t.Errorf("status %d, want %d", r.status, c.status)
+			}
+			calls := watched(r, e.root+runCodeLinesFile)
+			if len(calls) != 1 || !strings.HasPrefix(calls[0], "head-watch absent ") {
+				t.Errorf("the script read the file with %q, want one call made while the run code file does not exist", calls)
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesBoundedRead checks that the script reads at most 1025 bytes of
+// the file, one byte more than qory's limit of 1024, and so refuses a file of 1 GiB in
+// the time of a small one. The file is sparse, so it takes no disk space.
+func TestStartUnitRunCodeLinesBoundedRead(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	e := newEnv(t, path)
+	if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := e.root + runCodeLinesFile
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	want := "Shorten " + file + " so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
+	r := e.expectRefused(t, sh, want, "", "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("refusing a file of 1 GiB took %v, want at most 10s: the read is not bounded", took)
+	}
+	calls := watched(r, file)
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], " -c 1025 -- "+file) {
+		t.Errorf("the script read the file with %q, want one call: head -c 1025 -- %s", calls, file)
+	}
+}
+
+// expectRefused runs the script with vars added and returns the result. It checks that
+// the script refuses with the line want and no other line, exits 1, prints no stage after
+// "Docker started", runs no qory, and prints none of the lines of the file, content.
+func (e *env) expectRefused(t *testing.T, sh, want, content string, vars ...string) result {
+	t.Helper()
+	r := e.run(t, sh, append([]string{"STUB_QORY_OUTPUT=1"}, vars...)...)
 	if r.status != 1 || r.stdout != "" || r.stderr != want+"\n" {
 		t.Errorf("status %d, stdout %q, stderr %q; want 1, no stdout and the line %q", r.status, r.stdout, r.stderr, want)
 	}
@@ -944,6 +1044,7 @@ func (e *env) expectRefused(t *testing.T, sh, want, content string) {
 			t.Errorf("the output contains the value %q of a line of the file", value)
 		}
 	}
+	return r
 }
 
 // TestStartUnitFails checks each invalid input and each failed step: the script prints

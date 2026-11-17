@@ -560,8 +560,8 @@ lines, each of a different kind and none blank:
 - `registry <host>`: the registry's host, with an optional `:<port>` from 1 to 65535.
   The host has a dot or a colon, or is `localhost`.
 - `apiary <url>`: the address of the Qory Apiary instance, `https://<host>[:<port>]`,
-  or `http://` when the host is `localhost` or a `127.x.x.x` address. It has no user,
-  path, query or fragment.
+  or `http://` when the host is `localhost` or a `127.x.x.x` address. The scheme is in
+  lowercase. The address has no user, path, query or fragment.
 - `runtimes <folder>`: an absolute path with no `//`, `.`, `..` or trailing `/`.
 
 The deploy recipe bakes the file into the image. Without the file, the run code file
