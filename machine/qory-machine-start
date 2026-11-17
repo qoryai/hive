@@ -10,6 +10,25 @@
 # util-linux), systemd (shutdown, systemctl and systemd-notify), and the coreutils
 # base64, chmod, chown, head, mkdir, rm and tr. It must have the user qory.
 #
+# The machine image may contain the file /etc/qory/run-code-lines: the lines that qory run
+# reads after the run code in its run code file. They set where the machine gets the
+# runtime from. A machine image for a pool that gets images and the runtime from a
+# registry through the gateway has it. The script writes the lines after the run code.
+# Without the file, the run code file contains the run code alone. The file is a regular
+# file that root owns, not a link, and root can read it. It has at most three lines, each
+# of a different kind, and no blank line:
+#   registry <host>     the host of the registry, letters, digits, . and -, an optional
+#                       :port from 1 to 65535, and a dot, a colon or the name localhost
+#   apiary <url>        https://<host>[:<port>], or http:// when the host is localhost or
+#                       a 127.x.x.x address; the scheme is in lowercase; no user, path,
+#                       query or fragment
+#   runtimes <folder>   an absolute path with no //, ., .. or trailing /, except the root /
+# One newline after the last line may be left out. The file has printable ASCII only,
+# contains no qecr_, qak_ or qrk_ in any case, and together with the run code and the
+# newline between them it makes at most 1024 bytes, qory's limit for the run code file.
+# The script fails on any other file, with one line to stderr that starts with its fix.
+# The line shows the file's path and the broken rule, and no line of the file.
+#
 # The script reads the start data from the file /run/qory-machine-start/start-data, and
 # deletes the file after the read. A unit for the machine's vendor writes the file
 # before this script runs, by the rule in the header of qory-machine.service.
@@ -65,6 +84,7 @@ daemon_json=$docker_dir/daemon.json
 certs_dir=$docker_dir/certs.d
 qory_dir=$root/etc/qory
 engine_proxy_json=$qory_dir/engine-proxy.json
+run_code_lines_file=$qory_dir/run-code-lines
 run_code_dir=$root/run/qory-machine
 run_code_file=$run_code_dir/run-code
 state_dir=$root/var/lib/qory-machine
@@ -173,6 +193,110 @@ is_ipv6() {
 is_hostname() {
 	local label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
 	[[ ${#1} -le 253 && $1 =~ ^($label\.)*$label$ ]]
+}
+
+# The limit of qory's run code file in bytes: the run code, then its lines.
+max_run_code_file=1024
+
+# valid_port returns 0 when $1 is empty or a port from 1 to 65535 of at most 5 digits.
+valid_port() {
+	[[ -z $1 ]] || { [[ $1 =~ ^[0-9]{1,5}$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)); }
+}
+
+# read_run_code_lines reads the optional file $run_code_lines_file. When the file does not
+# exist, it returns with run_code_lines unset. Otherwise it sets run_code_lines to the
+# file's content, after it has checked that the run code file made of the run code and the
+# content meets the rules of qory's run code file, see the header. It fails, with a line
+# that starts with the fix, for any file or content that qory would refuse. No line
+# contains a line of the file, because the lines of a run code file may hold a secret that
+# someone put there by mistake.
+run_code_lines=
+run_code_lines_set=
+read_run_code_lines() {
+	local file=$run_code_lines_file content lower rest line key value n=0 seen=' ' total
+	local scheme host port ok
+	if [[ -L $file ]]; then
+		fail "Write $file as a regular file, or remove it. The path is a symbolic link."
+	fi
+	[[ -e $file ]] || return 0
+	if [[ ! -f $file ]]; then
+		fail "Write $file as a regular file, or remove it. The path is not a regular file."
+	elif [[ ! -O $file ]]; then
+		fail "Write $file as root, or remove it. Another user owns the file."
+	fi
+	# One byte more than the limit is enough to see that the file is too long. The sentinel
+	# x keeps the newlines at the end of the content, and tr turns a NUL byte, which a
+	# shell variable cannot hold, into a control character that the check below finds.
+	content=$(head -c "$((max_run_code_file + 1))" -- "$file" 2>/dev/null | tr '\000' '\001' && printf x) ||
+		fail "Check that root can read $file. Reading the file failed."
+	content=${content%x}
+	if [[ -z $content ]]; then
+		fail "Write the lines registry, apiary or runtimes into $file, or remove it. The file is empty."
+	fi
+	total=$((${#run_code} + 1 + ${#content}))
+	if ((total > max_run_code_file)); then
+		fail "Shorten $file so that the run code, a newline and the file make at most $max_run_code_file bytes. The run code file would be longer."
+	fi
+	if [[ $content =~ [^[:print:]$'\n'] ]]; then
+		fail "Remove every control character and every byte above 126 from $file. It may contain printable ASCII lines only."
+	fi
+	lower=${content,,}
+	if [[ $lower == *qecr_* || $lower == *qak_* || $lower == *qrk_* ]]; then
+		fail "Remove the text qecr_, qak_ or qrk_, in any letter case, from $file. It looks like a run code, a run key or an access key secret."
+	fi
+
+	rest=${content%$'\n'}
+	while :; do
+		line=${rest%%$'\n'*}
+		n=$((n + 1))
+		((n <= 3)) || fail "Keep at most 3 lines in $file, one each of registry, apiary and runtimes. The file has more."
+		[[ -n $line ]] || fail "Remove the blank line, line $n, from $file. The run code file may have no blank line."
+		key=${line%% *}
+		value=
+		[[ $line != *' '* ]] || value=${line#* }
+		ok=
+		case $key in
+		registry)
+			if [[ $value =~ ^[A-Za-z0-9.-]+(:([0-9]{1,5}))?$ ]] && valid_port "${BASH_REMATCH[2]}" &&
+				[[ $value == *[.:]* || $value == localhost ]]; then
+				ok=1
+			fi
+			;;
+		apiary)
+			if [[ $value =~ ^(https?)://([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then
+				scheme=${BASH_REMATCH[1]}
+				host=${BASH_REMATCH[2]}
+				port=${BASH_REMATCH[4]}
+				if valid_port "$port" && { [[ $scheme == https || $host == localhost ]] || { is_ipv4 "$host" && [[ $host == 127.* ]]; }; }; then
+					ok=1
+				fi
+			fi
+			;;
+		runtimes)
+			if [[ $value == /* && ( $value == / || ( $value != *//* && $value != */ && $value != */. && $value != */.. && $value != */./* && $value != */../* ) ) ]]; then
+				ok=1
+			fi
+			;;
+		*)
+			fail "Write each line of $file as registry <host>, apiary <url> or runtimes <folder>. Line $n has another form."
+			;;
+		esac
+		if [[ -z $ok ]]; then
+			case $key in
+			registry) fail "Fix line $n of $file. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535." ;;
+			apiary) fail "Fix line $n of $file. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with the scheme in lowercase, a port from 1 to 65535 and no user, path, query or fragment." ;;
+			*) fail "Fix line $n of $file. The runtimes value must be an absolute path with no //, ., .. or trailing /, except the root /." ;;
+			esac
+		fi
+		if [[ $seen == *" $key "* ]]; then
+			fail "Remove the second $key line, line $n, from $file. Each of the lines registry, apiary and runtimes may appear once."
+		fi
+		seen+="$key "
+		[[ $rest == *$'\n'* ]] || break
+		rest=${rest#*$'\n'}
+	done
+	run_code_lines=$content
+	run_code_lines_set=1
 }
 
 # 1. Read the start data, once. The tests of -e, -d, -f, -O and -s follow a symbolic
@@ -356,10 +480,18 @@ stage "Docker started"
 # qory and its children inherit no NOTIFY_SOCKET.
 unset NOTIFY_SOCKET
 
-# 5. The run code, for qory only. The folder is given to qory after the file is written.
+# 5. The run code, for qory only, then the lines of the machine image after it, when the
+# file run-code-lines exists. The folder is given to qory after the file is written.
 mkdir -p -m 0700 "$run_code_dir" 2>/dev/null || fail "Check that root can write $root/run. Making $run_code_dir failed."
+# The lines of the machine image are checked before anything is written, so a refused
+# file leaves no run code file.
+read_run_code_lines
 printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."
 unset run_code
+if [[ -n $run_code_lines_set ]]; then
+	printf '\n%s' "$run_code_lines" 2>/dev/null >>"$run_code_file" ||
+		fail "Check that root can write $run_code_dir. Appending the lines of $run_code_lines_file to $run_code_file failed."
+fi
 chmod 0600 "$run_code_file" 2>/dev/null || fail "Check that root can write $run_code_dir. Setting $run_code_file to mode 0600 failed."
 chown qory "$run_code_file" "$run_code_dir" 2>/dev/null || fail "Add the user qory to the machine image. Giving $run_code_dir and $run_code_file to qory failed."
 stage "run code written"

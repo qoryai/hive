@@ -421,6 +421,30 @@ file, and on a file that root does not own. When the file is missing or empty, i
 /run/qory-machine-start/start-data does not exist or is empty." It deletes the file
 after the read. A failed start-data unit for EC2 powers the machine off.
 
+The machine image may contain the file `/etc/qory/run-code-lines`. It sets where
+the machine gets its images and the runtime from: the registry, reached through the
+gateway. After the run code, the start unit writes a newline and the file's content
+into the run code file, and `qory run` reads the lines. The file has at most three
+lines, each of a different kind and none blank:
+
+- `registry <host>`: the registry's host, with an optional `:<port>` from 1 to 65535.
+  The host has a dot or a colon, or is `localhost`.
+- `apiary <url>`: the address of the Qory Apiary instance, `https://<host>[:<port>]`,
+  or `http://` when the host is `localhost` or a `127.x.x.x` address. The scheme is in
+  lowercase. The address has no user, path, query or fragment.
+- `runtimes <folder>`: an absolute path with no `//`, `.`, `..` or trailing `/`, except
+  the root `/`.
+
+The deploy recipe bakes the file into the image. Without the file, the run code file
+contains the run code alone. The start unit fails on every file that `qory run`
+would refuse, and on a few more: a symbolic link, a file that is not regular or that
+another user owns, a file that root cannot read, an empty file, a blank line, a
+repeated line, any other line, a control character or a byte above 126, a `qecr_`,
+`qak_` or `qrk_` in any letter case, or a run code file of more than 1024 bytes. It
+prints one line to the console that starts with the fix and shows the file's path and
+the broken rule, and no line of the file. Then it powers the machine off before
+`qory run` starts.
+
 ## Licence
 
 Apache License 2.0; see [LICENSE](LICENSE) and [NOTICE](NOTICE). *Qory* is a trademark of
