@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -633,24 +634,30 @@ func skipRoot(t *testing.T) {
 }
 
 // otherOwner replaces the start data file with a file that the user who runs the test
-// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
-// it makes the start data file a hard link to a root-owned file, and skips when no such
-// link can be made. The script removes only the link.
+// does not own, see [otherOwnerFile].
 func otherOwner(t *testing.T, root string) {
 	t.Helper()
-	data := root + handOff
+	otherOwnerFile(t, root+handOff)
+}
+
+// otherOwnerFile replaces the file at path with a file that the user who runs the test
+// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
+// it makes path a hard link to a root-owned file, and skips when no such link can be
+// made. The script removes only the link.
+func otherOwnerFile(t *testing.T, path string) {
+	t.Helper()
 	if os.Geteuid() == 0 {
-		if err := os.Chown(data, 65534, 65534); err != nil {
+		if err := os.Chown(path, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	remove(t, data)
+	remove(t, path)
 	for _, f := range []string{"/etc/hosts", "/private/etc/hosts", "/etc/passwd", "/etc/protocols", "/etc/services"} {
 		if info, err := os.Lstat(f); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if os.Link(f, data) == nil {
+		if os.Link(f, path) == nil {
 			return
 		}
 	}
@@ -706,6 +713,237 @@ func linkFolder(t *testing.T, root string) {
 	write(t, root+"/elsewhere/start-data", startData(runCode, gatewayURL, gatewayAddress, 60))
 	write(t, root+"/elsewhere/.start-data.x", "a temporary file")
 	link(t, root+"/elsewhere", dir)
+}
+
+// runCodeLinesFile is the optional file of the machine image under the root folder.
+const runCodeLinesFile = "/etc/qory/run-code-lines"
+
+// paddedRegistry returns a registry line that, with the run code and the newline between
+// them, makes a run code file of size bytes, with or without a newline after the line.
+func paddedRegistry(size int, newline bool) string {
+	line := "registry "
+	end := ""
+	if newline {
+		end = "\n"
+	}
+	pad := size - len(runCode) - 1 - len(line) - len(".example") - len(end)
+	return line + strings.Repeat("a", pad) + ".example" + end
+}
+
+// TestStartUnitRunCodeLines checks the lines after the run code: without the file
+// /etc/qory/run-code-lines the run code file is the run code alone, and with it the file
+// is the run code, a newline and the lines of the file.
+func TestStartUnitRunCodeLines(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary, runtimes := "registry registry.example.com:5000", "apiary https://apiary.example.com", "runtimes /var/lib/qory/runtimes"
+	cases := []struct{ name, content string }{
+		{"no file", ""},
+		{"registry and apiary", registry + "\n" + apiary + "\n"},
+		{"registry and apiary, no newline at the end", registry + "\n" + apiary},
+		{"one line with a newline", registry + "\n"},
+		{"one line without a newline", apiary},
+		{"all three lines", registry + "\n" + apiary + "\n" + runtimes + "\n"},
+		{"the lines in another order", runtimes + "\n" + apiary + "\n" + registry},
+		{"registry without a port", "registry registry.example.com"},
+		{"registry localhost", "registry localhost"},
+		{"registry with a colon and no dot", "registry registry:5000"},
+		{"apiary with a port", "apiary https://apiary.example.com:8443"},
+		{"apiary on http for localhost", "apiary http://localhost:4000"},
+		{"apiary on http for a loopback address", "apiary http://127.0.0.1"},
+		{"runtimes at the root", "runtimes /"},
+		{"exactly 1 KiB with a newline", paddedRegistry(1024, true)},
+		{"exactly 1 KiB without a newline", paddedRegistry(1024, false)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if c.name != "no file" {
+				if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(t, e.root+runCodeLinesFile, c.content)
+			}
+			r := e.run(t, sh)
+			if r.status != 0 || r.stdout != "" || r.stderr != "" {
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and only stage lines", r.status, r.stdout, r.stderr)
+			}
+			equalStages(t, r.stages, stages)
+			want := runCode
+			if c.content != "" {
+				want += "\n" + c.content
+			}
+			if got := read(t, e.keep); got != want {
+				t.Errorf("the run code file that qory read has %d bytes and is not the run code and the lines of the file, %d bytes", len(got), len(want))
+			}
+			if got := mode(t, e.keep); got != 0o600 {
+				t.Errorf("the run code file had mode %v, want 0600", got)
+			}
+			if got := read(t, e.root+"/etc/hosts"); strings.Contains(got, "registry") {
+				t.Errorf("/etc/hosts contains a line of the file: %q", got)
+			}
+			// chown comes after the lines are appended, and the stage line after chown.
+			wantChown := "chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine"
+			if !slices.Contains(r.log, wantChown) {
+				t.Errorf("the commands do not contain %q:\n%s", wantChown, strings.Join(r.log, "\n"))
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesFails checks each file that qory would refuse: the script
+// prints one line that starts with the fix and contains no line of the file, exits 1, and
+// writes no run code file, and qory does not run.
+func TestStartUnitRunCodeLinesFails(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary := "registry registry.example.com", "apiary https://apiary.example.com"
+	const (
+		other   = "Write each line of {file} as registry <host>, apiary <url> or runtimes <folder>. Line %d has another form."
+		blank   = "Remove the blank line, line %d, from {file}. qory refuses a blank line after the run code."
+		badReg  = "Fix line %d of {file}. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535."
+		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with a port from 1 to 65535 and no user, path, query or fragment."
+		badRun  = "Fix line %d of {file}. The runtimes value must be an absolute path with no //, ., .. or trailing /."
+		twice   = "Remove the second %s line, line %d, from {file}. Each of the lines registry, apiary and runtimes may appear once."
+		tooMany = "Keep at most 3 lines in {file}, one each of registry, apiary and runtimes. The file has more."
+		control = "Remove every control character and every byte above 126 from {file}. It may contain printable ASCII lines only."
+		secret  = "Remove the run code, run key or access key secret from {file}. It may contain the lines registry, apiary and runtimes only."
+		empty   = "Write the lines registry, apiary or runtimes into {file}, or remove it. The file is empty."
+		tooLong = "Shorten {file}. With the run code, the run code file would be %d bytes, and qory reads at most 1024."
+	)
+	cases := []struct{ name, content, want string }{
+		{"empty file", "", empty},
+		{"a blank line", registry + "\n\n" + apiary + "\n", fmt.Sprintf(blank, 2)},
+		{"a blank line first", "\n" + registry + "\n", fmt.Sprintf(blank, 1)},
+		{"two newlines at the end", registry + "\n\n", fmt.Sprintf(blank, 2)},
+		{"only a newline", "\n", fmt.Sprintf(blank, 1)},
+		{"the same line twice", registry + "\n" + registry + "\n", fmt.Sprintf(twice, "registry", 2)},
+		{"the same key with another value", apiary + "\n" + registry + "\napiary https://other.example.com\n", fmt.Sprintf(twice, "apiary", 3)},
+		{"a fourth line", registry + "\n" + apiary + "\nruntimes /srv/runtimes\nruntimes /srv/other\n", tooMany},
+		{"an unknown key", "gateway https://gateway.example.com\n", fmt.Sprintf(other, 1)},
+		{"a key with no value", "registry\n", fmt.Sprintf(badReg, 1)},
+		{"a key in capitals", "REGISTRY registry.example.com\n", fmt.Sprintf(other, 1)},
+		{"a line with a leading space", " " + registry + "\n", fmt.Sprintf(other, 1)},
+		{"a registry with a path", "registry registry.example.com/v2\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with a user", "registry user@registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with an https scheme", "registry https://registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with no dot or colon", "registry registry\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 0", "registry registry.example.com:0\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 65536", "registry registry.example.com:65536\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with two spaces", "registry  registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"an apiary with a path", "apiary https://apiary.example.com/v1\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a slash at the end", "apiary https://apiary.example.com/\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a query", "apiary https://apiary.example.com?a=b\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a fragment", "apiary https://apiary.example.com#a\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a user", "apiary https://user@apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary on http for a remote host", "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with another scheme", "apiary ftp://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with no scheme", "apiary apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with port 0", "apiary https://apiary.example.com:0\n", fmt.Sprintf(badAp, 1)},
+		{"a runtimes folder that is relative", "runtimes var/runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with a slash at the end", "runtimes /var/runtimes/\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with //", "runtimes /var//runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with ..", "runtimes /var/../runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with .", "runtimes /var/./runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder that ends in ..", "runtimes /var/..\n", fmt.Sprintf(badRun, 1)},
+		{"a bad line after a good one", registry + "\n" + "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 2)},
+		{"a line ending with CR", registry + "\r\n", control},
+		{"a tab", "registry\tregistry.example.com\n", control},
+		{"a NUL byte", registry + "\x00\n", control},
+		{"a byte above 126", "runtimes /srv/caf\xc3\xa9\n", control},
+		{"a run code in the file", "registry " + runCode + "\n", secret},
+		{"a run code in capitals", "registry QECR_FOO.example.com\n", secret},
+		{"an access key secret", "registry qak_abc.example.com\n", secret},
+		{"a run key", "apiary https://qrk_abc.example.com\n", secret},
+		{"a secret in a mixed case", "registry x.QaK_1.example.com\n", secret},
+		{"1 KiB and 1 byte with a newline", paddedRegistry(1025, true), fmt.Sprintf(tooLong, 1025)},
+		{"1 KiB and 1 byte without a newline", paddedRegistry(1025, false), fmt.Sprintf(tooLong, 1025)},
+		{"far above 1 KiB", strings.Repeat(registry+"\n", 100), fmt.Sprintf(tooLong, len(runCode)+1+1025)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			e.expectRefused(t, sh, strings.ReplaceAll(c.want, "{file}", e.root+runCodeLinesFile), c.content)
+		})
+	}
+
+	file := func(e *env) string { return e.root + runCodeLinesFile }
+	t.Run("a symbolic link", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		write(t, e.root+"/elsewhere", registry+"\n")
+		link(t, e.root+"/elsewhere", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a link to nothing", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		link(t, e.root+"/missing", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a folder", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(file(e), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is not a regular file.", registry)
+	})
+	t.Run("another owner", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		otherOwnerFile(t, file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as root, or remove it. Another user owns the file.", registry)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		t.Parallel()
+		skipRoot(t)
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		if err := os.Chmod(file(e), 0); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Check that root can read "+file(e)+". Reading the file failed.", registry)
+	})
+}
+
+// expectRefused runs the script and checks that it refuses with the line want and no
+// other line, exits 1, prints no stage after "Docker started", runs no qory, and prints
+// none of the lines of the file, content.
+func (e *env) expectRefused(t *testing.T, sh, want, content string) {
+	t.Helper()
+	r := e.run(t, sh, "STUB_QORY_OUTPUT=1")
+	if r.status != 1 || r.stdout != "" || r.stderr != want+"\n" {
+		t.Errorf("status %d, stdout %q, stderr %q; want 1, no stdout and the line %q", r.status, r.stdout, r.stderr, want)
+	}
+	equalStages(t, r.stages, stages[:3])
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "runuser") {
+			t.Errorf("the script ran qory after a refusal: %q", line)
+		}
+	}
+	if _, err := os.Lstat(e.keep); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("qory read a run code file after a refusal: %v", err)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		_, value, _ := strings.Cut(line, " ")
+		if len(value) > 9 && strings.Contains(r.stderr+r.stdout, value) {
+			t.Errorf("the output contains the value %q of a line of the file", value)
+		}
+	}
 }
 
 // TestStartUnitFails checks each invalid input and each failed step: the script prints

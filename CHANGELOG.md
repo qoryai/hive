@@ -50,6 +50,14 @@ The changes to Hive that no release contains yet, in the shape of
   contains no value of the start data. The script passes the file to `qory run` with
   `--machine-steps-file`. A failed write does not stop the script, and `qory run` then
   starts without the flag.
+- A machine gets images and the runtime from the registry through the gateway. When the
+  machine image contains `/etc/qory/run-code-lines`, the start script, `qory-machine-start`,
+  writes a newline and the file's lines (`registry`, `apiary` and `runtimes`) after the
+  run code in the run code file, so `qory run` reads them. Without the file, the run code
+  file is the run code alone. The script refuses a file that `qory run` would refuse,
+  with one line that starts with the fix and shows no line of the file, and powers the
+  machine off. The start data has no new member. Deploy: the deploy recipe bakes
+  `/etc/qory/run-code-lines` into the machine image.
 - The start-data unit for EC2: `qory-machine-data-aws-ec2.service` and its script
   `qory-machine-data-aws-ec2`. It runs before `qory-machine.service`, reads the EC2 user
   data with IMDSv2, and writes it to `/run/qory-machine-start/start-data`. It fails
