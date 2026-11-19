@@ -8,10 +8,10 @@ const stateDeleting = "deleting"
 // characters, as the provisioner contract requires.
 const ReasonRestarted = "the provisioner restarted before a machine was made"
 
-// Lookup is the result of the lookup of a dispatch's machine by its dispatch id, the
-// dispatch id, in the adapter's list of machines. Found is false when no machine in the
-// list has that dispatch id. MachineID and State are the machine's id and its adapter
-// state: starting, running, stopped or deleting.
+// Lookup is the result of the lookup of a dispatch's machine by the dispatch id in the
+// adapter's list of machines. Found is false when no machine in the list has that
+// dispatch id. MachineID and State are the machine's id and its adapter state:
+// starting, running, stopped or deleting.
 type Lookup struct {
 	Found            bool
 	MachineID, State string

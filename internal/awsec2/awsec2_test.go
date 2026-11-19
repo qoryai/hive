@@ -220,8 +220,8 @@ func world(offered ...string) *fakeAPI {
 	}
 }
 
-// launched returns an instance with id, state, the qory:dispatch_id tag key and a
-// launch time in UTC+2 with half a second.
+// launched returns an instance with id, state, dispatchID as the value of the
+// qory:dispatch_id tag and a launch time in UTC+2 with half a second.
 func launched(id, state, dispatchID string) types.Instance {
 	return types.Instance{
 		InstanceId: aws.String(id),
