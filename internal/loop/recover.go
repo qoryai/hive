@@ -10,8 +10,8 @@ import (
 
 // recoverJournal runs once before the claim path and the watch. It lists the pool's
 // machines once and acts on each journal entry as [journal.Recover] returns:
-//   - Release: the dispatch is released and its entry removed. When the release
-//     returns 409 machine_exists, the entry stays claimed for the watch.
+//   - Release: the dispatch is released, and its entry is removed when the release
+//     returns 204. After any other answer, the entry stays claimed for the watch.
 //   - Deleting: the entry moves to the phase deleting with the machine id found, and
 //     the machine counts as logged. When the write fails, the entry stays as it is
 //     for the watch.
@@ -56,7 +56,9 @@ func (l *loop) recoverJournal(ctx context.Context) error {
 					return err
 				}
 			}
-			attrs = append(attrs, slog.String("machine_id", next.MachineID))
+			if next.MachineID != "" {
+				attrs = append(attrs, slog.String("machine_id", next.MachineID))
+			}
 			if found {
 				attrs = append(attrs, slog.String("state", string(m.State)))
 			}

@@ -30,9 +30,6 @@ type Settings struct {
 	// ImageID is the image each machine starts from: ami- and 8 or 17 hexadecimal
 	// digits.
 	ImageID string
-	// Sizes maps a size name of a make request to an EC2 instance type, such as
-	// standard to t3.medium: 1 to 20 entries.
-	Sizes map[string]string
 	// Tags maps a tag key to its value, such as qory:stack to example-stack: at most 20
 	// entries. Each machine and its volume get these tags after qory:managed,
 	// qory:pool and qory:key. Tags is nil when the member tags is
@@ -41,16 +38,13 @@ type Settings struct {
 }
 
 // members are the required members, in the order an error lists the missing ones.
-var members = []string{"subnet_id", "security_group_id", "image_id", "sizes"}
+var members = []string{"subnet_id", "security_group_id", "image_id"}
 
 // tagsMember is the one optional member.
 const tagsMember = "tags"
 
 // maxFile is the most bytes a settings file may contain.
 const maxFile = 64 << 10
-
-// maxSizes is the most entries of sizes.
-const maxSizes = 20
 
 // maxTags is the most entries of tags. EC2 accepts at most 50 tags on a resource, and
 // the adapter adds 3: qory:managed, qory:pool and qory:key.
@@ -71,7 +65,6 @@ var rules = map[string]string{
 	"subnet_id":         "subnet- and 8 or 17 lower-case hexadecimal digits",
 	"security_group_id": "sg- and 8 or 17 lower-case hexadecimal digits",
 	"image_id":          "ami- and 8 or 17 lower-case hexadecimal digits",
-	"sizes":             "an object of 1 to 20 members, each a size name of 1 to 40 characters of a-z, 0-9 and - that starts with a letter, set to an EC2 instance type such as t3.medium",
 	tagsMember:          "an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters",
 }
 
@@ -84,14 +77,12 @@ const (
 )
 
 // msgUnknownMember is the error of a member that is neither required nor tags.
-const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id, sizes and tags from " + settingsFile + "."
+const msgUnknownMember = "Remove every member other than subnet_id, security_group_id, image_id and tags from " + settingsFile + "."
 
 var (
 	subnetShape        = regexp.MustCompile(`^subnet-([0-9a-f]{8}|[0-9a-f]{17})$`)
 	securityGroupShape = regexp.MustCompile(`^sg-([0-9a-f]{8}|[0-9a-f]{17})$`)
 	imageShape         = regexp.MustCompile(`^ami-([0-9a-f]{8}|[0-9a-f]{17})$`)
-	sizeShape          = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
-	instanceTypeShape  = regexp.MustCompile(`^[a-z][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$`)
 	// tagText is the characters that EC2 accepts in a tag key and a tag value.
 	tagText = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]*$`)
 )
@@ -180,8 +171,6 @@ func ParseSettings(b []byte) (Settings, error) {
 			s.SecurityGroupID, good = matching(raw, securityGroupShape)
 		case "image_id":
 			s.ImageID, good = matching(raw, imageShape)
-		case "sizes":
-			s.Sizes, good = sizes(raw)
 		}
 		if !good {
 			return Settings{}, settingsError(ruleError(name))
@@ -208,24 +197,6 @@ func matching(raw jsontext.Value, shape *regexp.Regexp) (string, bool) {
 		return "", false
 	}
 	return s, shape.MatchString(s)
-}
-
-// sizes is an object of 1 to 20 members, each a name that sizeShape matches set to an
-// instance type that instanceTypeShape matches.
-func sizes(raw jsontext.Value) (map[string]string, bool) {
-	var m map[string]jsontext.Value
-	if raw.Kind() != '{' || jsonv2.Unmarshal(raw, &m) != nil || len(m) < 1 || len(m) > maxSizes {
-		return nil, false
-	}
-	out := make(map[string]string, len(m))
-	for name, v := range m {
-		t, ok := matching(v, instanceTypeShape)
-		if !ok || !sizeShape.MatchString(name) {
-			return nil, false
-		}
-		out[name] = t
-	}
-	return out, true
 }
 
 // tags reads the member tags: an object of at most maxTags members, each a key of 1

@@ -187,7 +187,8 @@ func TestLoadConfigRefusesVariables(t *testing.T) {
 		"AWS_EC2_METADATA_DISABLED":              "Unset AWS_EC2_METADATA_DISABLED: the EC2 machine adapter reads the instance role's credentials from the instance metadata service at its standard address",
 		"AWS_ENDPOINT_URL":                       "Unset AWS_ENDPOINT_URL: the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials",
 		"AWS_ENDPOINT_URL_EC2":                   "Unset AWS_ENDPOINT_URL_EC2: the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials",
-		"AWS_CA_BUNDLE":                          "Unset AWS_CA_BUNDLE: the EC2 machine adapter checks the EC2 endpoint's certificate only against the host's certificate authorities",
+		"AWS_ENDPOINT_URL_PRICING":               "Unset AWS_ENDPOINT_URL_PRICING: the EC2 machine adapter calls the AWS Price List Query API only at its standard endpoint in us-east-1",
+		"AWS_CA_BUNDLE":                          "Unset AWS_CA_BUNDLE: the EC2 machine adapter checks the EC2 and price list endpoints' certificates only against the host's certificate authorities",
 	}
 	if len(want) != len(refusedVariables) {
 		t.Fatalf("%d refused variables, want %d", len(refusedVariables), len(want))

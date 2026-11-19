@@ -107,17 +107,18 @@ func timeout(name string) time.Duration {
 }
 
 // Check runs check: the adapter shows that its rights and settings work, and makes no
-// machine.
-func (r *Runner) Check(ctx context.Context) error {
-	_, err := run(ctx, r, "check", contracts.MachinesCheck{Version: adapterio.Version}, nil, adapterio.DecodeCheckAnswer)
-	return err
+// machine. It returns the adapter's offers, 1 to 64 machines in the order of its
+// settings.
+func (r *Runner) Check(ctx context.Context) ([]contracts.MachineSpec, error) {
+	a, err := run(ctx, r, "check", contracts.MachinesCheck{Version: adapterio.Version}, nil, adapterio.DecodeCheckAnswer)
+	return a.Offers, err
 }
 
-// Make runs make: the adapter makes one machine of size in pool for key, the dispatch
-// id, and delivers startData to it. startData contains the machine's run code, and it
-// travels only on the adapter's standard input.
-func (r *Runner) Make(ctx context.Context, key, pool, size string, startData []byte) (contracts.MachinesMakeAnswer, error) {
-	req := contracts.MachinesMake{Version: adapterio.Version, Key: key, Pool: pool, Size: size, StartData: base64.StdEncoding.EncodeToString(startData)}
+// Make runs make: the adapter makes one machine that fits spec in pool for key, the
+// dispatch id, and delivers startData to it. startData contains the machine's run
+// code, and it travels only on the adapter's standard input.
+func (r *Runner) Make(ctx context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
+	req := contracts.MachinesMake{Version: adapterio.Version, Key: key, Pool: pool, MachineSpec: spec, StartData: base64.StdEncoding.EncodeToString(startData)}
 	return run(ctx, r, "make", req, startData, adapterio.DecodeMakeAnswer)
 }
 

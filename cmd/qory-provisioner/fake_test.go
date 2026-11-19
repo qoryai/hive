@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/qoryai/integrations/contracts"
 )
 
 // fakeSwitch makes the test binary act as a fake machine adapter. Its name does not
@@ -45,23 +47,31 @@ const (
 	fakeMachines = "machines.json"
 	// fakeMade is the record of the last make, see [made].
 	fakeMade = "made.json"
+	// fakeType is the machine type of each machine that the fake adapter makes.
+	fakeType = "m7i.large"
 )
+
+// fakeOffers are the offers of the fake adapter's check.
+var fakeOffers = []contracts.MachineSpec{
+	{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 16384, Arch: "amd64"},
+	{VCPUs: 4, MemoryMiB: 16384, DiskGiB: 16384, Arch: "arm64", Virtualization: true},
+}
 
 // made is what the fake adapter recorded of a make request. It contains the SHA-256 of
 // the run code in the start data, never the run code.
 type made struct {
-	Key                string `json:"key"`
-	Pool               string `json:"pool"`
-	Size               string `json:"size"`
-	RunCodeSHA256      string `json:"run_code_sha256"`
-	GatewayURL         string `json:"gateway_url"`
-	GatewayAddress     string `json:"gateway_address"`
-	MaxLifetimeMinutes int    `json:"max_lifetime_minutes"`
+	Key                string                `json:"key"`
+	Pool               string                `json:"pool"`
+	MachineSpec        contracts.MachineSpec `json:"machine_spec"`
+	RunCodeSHA256      string                `json:"run_code_sha256"`
+	GatewayURL         string                `json:"gateway_url"`
+	GatewayAddress     string                `json:"gateway_address"`
+	MaxLifetimeMinutes int                   `json:"max_lifetime_minutes"`
 }
 
 // fakeAdapter runs as the machine adapter: args are <command> --settings FILE. It
-// answers check, make, list, log and delete as version 1 of the protocol, keeps its
-// machines in a file, and writes no line on standard error.
+// returns [fakeOffers] for check, and answers make, list, log and delete as version 1
+// of the protocol, keeps its machines in a file, and writes no line on standard error.
 func fakeAdapter(args []string, stdin io.Reader, stdout io.Writer) int {
 	if len(args) != 3 || args[1] != "--settings" {
 		return 9
@@ -87,7 +97,7 @@ func fakeAdapter(args []string, stdin io.Reader, stdout io.Writer) int {
 	var answer any
 	switch args[0] {
 	case "check":
-		answer = map[string]any{}
+		answer = contracts.MachinesCheckAnswer{Offers: fakeOffers}
 	case "make":
 		answer, err = fakeMake(s.Dir, req)
 	case "list":
@@ -128,13 +138,13 @@ func fakeRead(dir string) map[string]string {
 }
 
 // fakeMake makes one machine per key, records the request in [fakeMade], and returns
-// the make answer.
+// the make answer with the machine type [fakeType].
 func fakeMake(dir string, req []byte) (any, error) {
 	var r struct {
-		Key       string `json:"key"`
-		Pool      string `json:"pool"`
-		Size      string `json:"size"`
-		StartData []byte `json:"start_data"`
+		Key         string                `json:"key"`
+		Pool        string                `json:"pool"`
+		MachineSpec contracts.MachineSpec `json:"machine_spec"`
+		StartData   []byte                `json:"start_data"`
 	}
 	if err := json.Unmarshal(req, &r); err != nil {
 		return nil, err
@@ -152,7 +162,7 @@ func fakeMake(dir string, req []byte) (any, error) {
 	}
 	sum := sha256.Sum256([]byte(data.RunCode))
 	rec, err := json.Marshal(made{
-		Key: r.Key, Pool: r.Pool, Size: r.Size, RunCodeSHA256: hex.EncodeToString(sum[:]),
+		Key: r.Key, Pool: r.Pool, MachineSpec: r.MachineSpec, RunCodeSHA256: hex.EncodeToString(sum[:]),
 		GatewayURL: data.Gateway.URL, GatewayAddress: data.Gateway.Address, MaxLifetimeMinutes: data.MaxLifetimeMinutes,
 	})
 	if err != nil {
@@ -174,5 +184,5 @@ func fakeMake(dir string, req []byte) (any, error) {
 			return nil, err
 		}
 	}
-	return map[string]string{"id": id}, nil
+	return contracts.MachinesMakeAnswer{ID: id, MachineType: fakeType}, nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/pricing"
 
 	"github.com/qoryai/hive/internal/adapterio"
 	"github.com/qoryai/integrations/contracts"
@@ -48,21 +49,61 @@ type API interface {
 	GetConsoleOutput(ctx context.Context, in *ec2.GetConsoleOutputInput, optFns ...func(*ec2.Options)) (*ec2.GetConsoleOutputOutput, error)
 	TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
 	DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
+	DescribeSubnets(ctx context.Context, in *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
+	DescribeInstanceTypes(ctx context.Context, in *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
+	DescribeInstanceTypeOfferings(ctx context.Context, in *ec2.DescribeInstanceTypeOfferingsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypeOfferingsOutput, error)
 }
 
-// Client makes, lists, reads and terminates machines through an API.
+// Client makes, lists, reads and terminates machines through an API, and reads the
+// prices of instance types through a PriceAPI.
 type Client struct {
 	api API
+	// prices is the client of the AWS Price List Query API; nil when the Client reads
+	// no prices.
+	prices PriceAPI
+	// region is the AWS region of the calls, for error messages and the region of the
+	// prices; "" when unknown.
+	region string
 }
 
-// New returns a Client that calls api.
+// New returns a Client that calls api, in a region that its error messages leave out.
 func New(api API) *Client {
 	return &Client{api: api}
 }
 
-// NewFromConfig returns a Client that calls EC2 with the SDK's client built from cfg.
+// NewInRegion returns a Client that calls api in region, such as eu-west-1, which its
+// error messages contain.
+func NewInRegion(api API, region string) *Client {
+	return &Client{api: api, region: region}
+}
+
+// NewWithPrices returns a Client that calls api and reads the prices of region with
+// prices, in region, such as eu-west-1, which its error messages contain.
+func NewWithPrices(api API, prices PriceAPI, region string) *Client {
+	return &Client{api: api, prices: prices, region: region}
+}
+
+// NewFromConfig returns a Client that calls EC2 with the SDK's client built from cfg,
+// in cfg's region, and the AWS Price List Query API with the SDK's client built from
+// cfg, in [PriceRegion].
 func NewFromConfig(cfg aws.Config) *Client {
-	return New(ec2.NewFromConfig(cfg))
+	prices := pricing.NewFromConfig(cfg, func(o *pricing.Options) { o.Region = PriceRegion })
+	return NewWithPrices(ec2.NewFromConfig(cfg), prices, cfg.Region)
+}
+
+// RegionCode returns the AWS region of the calls, such as eu-west-1, or "" when it
+// is unknown.
+func (c *Client) RegionCode() string {
+	return c.region
+}
+
+// Region returns the AWS region of the calls, or "this region" when it is unknown, so
+// that an error message reads the same either way.
+func (c *Client) Region() string {
+	if c.region == "" {
+		return "this region"
+	}
+	return c.region
 }
 
 // The reasons of the refusals of [refusedVariables].
@@ -71,7 +112,8 @@ const (
 	reasonFiles       = "the EC2 machine adapter reads no AWS config or credentials file"
 	reasonMetadata    = "the EC2 machine adapter reads the instance role's credentials from the instance metadata service at its standard address"
 	reasonEndpoint    = "the EC2 machine adapter calls EC2 only at its standard endpoint, with the instance role's credentials"
-	reasonCABundle    = "the EC2 machine adapter checks the EC2 endpoint's certificate only against the host's certificate authorities"
+	reasonPriceURL    = "the EC2 machine adapter calls the AWS Price List Query API only at its standard endpoint in us-east-1"
+	reasonCABundle    = "the EC2 machine adapter checks the EC2 and price list endpoints' certificates only against the host's certificate authorities"
 )
 
 // The messages of LoadConfig's errors after the refused variables. A message that
@@ -88,7 +130,8 @@ const (
 
 // refusedVariables are the AWS SDK's environment variables that select another
 // credential source, an AWS config or credentials file, another address of the
-// instance metadata service, another EC2 endpoint or another certificate authority.
+// instance metadata service, another EC2 or price list endpoint, or another
+// certificate authority.
 // [LoadConfig] returns an error when any of them is set and not empty.
 var refusedVariables = []struct{ name, reason string }{
 	{"AWS_ACCESS_KEY_ID", reasonCredentials},
@@ -108,6 +151,7 @@ var refusedVariables = []struct{ name, reason string }{
 	{"AWS_EC2_METADATA_DISABLED", reasonMetadata},
 	{"AWS_ENDPOINT_URL", reasonEndpoint},
 	{"AWS_ENDPOINT_URL_EC2", reasonEndpoint},
+	{"AWS_ENDPOINT_URL_PRICING", reasonPriceURL},
 	{"AWS_CA_BUNDLE", reasonCABundle},
 }
 
@@ -126,8 +170,9 @@ var imdsEndpoint string
 //   - The credentials come only from the instance role, which the SDK's role provider
 //     reads from the instance metadata service at its standard address, with no HTTP
 //     proxy.
-//   - The configuration has no EC2 endpoint, so the EC2 client calls the standard
-//     endpoint of the region.
+//   - The configuration has no endpoint, so the EC2 client calls the standard
+//     endpoint of the region, and the price client the standard endpoint of
+//     [PriceRegion].
 //   - The SDK's defaults mode is legacy, the SDK's default when AWS_DEFAULTS_MODE is
 //     not set. AWS_DEFAULTS_MODE does not apply: its value auto makes the SDK read the
 //     region from the instance metadata with a client that uses HTTP_PROXY.
@@ -198,6 +243,9 @@ type Machine struct {
 	State string
 	// Key is the value of the qory:key tag.
 	Key string
+	// InstanceType is the EC2 instance type, such as t3.medium; "" when EC2 returned
+	// none.
+	InstanceType string
 	// LaunchTime is the time EC2 started the instance; zero when EC2 returned none.
 	LaunchTime time.Time
 }
@@ -205,8 +253,9 @@ type Machine struct {
 // fromInstance converts one EC2 instance.
 func fromInstance(in types.Instance) Machine {
 	m := Machine{
-		ID:         aws.ToString(in.InstanceId),
-		LaunchTime: aws.ToTime(in.LaunchTime),
+		ID:           aws.ToString(in.InstanceId),
+		InstanceType: string(in.InstanceType),
+		LaunchTime:   aws.ToTime(in.LaunchTime),
 	}
 	if in.State != nil {
 		m.State = string(in.State.Name)

@@ -15,14 +15,17 @@ import (
 // MaxUserData is the largest user data EC2 accepts, in bytes before base64.
 const MaxUserData = 16 * 1024
 
+// MaxRootGiB is the largest gp3 volume EC2 makes, in GiB.
+const MaxRootGiB = 16384
+
 // maxClientToken is the longest client token EC2 accepts, in ASCII characters.
 const maxClientToken = 64
 
 // Spec is the input for one machine.
 type Spec struct {
-	// Key is the key of the make request, sent as RunInstances' client token, so a
-	// repeated call for one key makes no second machine: 1 to 64 ASCII letters, digits
-	// and punctuation marks. It is also the value of the qory:key tag.
+	// Key is the key of the make request, the value of the qory:key tag. Create sends
+	// [ClientToken] of Key and InstanceType as RunInstances' client token, so a
+	// repeated call for one key and one instance type makes no second machine.
 	Key string
 	// PoolID is the value of the qory:pool tag.
 	PoolID string
@@ -31,8 +34,14 @@ type Spec struct {
 	// ImageID is the machine image, such as ami-0123456789abcdef0.
 	ImageID string
 	// RootDevice is the image's root device name, such as /dev/sda1, as
-	// Client.RootDevice returns it. Create marks the volume on that device encrypted.
+	// Client.Image returns it. Create sets the volume on that device to RootSizeGiB,
+	// gp3 and encryption.
 	RootDevice string
+	// RootSizeGiB is the size of the root volume in GiB, at least 1.
+	RootSizeGiB int
+	// NestedVirtualization turns on nested virtualization with CpuOptions, for an
+	// instance type that has it.
+	NestedVirtualization bool
 	// SubnetID and SecurityGroupID place the machine's network interface in the run
 	// subnet.
 	SubnetID, SecurityGroupID string
@@ -46,9 +55,17 @@ type Spec struct {
 	Tags map[string]string
 }
 
+// ClientToken is the client token of RunInstances for the key and the instance type:
+// key, a dot and the instance type. The make of one key sends one token per instance
+// type that it tries, so a try of the next type after a failed one is a new request.
+func ClientToken(key, instanceType string) string {
+	return key + "." + instanceType
+}
+
 // Create makes one machine for spec and returns it as RunInstances returned it,
 // usually in state pending. A repeated Create with the same spec returns the same
-// machine, because the key is the client token. Errors from the call are *Error.
+// machine, because the client token is [ClientToken] of the key and the instance type.
+// Errors from the call are *Error.
 func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 	in, err := runInput(spec, true)
 	if err != nil {
@@ -86,7 +103,7 @@ func (c *Client) CheckRights(ctx context.Context, spec Spec) error {
 }
 
 // runInput builds the RunInstances input for spec. withToken requires the key and
-// sends it as the client token.
+// sends [ClientToken] of the key and the instance type as the client token.
 func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 	if err := validate(spec, withToken); err != nil {
 		return nil, err
@@ -124,7 +141,12 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 		// image's mapping sets for it.
 		BlockDeviceMappings: []types.BlockDeviceMapping{{
 			DeviceName: aws.String(spec.RootDevice),
-			Ebs:        &types.EbsBlockDevice{Encrypted: aws.Bool(true), DeleteOnTermination: aws.Bool(true)},
+			Ebs: &types.EbsBlockDevice{
+				Encrypted:           aws.Bool(true),
+				DeleteOnTermination: aws.Bool(true),
+				VolumeSize:          aws.Int32(int32(spec.RootSizeGiB)),
+				VolumeType:          types.VolumeTypeGp3,
+			},
 		}},
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: tags},
@@ -132,7 +154,10 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 		},
 	}
 	if withToken {
-		in.ClientToken = aws.String(spec.Key)
+		in.ClientToken = aws.String(ClientToken(spec.Key, spec.InstanceType))
+	}
+	if spec.NestedVirtualization {
+		in.CpuOptions = &types.CpuOptionsRequest{NestedVirtualization: types.NestedVirtualizationSpecificationEnabled}
 	}
 	if len(spec.UserData) > 0 {
 		// The SDK sends UserData as given; EC2 requires base64.
@@ -144,7 +169,7 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 // validate checks spec before any call.
 func validate(spec Spec, withToken bool) error {
 	if withToken {
-		if err := validToken(spec.Key); err != nil {
+		if err := validToken(ClientToken(spec.Key, spec.InstanceType)); err != nil {
 			return err
 		}
 	}
@@ -161,20 +186,23 @@ func validate(spec Spec, withToken bool) error {
 			return defect(fmt.Sprintf("Fix the EC2 machine adapter: the machine spec has no %s", f.name))
 		}
 	}
+	if spec.RootSizeGiB < 1 || spec.RootSizeGiB > MaxRootGiB {
+		return defect(fmt.Sprintf("Fix the EC2 machine adapter: the root volume size is %d GiB, and a gp3 volume has 1 to %d GiB", spec.RootSizeGiB, MaxRootGiB))
+	}
 	if len(spec.UserData) > MaxUserData {
 		return defect(fmt.Sprintf("Report this defect in the provisioner: the start data has %d bytes, and EC2 accepts at most %d bytes of user data", len(spec.UserData), MaxUserData))
 	}
 	return nil
 }
 
-// validToken checks that key is a client token EC2 accepts.
-func validToken(key string) error {
-	if key == "" || len(key) > maxClientToken {
-		return defect(fmt.Sprintf("Report this defect in the provisioner: the key has %d bytes, and a client token has 1 to %d characters", len(key), maxClientToken))
+// validToken checks that token is a client token EC2 accepts.
+func validToken(token string) error {
+	if token == "" || len(token) > maxClientToken {
+		return defect(fmt.Sprintf("Report this defect in the provisioner: the client token of the key has %d bytes, and a client token has 1 to %d characters", len(token), maxClientToken))
 	}
-	for i := 0; i < len(key); i++ {
-		if key[i] < 0x21 || key[i] > 0x7e {
-			return defect(fmt.Sprintf("Report this defect in the provisioner: byte %d of the key is 0x%02x, and a client token has only ASCII letters, digits and punctuation", i, key[i]))
+	for i := 0; i < len(token); i++ {
+		if token[i] < 0x21 || token[i] > 0x7e {
+			return defect(fmt.Sprintf("Report this defect in the provisioner: byte %d of the client token of the key is 0x%02x, and a client token has only ASCII letters, digits and punctuation", i, token[i]))
 		}
 	}
 	return nil

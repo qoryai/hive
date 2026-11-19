@@ -17,12 +17,18 @@ type fakeAPI struct {
 	consoles  []*ec2.GetConsoleOutputInput
 	kills     []*ec2.TerminateInstancesInput
 	images    []*ec2.DescribeImagesInput
+	subnets   []*ec2.DescribeSubnetsInput
+	types     []*ec2.DescribeInstanceTypesInput
+	offerings []*ec2.DescribeInstanceTypeOfferingsInput
 
 	run       func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error)
 	describe  func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error)
 	console   func(*ec2.GetConsoleOutputInput) (*ec2.GetConsoleOutputOutput, error)
 	terminate func(*ec2.TerminateInstancesInput) (*ec2.TerminateInstancesOutput, error)
 	image     func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error)
+	subnet    func(*ec2.DescribeSubnetsInput) (*ec2.DescribeSubnetsOutput, error)
+	itype     func(*ec2.DescribeInstanceTypesInput) (*ec2.DescribeInstanceTypesOutput, error)
+	offering  func(*ec2.DescribeInstanceTypeOfferingsInput) (*ec2.DescribeInstanceTypeOfferingsOutput, error)
 }
 
 var _ API = (*fakeAPI)(nil)
@@ -78,6 +84,36 @@ func (f *fakeAPI) DescribeImages(_ context.Context, in *ec2.DescribeImagesInput,
 	return f.image(in)
 }
 
+func (f *fakeAPI) DescribeSubnets(_ context.Context, in *ec2.DescribeSubnetsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error) {
+	f.mu.Lock()
+	f.subnets = append(f.subnets, in)
+	f.mu.Unlock()
+	if f.subnet == nil {
+		return &ec2.DescribeSubnetsOutput{}, nil
+	}
+	return f.subnet(in)
+}
+
+func (f *fakeAPI) DescribeInstanceTypes(_ context.Context, in *ec2.DescribeInstanceTypesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error) {
+	f.mu.Lock()
+	f.types = append(f.types, in)
+	f.mu.Unlock()
+	if f.itype == nil {
+		return &ec2.DescribeInstanceTypesOutput{}, nil
+	}
+	return f.itype(in)
+}
+
+func (f *fakeAPI) DescribeInstanceTypeOfferings(_ context.Context, in *ec2.DescribeInstanceTypeOfferingsInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceTypeOfferingsOutput, error) {
+	f.mu.Lock()
+	f.offerings = append(f.offerings, in)
+	f.mu.Unlock()
+	if f.offering == nil {
+		return &ec2.DescribeInstanceTypeOfferingsOutput{}, nil
+	}
+	return f.offering(in)
+}
+
 // apiError returns an EC2 error with code.
 func apiError(code string) error {
 	return &smithy.GenericAPIError{Code: code, Message: "test message for " + code}
@@ -91,6 +127,7 @@ func testSpec() Spec {
 		InstanceType:    "m7g.large",
 		ImageID:         "ami-0123456789abcdef0",
 		RootDevice:      "/dev/sda1",
+		RootSizeGiB:     30,
 		SubnetID:        "subnet-0123456789abcdef0",
 		SecurityGroupID: "sg-0123456789abcdef0",
 		UserData:        []byte(`{"version": 1, "pool": "np_0123456789abcdef"}`),

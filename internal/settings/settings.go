@@ -34,8 +34,6 @@ type Settings struct {
 	// GatewayAddress is the gateway's IP address on the machines' network. It has no
 	// zone, and it is not an unspecified, multicast or loopback address.
 	GatewayAddress netip.Addr
-	// MaxMachines is the most machines that exist at once, 1 to 100.
-	MaxMachines int
 	// Adapter is the machine adapter: its program and its settings file.
 	Adapter Adapter
 	// EnrolmentCodeFile is the path of the file that contains the node pool's enrolment
@@ -53,14 +51,11 @@ type Adapter struct {
 	Settings string
 }
 
-// DefaultMaxMachines is max_machines when the member is left out.
-const DefaultMaxMachines = 1
-
 // members are the settings' members, in the order an error lists the missing ones.
-var members = []string{"apiary_url", "gateway_address", "max_machines", "adapter", "enrolment_code_file"}
+var members = []string{"apiary_url", "gateway_address", "adapter", "enrolment_code_file"}
 
 // optional are the members that may be left out.
-var optional = []string{"max_machines", "enrolment_code_file"}
+var optional = []string{"enrolment_code_file"}
 
 // adapterMembers are the members of adapter, in the order an error lists the missing
 // ones. Neither may be left out.
@@ -82,14 +77,11 @@ const pathRule = "an absolute path of at most 4096 bytes, with no . or .. elemen
 var rules = map[string]string{
 	"apiary_url":          "an https origin, or for a test an http origin on localhost, 127.0.0.1 or [::1]",
 	"gateway_address":     "the gateway's IPv4 or IPv6 address on the machines' network, such as 10.0.1.5, with no zone and no port, and not an unspecified, multicast or loopback address",
-	"max_machines":        "a whole number from 1 to 100, or leave it out for 1",
 	"adapter":             "an object with two members, command and settings",
 	"adapter.command":     pathRule + "/usr/local/bin/qory-machines-aws-ec2",
 	"adapter.settings":    pathRule + "/etc/qory-provisioner/aws-ec2.json",
 	"enrolment_code_file": pathRule + "/run/qory-enrolment/provisioner/code, or leave it out",
 }
-
-var integerShape = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
 
 // Read reads the settings file at path, as [Parse] reads its bytes. A file larger than
 // 64 KiB is refused.
@@ -148,7 +140,7 @@ func Parse(b []byte) (Settings, error) {
 	if err := checkNames(doc, members, optional, ""); err != nil {
 		return Settings{}, err
 	}
-	s := Settings{MaxMachines: DefaultMaxMachines}
+	var s Settings
 	for _, name := range members {
 		raw, ok := doc[name]
 		if !ok {
@@ -160,8 +152,6 @@ func Parse(b []byte) (Settings, error) {
 			s.ApiaryURL, good = origin(raw)
 		case "gateway_address":
 			s.GatewayAddress, good = address(raw)
-		case "max_machines":
-			s.MaxMachines, good = integer(raw, 1, 100)
 		case "adapter":
 			var err error
 			if s.Adapter, err = adapter(raw); err != nil {
@@ -253,17 +243,6 @@ func text(raw jsontext.Value) (string, bool) {
 		return "", false
 	}
 	return s, true
-}
-
-// integer is a JSON number written as a whole number, with no fraction and no
-// exponent, from lo to hi.
-func integer(raw jsontext.Value, lo, hi int) (int, bool) {
-	s := string(bytes.TrimSpace(raw))
-	if raw.Kind() != '0' || !integerShape.MatchString(s) {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s)
-	return n, err == nil && lo <= n && n <= hi
 }
 
 // checkNames is the error of the object doc, at the path prefix, that has a member

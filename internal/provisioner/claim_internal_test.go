@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/qoryai/integrations/contracts"
 )
 
 // claimRefused is the error of a claim answer that fails the schema.
@@ -13,13 +15,14 @@ const claimRefused = "it fails claim-answer.schema.json"
 // testCode is a run code of the contract's form.
 const testCode = "qecr_01JB8Z3K5Q7R9T2V4W6X8Y0A1C.uoES-kuj1vk0sq0qoGlmAg"
 
-// aClaim is a claim's 200 at [Revision] with a machine. Each case changes it in one
-// place.
+// aClaim is a claim's 200 at [Revision] with a machine and its spec. Each case
+// changes it in one place.
 func aClaim() map[string]any {
 	return map[string]any{
 		"version": 1, "revision": Revision, "dispatch_id": "dp_8w3k0q9t2v7m4r6x", "pool_id": "np_f1xt0re000000000",
 		"lease_until": "2026-10-15T12:05:00Z", "machine": "small", "run_code": testCode,
-		"gateway_url": "https://gateway.example.com:8443", "max_lifetime_minutes": 120,
+		"machine_spec": map[string]any{"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": true},
+		"gateway_url":  "https://gateway.example.com:8443", "max_lifetime_minutes": 120,
 	}
 }
 
@@ -32,8 +35,8 @@ func marshal(t *testing.T, v any) []byte {
 	return b
 }
 
-// TestAClaimIsRead reads a claim with a machine and one without: every member is the
-// answer's, and the run code is written whole.
+// TestAClaimIsRead reads a claim with a machine and its spec and one without them:
+// every member is the answer's, and the run code is written whole.
 func TestAClaimIsRead(t *testing.T) {
 	cl, err := readClaim(marshal(t, aClaim()))
 	if err != nil {
@@ -42,12 +45,14 @@ func TestAClaimIsRead(t *testing.T) {
 	var w bytes.Buffer
 	_, _ = cl.RunCode.WriteTo(&w)
 	if cl.DispatchID != "dp_8w3k0q9t2v7m4r6x" || cl.PoolID != "np_f1xt0re000000000" || cl.LeaseUntil.Format("15:04:05") != "12:05:00" ||
-		cl.Machine != "small" || w.String() != testCode || cl.GatewayURL != "https://gateway.example.com:8443" || cl.MaxLifetimeMinutes != 120 {
+		cl.Machine != "small" || cl.MachineSpec == nil || *cl.MachineSpec != (contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64", Virtualization: true}) ||
+		w.String() != testCode || cl.GatewayURL != "https://gateway.example.com:8443" || cl.MaxLifetimeMinutes != 120 {
 		t.Errorf("claimed %+v, run code %q", cl, w.String())
 	}
 	d := aClaim()
 	delete(d, "machine")
-	if cl, err := readClaim(marshal(t, d)); err != nil || cl.Machine != "" {
+	delete(d, "machine_spec")
+	if cl, err := readClaim(marshal(t, d)); err != nil || cl.Machine != "" || cl.MachineSpec != nil {
 		t.Errorf("no machine: %+v %v", cl, err)
 	}
 }
@@ -68,6 +73,11 @@ func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 		"machine empty":            func(d map[string]any) { d["machine"] = "" },
 		"machine null":             func(d map[string]any) { d["machine"] = nil },
 		"machine in upper case":    func(d map[string]any) { d["machine"] = "Small" },
+		"machine with no spec":     func(d map[string]any) { delete(d, "machine_spec") },
+		"a spec with no machine":   func(d map[string]any) { delete(d, "machine") },
+		"a spec with 0 vCPUs":      func(d map[string]any) { d["machine_spec"].(map[string]any)["vcpus"] = 0 },
+		"a spec of another arch":   func(d map[string]any) { d["machine_spec"].(map[string]any)["arch"] = "x86_64" },
+		"a spec with a size":       func(d map[string]any) { d["machine_spec"].(map[string]any)["size"] = "small" },
 		"gateway URL with a path":  func(d map[string]any) { d["gateway_url"] = "https://gateway.example.com/v1" },
 		"gateway URL over http":    func(d map[string]any) { d["gateway_url"] = "http://gateway.example.com" },
 		"gateway URL null":         func(d map[string]any) { d["gateway_url"] = nil },
