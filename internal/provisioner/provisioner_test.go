@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,7 +83,7 @@ func setup(t *testing.T) (*provisionertest.Server, *provisioner.Client, *clock, 
 func claimed(t *testing.T, srv *provisionertest.Server, c *provisioner.Client, w provisionertest.Work) provisioner.Claimed {
 	t.Helper()
 	srv.Offer(w)
-	cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+	cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 	if err != nil || !ok {
 		t.Fatalf("claim: %v %v", ok, err)
 	}
@@ -96,7 +97,7 @@ var external = &contracts.External{Type: "example-ci", Ref: "i-0123456789abcdef0
 func dispatched(t *testing.T, srv *provisionertest.Server, c *provisioner.Client, w provisionertest.Work) provisioner.Claimed {
 	t.Helper()
 	cl := claimed(t, srv, c, w)
-	if err := c.Dispatched(context.Background(), cl.DispatchID, external); err != nil {
+	if err := c.Dispatched(context.Background(), cl.DispatchID, external, ""); err != nil {
 		t.Fatal(err)
 	}
 	return cl
@@ -192,32 +193,35 @@ func TestNewChecksTheConfig(t *testing.T) {
 func TestAMachineGoesThroughEveryRequest(t *testing.T) {
 	srv, c, clk, _ := setup(t)
 	ctx := context.Background()
-	offered := srv.Offer(provisionertest.Work{Machine: "small", MaxLifetimeMinutes: 120})[0]
-	cl, ok, err := c.Claim(ctx, provisioner.MaxWaitSeconds)
+	spec := contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64"}
+	offers := []contracts.MachineSpec{spec, {VCPUs: 4, MemoryMiB: 16384, DiskGiB: 16384, Arch: "arm64", Virtualization: true}}
+	offered := srv.Offer(provisionertest.Work{Machine: "small", MachineSpec: &spec, MaxLifetimeMinutes: 120})[0]
+	cl, ok, err := c.Claim(ctx, provisioner.MaxWaitSeconds, offers)
 	if err != nil || !ok {
 		t.Fatalf("claim: %v %v", ok, err)
 	}
 	if cl.PoolID != provisionertest.PoolID || !cl.LeaseUntil.Equal(testTime.Add(provisionertest.Lease)) || cl.Machine != "small" ||
+		cl.MachineSpec == nil || *cl.MachineSpec != spec ||
 		cl.GatewayURL != provisionertest.GatewayURL || cl.MaxLifetimeMinutes != 120 || written(t, cl.RunCode) != offered.RunCode {
 		t.Errorf("claimed %+v", cl)
 	}
-	if d, ok := srv.Dispatch(cl.DispatchID); !ok || d.State != provisionertest.StateClaimed {
-		t.Errorf("the dispatch %v", d)
+	if d, ok := srv.Dispatch(cl.DispatchID); !ok || d.State != provisionertest.StateClaimed || !reflect.DeepEqual(d.Offers, offers) {
+		t.Errorf("the dispatch %v, offers %+v", d, d.Offers)
 	}
 	cl.RunCode.Clear()
 	for range 3 {
-		if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+		if err := c.Dispatched(ctx, cl.DispatchID, external, "t3.medium"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if d, _ := srv.Dispatch(cl.DispatchID); d.State != provisionertest.StateDispatched || d.Dispatched != 3 || d.External == nil || *d.External != *external {
+	if d, _ := srv.Dispatch(cl.DispatchID); d.State != provisionertest.StateDispatched || d.Dispatched != 3 || d.External == nil || *d.External != *external || d.MachineType != "t3.medium" {
 		t.Errorf("after dispatched: %+v", d)
 	}
 	if err := c.MachineLog(ctx, cl.DispatchID, "machine started\n", false); err != nil {
 		t.Fatal(err)
 	}
 	srv.End(cl.DispatchID)
-	if err := c.Dispatched(ctx, cl.DispatchID, external); !errors.Is(err, provisioner.ErrGone) {
+	if err := c.Dispatched(ctx, cl.DispatchID, external, ""); !errors.Is(err, provisioner.ErrGone) {
 		t.Errorf("dispatched after the end: %v", err)
 	}
 	if d, _ := srv.Dispatch(cl.DispatchID); d.MachineLog == nil || d.MachineLog.Log != "machine started\n" || d.MachineLog.Truncated {
@@ -261,7 +265,7 @@ func TestDispatchedIsBuiltAnewEachTime(t *testing.T) {
 	cl := dispatched(t, srv, c, provisionertest.Work{})
 	cl.RunCode.Clear()
 	for range 2 {
-		if err := c.Dispatched(context.Background(), cl.DispatchID, external); err != nil {
+		if err := c.Dispatched(context.Background(), cl.DispatchID, external, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -302,7 +306,7 @@ func TestTheBodiesAreTheFixtures(t *testing.T) {
 	check("claim/without-pool-id.json")
 
 	at(t, clk, "2026-10-15T12:00:20Z")
-	if err := c.Dispatched(ctx, cl.DispatchID, nil); err != nil {
+	if err := c.Dispatched(ctx, cl.DispatchID, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	check("dispatched/without-external.json")
@@ -310,7 +314,7 @@ func TestTheBodiesAreTheFixtures(t *testing.T) {
 	if err := json.Unmarshal(fixture(t, "dispatched/with-external.json"), &df); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Dispatched(ctx, cl.DispatchID, df.External); err != nil {
+	if err := c.Dispatched(ctx, cl.DispatchID, df.External, ""); err != nil {
 		t.Fatal(err)
 	}
 	check("dispatched/with-external.json")
@@ -353,7 +357,7 @@ func TestAClaimSendsItsWait(t *testing.T) {
 	srv, c, _, _ := setup(t)
 	srv.Hold = 0
 	for _, wait := range []int{0, 1, 25} {
-		if _, ok, err := c.Claim(context.Background(), wait); err != nil || ok {
+		if _, ok, err := c.Claim(context.Background(), wait, nil); err != nil || ok {
 			t.Fatalf("wait %d: %v %v", wait, ok, err)
 		}
 		var body contracts.Claim
@@ -363,7 +367,7 @@ func TestAClaimSendsItsWait(t *testing.T) {
 	}
 	before := len(srv.Calls())
 	for _, wait := range []int{-1, 26} {
-		if _, _, err := c.Claim(context.Background(), wait); err == nil || !strings.Contains(err.Error(), "set wait_seconds from 0 to 25") {
+		if _, _, err := c.Claim(context.Background(), wait, nil); err == nil || !strings.Contains(err.Error(), "set wait_seconds from 0 to 25") {
 			t.Errorf("wait %d: %v", wait, err)
 		}
 	}
@@ -385,7 +389,7 @@ func TestTheAnswersAreTheFixtures(t *testing.T) {
 			srv, c, _, _ := setup(t)
 			body := fixture(t, name)
 			srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: http.StatusOK, Body: string(body)})
-			cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+			cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 			if err != nil || !ok {
 				t.Fatalf("claim: %v %v", ok, err)
 			}
@@ -413,7 +417,7 @@ func TestEveryInvalidClaimAnswerIsRefused(t *testing.T) {
 		name = strings.TrimPrefix(name, "fixtures/")
 		srv, c, _, log := setup(t)
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: http.StatusOK, Body: string(fixture(t, name))})
-		cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+		cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 		if !errors.Is(err, provisioner.ErrAnswerUnusable) || ok || cl.RunCode.Len() != 0 || len(srv.Calls()) != 1 {
 			t.Errorf("%s: %v", name, err)
 			continue
@@ -625,11 +629,11 @@ func send(c *provisioner.Client, route provisionertest.Route, cl provisioner.Cla
 	ctx := context.Background()
 	switch route {
 	case "claim":
-		got, _, err := c.Claim(ctx, 0)
+		got, _, err := c.Claim(ctx, 0, nil)
 		got.RunCode.Clear()
 		return err
 	case "dispatched":
-		return c.Dispatched(ctx, cl.DispatchID, external)
+		return c.Dispatched(ctx, cl.DispatchID, external, "")
 	case "machine-log":
 		return c.MachineLog(ctx, cl.DispatchID, "a line\n", false)
 	case "machine-end":
@@ -739,11 +743,11 @@ func TestTheModelsRefusals(t *testing.T) {
 	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrMachineExists) {
 		t.Errorf("a release after dispatched: %v", err)
 	}
-	if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+	if err := c.Dispatched(ctx, cl.DispatchID, external, ""); err != nil {
 		t.Errorf("dispatched again: %v", err)
 	}
 	srv.End(cl.DispatchID)
-	if err := c.Dispatched(ctx, cl.DispatchID, external); !errors.Is(err, provisioner.ErrGone) {
+	if err := c.Dispatched(ctx, cl.DispatchID, external, ""); !errors.Is(err, provisioner.ErrGone) {
 		t.Errorf("dispatched after the end: %v", err)
 	}
 	if err := c.Release(ctx, cl.DispatchID, "a reason again"); !errors.Is(err, provisioner.ErrGone) {
@@ -759,7 +763,7 @@ func TestTheModelsRefusals(t *testing.T) {
 	stale := claimed(t, srv, c, provisionertest.Work{Lease: 30 * time.Second})
 	stale.RunCode.Clear()
 	clk.set(clk.read().Add(30 * time.Second))
-	if err := c.Dispatched(ctx, stale.DispatchID, external); !errors.Is(err, provisioner.ErrLeaseExpired) {
+	if err := c.Dispatched(ctx, stale.DispatchID, external, ""); !errors.Is(err, provisioner.ErrLeaseExpired) {
 		t.Errorf("a first dispatched at the lease's end: %v", err)
 	}
 	if err := c.Release(ctx, stale.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrLeaseExpired) {
@@ -771,7 +775,7 @@ func TestTheModelsRefusals(t *testing.T) {
 	expired := claimed(t, srv, c, provisionertest.Work{})
 	expired.RunCode.Clear()
 	srv.Expire(expired.DispatchID)
-	if err := c.Dispatched(ctx, expired.DispatchID, nil); !errors.Is(err, provisioner.ErrLeaseExpired) {
+	if err := c.Dispatched(ctx, expired.DispatchID, nil, ""); !errors.Is(err, provisioner.ErrLeaseExpired) {
 		t.Errorf("dispatched of a stale dispatch: %v", err)
 	}
 	redeemed := claimed(t, srv, c, provisionertest.Work{})
@@ -807,7 +811,7 @@ func TestARedeemedDispatchNeverGoesStale(t *testing.T) {
 		t.Errorf("a release after the lease's end: %v", err)
 	}
 	for range 2 {
-		if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+		if err := c.Dispatched(ctx, cl.DispatchID, external, ""); err != nil {
 			t.Errorf("dispatched after the lease's end: %v", err)
 		}
 	}
@@ -838,7 +842,7 @@ func TestExpireLeavesARedeemedDispatch(t *testing.T) {
 	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrMachineExists) {
 		t.Errorf("a release: %v", err)
 	}
-	if err := c.Dispatched(ctx, cl.DispatchID, external); err != nil {
+	if err := c.Dispatched(ctx, cl.DispatchID, external, ""); err != nil {
 		t.Errorf("the first dispatched: %v", err)
 	}
 	if !srv.Redeem(cl.DispatchID) {
@@ -861,7 +865,7 @@ func TestARedemptionAfterTheLeaseIsRefused(t *testing.T) {
 	if err := c.Release(ctx, cl.DispatchID, "a reason"); !errors.Is(err, provisioner.ErrLeaseExpired) {
 		t.Errorf("a release: %v", err)
 	}
-	if err := c.Dispatched(ctx, cl.DispatchID, external); !errors.Is(err, provisioner.ErrLeaseExpired) {
+	if err := c.Dispatched(ctx, cl.DispatchID, external, ""); !errors.Is(err, provisioner.ErrLeaseExpired) {
 		t.Errorf("a first dispatched: %v", err)
 	}
 }
@@ -915,7 +919,7 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 		srv, c, _, log := setup(t)
 		srv.Offer(provisionertest.Work{})
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Edit: edit})
-		cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+		cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 		if !errors.Is(err, provisioner.ErrAnswerUnusable) || ok || cl.RunCode.Len() != 0 || len(srv.Calls()) != 1 {
 			t.Errorf("a claim with %s: %v", name, err)
 			continue
@@ -928,7 +932,7 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 	twice = strings.Replace(twice, `"version": 1,`, `"version": 1, "version": 1,`, 1)
 	srv, c, _, _ := setup(t)
 	srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: 200, Body: twice})
-	if _, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds); !errors.Is(err, provisioner.ErrAnswerUnusable) {
+	if _, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil); !errors.Is(err, provisioner.ErrAnswerUnusable) {
 		t.Errorf("a member twice: %v", err)
 	}
 
@@ -953,11 +957,11 @@ func TestAnswersAreReadUpToTheirBound(t *testing.T) {
 	for range 5 {
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: 200, Body: claim, Pad: pad(claim, provisioner.MaxClaimAnswer) + 1})
 	}
-	if _, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds); !errors.Is(err, provisioner.ErrTooLarge) || errors.Is(err, provisioner.ErrUnsigned) {
+	if _, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil); !errors.Is(err, provisioner.ErrTooLarge) || errors.Is(err, provisioner.ErrUnsigned) {
 		t.Errorf("a claim's 200 over its bound: %v", err)
 	}
 	srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: 200, Body: claim, Pad: pad(claim, provisioner.MaxClaimAnswer)})
-	cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+	cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 	if err != nil || !ok || cl.RunCode.Len() == 0 {
 		t.Errorf("a claim's 200 at its bound: %v", err)
 	}
@@ -983,20 +987,26 @@ func TestARequestThatBreaksItsSchemaIsNotSent(t *testing.T) {
 		return &e
 	}
 	for name, err := range map[string]error{
-		"a run key":            c.Release(ctx, dp, "the key is qrk_abc.def"),
-		"a run code":           c.Release(ctx, dp, "the code is QECR_abc"),
-		"a secret":             c.Release(ctx, dp, "QAK_abcdef"),
-		"an empty reason":      c.Release(ctx, dp, ""),
-		"a long reason":        c.Release(ctx, dp, strings.Repeat("a", 201)),
-		"a NUL":                c.Release(ctx, dp, "a\x00b"),
-		"a dispatch id":        c.Dispatched(ctx, "dp_../../v1/pools/claim", nil),
-		"a secret as id":       c.Release(ctx, "qrk_abc.def", "a reason"),
-		"a machine log's id":   c.MachineLog(ctx, "dp_../x", "a line", false),
-		"an empty ref":         c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = "" })),
-		"a ref of 201":         c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = strings.Repeat("i", 201) })),
-		"a type in upper case": c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Type = "Example-CI" })),
-		"an http URL":          c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.URL = "http://ci.example.com/runs/1" })),
-		"a run code as ref":    c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = "qecr_abc" })),
+		"a run key":                   c.Release(ctx, dp, "the key is qrk_abc.def"),
+		"a run code":                  c.Release(ctx, dp, "the code is QECR_abc"),
+		"a secret":                    c.Release(ctx, dp, "QAK_abcdef"),
+		"an empty reason":             c.Release(ctx, dp, ""),
+		"a long reason":               c.Release(ctx, dp, strings.Repeat("a", 201)),
+		"a NUL":                       c.Release(ctx, dp, "a\x00b"),
+		"a dispatch id":               c.Dispatched(ctx, "dp_../../v1/pools/claim", nil, ""),
+		"a secret as id":              c.Release(ctx, "qrk_abc.def", "a reason"),
+		"a machine log's id":          c.MachineLog(ctx, "dp_../x", "a line", false),
+		"an empty ref":                c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = "" }), ""),
+		"a ref of 201":                c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = strings.Repeat("i", 201) }), ""),
+		"a type in upper case":        c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Type = "Example-CI" }), ""),
+		"an http URL":                 c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.URL = "http://ci.example.com/runs/1" }), ""),
+		"a run code as ref":           c.Dispatched(ctx, dp, ext(func(e *contracts.External) { e.Ref = "qecr_abc" }), ""),
+		"a machine type with a space": c.Dispatched(ctx, dp, nil, "t3 medium"),
+		"a machine type of 65":        c.Dispatched(ctx, dp, nil, strings.Repeat("t", 65)),
+		"a run code as type":          c.Dispatched(ctx, dp, nil, "qecr_abc"),
+		"65 offers":                   claimErr(c.Claim(ctx, 0, make([]contracts.MachineSpec, 65))),
+		"an offer of 0 vCPUs":         claimErr(c.Claim(ctx, 0, []contracts.MachineSpec{{MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64"}})),
+		"an offer of x86_64":          claimErr(c.Claim(ctx, 0, []contracts.MachineSpec{{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 30, Arch: "x86_64"}})),
 	} {
 		if err == nil || accesskey.ContainsSecret(err.Error()) || strings.Contains(strings.ToLower(err.Error()), "qecr_") || strings.Contains(err.Error(), "../") {
 			t.Errorf("%s: %v", name, err)
@@ -1010,6 +1020,9 @@ func TestARequestThatBreaksItsSchemaIsNotSent(t *testing.T) {
 		t.Errorf("%d requests sent", n)
 	}
 }
+
+// claimErr is the error of a claim, without its answer.
+func claimErr(_ provisioner.Claimed, _ bool, err error) error { return err }
 
 // machineLogOf is the log the fake recorded for the dispatch, and the bytes sent.
 func machineLogOf(t *testing.T, srv *provisionertest.Server, dispatchID string) (contracts.MachineLog, []byte) {
@@ -1026,8 +1039,8 @@ func machineLogOf(t *testing.T, srv *provisionertest.Server, dispatchID string) 
 // request's mebibyte once escaped; and one line with no line feed, whose cut at MaxLog
 // bytes falls inside a 2-byte character. Each sent log is the end of the log, starts at
 // a line when it has one and at a whole character otherwise, is valid UTF-8, is within
-// both bounds, and is marked truncated. A log within its bounds is sent whole, truncated as the caller set
-// it.
+// both bounds, and is marked truncated. A log within its bounds is sent whole, truncated
+// as the caller set it.
 func TestAMachineLogIsCutToItsBounds(t *testing.T) {
 	line := "2026-10-15T12:01:05Z machine step done\n"
 	plain := strings.Repeat(line, 800<<10/len(line)+1)
@@ -1100,7 +1113,7 @@ func TestNoRedirectAndNoCookie(t *testing.T) {
 	c.HTTP = &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
 	srv.Offer(provisionertest.Work{})
 	srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Header: http.Header{"Set-Cookie": {"session=abc; Path=/"}}})
-	cl, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+	cl, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1124,7 +1137,7 @@ func TestNoRedirectAndNoCookie(t *testing.T) {
 func TestAClaimIsHeldAndCancelled(t *testing.T) {
 	srv, c, _, log := setup(t)
 	srv.Hold = 50 * time.Millisecond
-	if _, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds); err != nil || ok {
+	if _, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil); err != nil || ok {
 		t.Errorf("an empty claim: %v %v", ok, err)
 	}
 	srv.Hold = 10 * time.Second
@@ -1132,7 +1145,7 @@ func TestAClaimIsHeldAndCancelled(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		srv.Offer(provisionertest.Work{})
 	}()
-	if _, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds); err != nil || !ok {
+	if _, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil); err != nil || !ok {
 		t.Errorf("work offered while held: %v %v", ok, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1141,7 +1154,7 @@ func TestAClaimIsHeldAndCancelled(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	if _, _, err := c.Claim(ctx, provisioner.MaxWaitSeconds); !errors.Is(err, context.Canceled) || time.Since(start) > 5*time.Second {
+	if _, _, err := c.Claim(ctx, provisioner.MaxWaitSeconds, nil); !errors.Is(err, context.Canceled) || time.Since(start) > 5*time.Second {
 		t.Errorf("a cancelled claim: %v after %s", err, time.Since(start))
 	}
 	if log.Len() != 0 {
@@ -1155,7 +1168,7 @@ func TestA401SaysWhatToCheck(t *testing.T) {
 	srv, c, _, _ := setup(t)
 	unauthorized := provisionertest.Reply{Status: 401, Code: "unauthorized", Unsigned: true}
 	srv.Script(provisionertest.RouteClaim, unauthorized, unauthorized, unauthorized, unauthorized, unauthorized)
-	_, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds)
+	_, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 	want := "check that the access key is approved in Qory Apiary and that this machine's clock is within 300 seconds of the correct time: " +
 		"the claim returned 401 unauthorized, which the client does not take as a revoked key"
 	if !errors.Is(err, provisioner.ErrUnsigned) || err.Error() != want {

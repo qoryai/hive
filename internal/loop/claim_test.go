@@ -26,32 +26,30 @@ func equal[T comparable](t *testing.T, what string, got, want []T) {
 	}
 }
 
-// TestAClaimMakesAMachineAndSendsDispatched claims a dispatch, makes its machine with
-// the start data, sends dispatched and records each phase. A claim with no machine
-// type makes the size "standard".
+// TestAClaimMakesAMachineAndSendsDispatched claims a dispatch with the check's offers,
+// makes its machine with the claim's machine spec and the start data, sends
+// dispatched with the made machine type and records each phase.
 func TestAClaimMakesAMachineAndSendsDispatched(t *testing.T) {
 	for _, c := range []struct {
-		name, machine, size, address, written string
+		name, address, written string
 	}{
-		{"no machine type", "", loop.DefaultSize, "10.0.1.5", "10.0.1.5"},
-		{"a machine type", "large", "large", "10.0.1.5", "10.0.1.5"},
-		{"an IPv4 address mapped into IPv6", "", "standard", "::ffff:10.0.1.5", "10.0.1.5"},
-		{"an IPv6 address", "", "standard", "fd00::5", "fd00::5"},
+		{"an IPv4 address", "10.0.1.5", "10.0.1.5"},
+		{"an IPv4 address mapped into IPv6", "::ffff:10.0.1.5", "10.0.1.5"},
+		{"an IPv6 address", "fd00::5", "fd00::5"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.config.GatewayAddress = netip.MustParseAddr(c.address)
 			h.start()
-			claim := newClaim(dispatchA)
-			claim.Machine = c.machine
-			h.claim(claim)
-			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool + " " + c.size})
+			h.claim(newClaim(dispatchA))
+			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool})
+			equal(t, "the machine specs", h.machines.takeSpecs(), []contracts.MachineSpec{testSpec})
 			want := `{"version":1,"run_code":"` + runCode + `","gateway":{"url":"` + gatewayURL + `","address":"` + c.written + `"},"max_lifetime_minutes":60}`
 			if got := string(h.machines.lastStartData()); got != want {
 				t.Errorf("the start data is\n%s\nwant\n%s", got, want)
 			}
-			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
-			equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}})
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " " + madeType})
+			equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: lifetime, MachineType: madeType}})
 			for _, msg := range []string{"claimed a dispatch", "made a machine", "sent dispatched"} {
 				if len(h.find(msg)) != 1 {
 					t.Errorf("the log has no line %q", msg)
@@ -61,13 +59,6 @@ func TestAClaimMakesAMachineAndSendsDispatched(t *testing.T) {
 				t.Error(err)
 			}
 		})
-	}
-}
-
-// TestTheDefaultSizeIsStandard pins the size of a claim with no machine type.
-func TestTheDefaultSizeIsStandard(t *testing.T) {
-	if loop.DefaultSize != "standard" {
-		t.Errorf("the default size is %q", loop.DefaultSize)
 	}
 }
 
@@ -114,7 +105,7 @@ func TestAMakeFailureOfEachKind(t *testing.T) {
 			h.clock.waitPending(t, time.Second, loop.WatchInterval-c.wait+time.Second)
 			h.clock.Advance(time.Second)
 			h.idle()
-			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool + " standard"})
+			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool})
 			if err := h.stop(); err != nil {
 				t.Error(err)
 			}
@@ -246,7 +237,7 @@ func TestAFirstDispatchedThatIsRefusedCleansUp(t *testing.T) {
 			h.start()
 			h.claim(newClaim(dispatchA))
 			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
-				"dispatched " + dispatchA + " " + machineID(1),
+				"dispatched " + dispatchA + " " + machineID(1) + " " + madeType,
 				"machine-log " + dispatchA + " false",
 				"machine-end " + dispatchA + " gone",
 			})
@@ -255,7 +246,7 @@ func TestAFirstDispatchedThatIsRefusedCleansUp(t *testing.T) {
 			}
 			equal(t, "the adapter's calls", h.machines.takeCalls(), []string{
 				"check",
-				"make " + dispatchA + " " + pool + " standard",
+				"make " + dispatchA + " " + pool,
 				"log " + machineID(1),
 				"delete " + machineID(1),
 			})
@@ -272,6 +263,41 @@ func TestAFirstDispatchedThatIsRefusedCleansUp(t *testing.T) {
 	}
 }
 
+// TestARefusedMachineThatShutsDownSendsDeletingThenGone makes a machine whose first
+// dispatched returns 409 lease_expired or 410 gone, and whose delete returns deleting
+// while the vendor shuts it down. The loop sends deleting, and gone once the machine
+// is no longer listed, and then removes the entry.
+func TestARefusedMachineThatShutsDownSendsDeletingThenGone(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"lease_expired", fmt.Errorf("Qory Apiary answered: %w", loop.ErrLeaseExpired)},
+		{"gone", fmt.Errorf("Qory Apiary answered: %w", loop.ErrGone)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.lingering = true
+			h.apiary.setDispatched(dispatchA, c.err)
+			h.start()
+			h.claim(newClaim(dispatchA))
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{
+				"dispatched " + dispatchA + " " + machineID(1) + " " + madeType,
+				"machine-log " + dispatchA + " false",
+				"machine-end " + dispatchA + " deleting",
+			})
+			equal(t, "the journal", h.entries(), []journal.Entry{typed(deleting(dispatchA, machineID(1)))})
+			h.machines.drop(machineID(1))
+			h.tick()
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"machine-end " + dispatchA + " gone"})
+			equal(t, "the journal", h.entries(), nil)
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
 // TestAFailedDispatchedIsSentAgain leaves the entry made when dispatched fails, and the
 // next watch sends it again and records dispatched.
 func TestAFailedDispatchedIsSentAgain(t *testing.T) {
@@ -279,7 +305,7 @@ func TestAFailedDispatchedIsSentAgain(t *testing.T) {
 	h.apiary.setDispatched(dispatchA, errors.New("no answer from Qory Apiary"))
 	h.start()
 	h.claim(newClaim(dispatchA))
-	made := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseMade, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}
+	made := journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseMade, MachineID: machineID(1), MaxLifetimeMinutes: lifetime, MachineType: madeType}
 	equal(t, "the journal", h.entries(), []journal.Entry{made})
 	if len(h.find("sending dispatched failed")) != 1 {
 		t.Error("the log has no line for the failed dispatched")
@@ -287,7 +313,7 @@ func TestAFailedDispatchedIsSentAgain(t *testing.T) {
 	h.apiary.setDispatched(dispatchA, nil)
 	h.apiary.takeCalls()
 	h.tick()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " " + madeType})
 	made.Phase = journal.PhaseDispatched
 	equal(t, "the journal", h.entries(), []journal.Entry{made})
 	if err := h.stop(); err != nil {
@@ -312,7 +338,8 @@ func TestAClaimFailureWaits(t *testing.T) {
 }
 
 // TestAClaimThatCannotBeMadeIsReleased releases a claim whose values do not fit in the
-// start data, or whose pool is not the provisioner's, makes no machine and waits 60 s.
+// start data, whose pool is not the provisioner's, or that has no machine spec, makes
+// no machine and waits 60 s.
 func TestAClaimThatCannotBeMadeIsReleased(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -327,6 +354,7 @@ func TestAClaimThatCannotBeMadeIsReleased(t *testing.T) {
 		{"a quote in the gateway URL", func(c *loop.Claim) { c.GatewayURL = `https://gate"way.example.com` }, loop.ReasonStartData},
 		{"a gateway URL of 16 KiB", func(c *loop.Claim) { c.GatewayURL = "https://" + strings.Repeat("a", 16<<10) }, loop.ReasonStartData},
 		{"another pool", func(c *loop.Claim) { c.PoolID = "np_ghjkmnpqrstvwxyz" }, loop.ReasonPool},
+		{"no machine spec", func(c *loop.Claim) { c.MachineSpec = nil }, loop.ReasonNoSpec},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -345,22 +373,24 @@ func TestAClaimThatCannotBeMadeIsReleased(t *testing.T) {
 	}
 }
 
-// TestTheLoopClaimsOnlyBelowMaxMachines asks for no claim while the journal has
-// max_machines entries, and claims again once an entry leaves the journal.
-func TestTheLoopClaimsOnlyBelowMaxMachines(t *testing.T) {
+// TestTheLoopClaimsWhileMachinesExist starts with three live machines in the journal.
+// The loop claims and makes two more machines, and then sends a claim again: the
+// provisioner sets no limit on how many machines exist at once.
+func TestTheLoopClaimsWhileMachinesExist(t *testing.T) {
 	h := newHarness(t)
-	h.config.MaxMachines = 1
-	h.setEntries(journal.Entry{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: "i-a", MaxLifetimeMinutes: lifetime})
-	h.machines.add("i-a", dispatchA, contracts.MachineRunning, epoch)
-	h.start()
-	h.tick()
-	if n := h.apiary.claimCount(); n != 0 {
-		t.Fatalf("the loop asked for %d claims with a full journal", n)
+	h.setEntries(dispatched(dispatchA, "i-a"), dispatched(dispatchB, "i-b"), dispatched(dispatchC, "i-c"))
+	for id, machine := range map[string]string{dispatchA: "i-a", dispatchB: "i-b", dispatchC: "i-c"} {
+		h.machines.add(machine, id, contracts.MachineRunning, epoch)
 	}
-	h.machines.setState("i-a", contracts.MachineStopped)
-	h.tick()
+	h.start()
+	h.claim(newClaim(dispatchD))
+	h.claim(newClaim(dispatchE))
+	equal(t, "the journal", h.entries(), []journal.Entry{
+		dispatched(dispatchA, "i-a"), dispatched(dispatchB, "i-b"), dispatched(dispatchC, "i-c"),
+		typed(dispatched(dispatchD, machineID(1))), typed(dispatched(dispatchE, machineID(2))),
+	})
+	// The send returns only once the loop sends another claim, with five machines.
 	h.idle()
-	equal(t, "the journal", h.entries(), nil)
 	if err := h.stop(); err != nil {
 		t.Error(err)
 	}
@@ -403,9 +433,9 @@ func TestShutdownLetsAMakeInFlightFinish(t *testing.T) {
 	if err := h.result(); err != nil {
 		t.Error(err)
 	}
-	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseMade, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}})
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseMade, MachineID: machineID(1), MaxLifetimeMinutes: lifetime, MachineType: madeType}})
 	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), nil)
-	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool + " standard"})
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchA + " " + pool})
 }
 
 // TestAJournalThatCannotBeWrittenStopsTheLoop releases the claim and returns the
@@ -432,7 +462,7 @@ func TestTheReasonsFitTheContract(t *testing.T) {
 	reasons := []string{
 		loop.ReasonLimit, loop.ReasonRetry, loop.ReasonDefect, loop.ReasonOther,
 		loop.ReasonStartData, loop.ReasonPool, loop.ReasonJournal, loop.ReasonStopped,
-		journal.ReasonRestarted,
+		loop.ReasonNoSpec, journal.ReasonRestarted,
 	}
 	for _, r := range reasons {
 		if n := len([]rune(r)); n < 1 || n > 200 {
@@ -446,7 +476,7 @@ func TestTheReasonsFitTheContract(t *testing.T) {
 
 // TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop returns the journal's error
 // when the made entry cannot be written, and sends no release. After a restart, the
-// claimed entry finds the machine by its key and keeps the claim's lifetime.
+// claimed entry finds the machine by its dispatch id and keeps the claim's lifetime.
 func TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop(t *testing.T) {
 	h := newHarness(t)
 	h.machines.makeStarted = make(chan struct{})
@@ -474,9 +504,89 @@ func TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.restart()
-	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1)})
+	equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " -"})
 	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}})
 	if err := h.stop(); err != nil {
 		t.Error(err)
+	}
+}
+
+// TestEveryClaimSendsTheCheckOffers sends the offers of the adapter's check in each
+// claim, also after a claim with no work and after a released claim.
+func TestEveryClaimSendsTheCheckOffers(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	h.idle()
+	claim := newClaim(dispatchA)
+	claim.MachineSpec = nil
+	h.send(claimResult{claim: claim, ok: true})
+	h.clock.waitPending(t, loop.LongWait, loop.WatchInterval)
+	h.clock.Advance(loop.LongWait)
+	h.claim(newClaim(dispatchB))
+	got := h.apiary.takeOffers()
+	if len(got) < 4 {
+		t.Fatalf("the loop sent %d claims, want at least 4", len(got))
+	}
+	for i, offers := range got {
+		equal(t, fmt.Sprintf("the offers of claim %d", i+1), offers, testOffers)
+	}
+	equal(t, "the adapter's calls", h.machines.takeCalls(), []string{"check", "make " + dispatchB + " " + pool})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestTheMachineSpecReachesTheMakeUnchanged makes the machine of claims with
+// different machine specs, each passed to the adapter as the claim has it.
+func TestTheMachineSpecReachesTheMakeUnchanged(t *testing.T) {
+	specs := []contracts.MachineSpec{
+		{VCPUs: 1, MemoryMiB: 512, DiskGiB: 1, Arch: "arm64"},
+		{VCPUs: 8, MemoryMiB: 32768, DiskGiB: 16384, Arch: "amd64", Virtualization: true},
+	}
+	h := newHarness(t)
+	h.start()
+	for i, spec := range specs {
+		claim := newClaim([]string{dispatchA, dispatchB}[i])
+		claim.MachineSpec = &spec
+		h.claim(claim)
+	}
+	equal(t, "the machine specs", h.machines.takeSpecs(), specs)
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAMachineTypeThatTheJournalCannotKeepIsSentAsNone makes machines whose make
+// returns no type, or a type that the contract allows and the journal cannot keep: -,
+// or one with the start of a secret. Dispatched has no type, the journal has none,
+// the provisioner goes on, and the log line has no type.
+func TestAMachineTypeThatTheJournalCannotKeepIsSentAsNone(t *testing.T) {
+	for _, c := range []struct {
+		name, machineType string
+		logged            bool
+	}{
+		{"no type", "", false},
+		{"-", "-", true},
+		{"qak_", "x.qak_abc", true},
+		{"qecr_", "qecr_abc", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.machines.otherType = &c.machineType
+			h.start()
+			h.claim(newClaim(dispatchA))
+			equal(t, "Qory Apiary's calls", h.apiary.takeCalls(), []string{"dispatched " + dispatchA + " " + machineID(1) + " -"})
+			equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: lifetime}})
+			lines := h.find("the machine type from make is - or contains the start of a secret, so the journal keeps no type and dispatched sends none")
+			if len(lines) != map[bool]int{false: 0, true: 1}[c.logged] || (c.logged && (lines[0]["level"] != "WARN" || lines[0]["dispatch_id"] != dispatchA)) {
+				t.Errorf("the log lines are %v", lines)
+			}
+			if len(c.machineType) > 1 && strings.Contains(h.logs.String(), c.machineType) {
+				t.Errorf("the log contains the type %q", c.machineType)
+			}
+			if err := h.stop(); err != nil {
+				t.Error(err)
+			}
+		})
 	}
 }

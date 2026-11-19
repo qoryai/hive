@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -34,6 +35,11 @@ const (
 	gatewayAddress = "10.0.1.5"
 	// handOff is the start data file under the root folder.
 	handOff = "/run/qory-machine-start/start-data"
+	// uptime is the content of /proc/uptime under the root folder: the kernel started
+	// 12.34 seconds before the script.
+	uptime = "12.34 45.67\n"
+	// stepsFile is the steps file under the root folder.
+	stepsFile = "/var/lib/qory-machine/steps.jsonl"
 )
 
 // dangerous are the commands that change the computer, start a service, or reach the
@@ -47,22 +53,30 @@ var dangerous = []string{
 
 // tools are the real commands that the script and the stubs run. The tools folder has a
 // link to each.
-var tools = []string{"base64", "chmod", "head", "jq", "ln", "mkdir", "mktemp", "mv", "rm", "tr"}
+var tools = []string{"base64", "chmod", "head", "jq", "ln", "ls", "mkdir", "mktemp", "mv", "rm", "tr"}
 
 // stub is the script behind every stub. It appends its name and arguments to
 // $STUB_LOG, one line per call. The curl stub returns $STUB_TOKEN for the token PUT and
 // the file $STUB_USERDATA for the user data, and logs the header line it reads on
 // stdin. With $STUB_TERM set, the curl stub of the user data sends SIGTERM to the
 // script. The runuser stub logs HOME, NOTIFY_SOCKET, QORY_STATUS_FD, the working
-// directory and whether the start data file exists, and links the run code file to
+// directory, whether the start data file exists and whether the steps file exists, and
+// links the run code file to
 // $STUB_KEEP, so the test can read it after the script removes it. With
 // $STUB_QORY_OUTPUT set, it writes one line to the descriptor in QORY_STATUS_FD and one
 // line to stderr, as qory run does. With $STUB_TERM set, it sends SIGTERM to the
 // script. The journalctl stub prints $STUB_JOURNAL. A STUB_FAIL_ variable makes one
-// stub exit with an error.
+// stub exit with an error. With $STUB_UPTIME_MS set, every stub adds $STUB_UPTIME_TICK
+// milliseconds to the number in that file and writes the sum to /proc/uptime under the
+// root folder, so the uptime moves forward between the script's reads.
 const stub = `
 name=${0##*/}
 { printf '%s' "$name"; printf ' %s' "$@"; printf '\n'; } >>"$STUB_LOG"
+if [[ -n ${STUB_UPTIME_MS:-} ]]; then
+	ms=$(($(<"$STUB_UPTIME_MS") + STUB_UPTIME_TICK))
+	printf '%s' "$ms" >"$STUB_UPTIME_MS"
+	printf '%d.%03d 1.00\n' $((ms / 1000)) $((ms % 1000)) >"$QORY_MACHINE_ROOT/proc/uptime"
+fi
 case $name in
 curl)
 	case " $* " in
@@ -105,6 +119,11 @@ runuser)
 		printf 'runuser-start-data present\n' >>"$STUB_LOG"
 	else
 		printf 'runuser-start-data absent\n' >>"$STUB_LOG"
+	fi
+	if [[ -f $QORY_MACHINE_ROOT/var/lib/qory-machine/steps.jsonl ]]; then
+		printf 'runuser-steps present\n' >>"$STUB_LOG"
+	else
+		printf 'runuser-steps absent\n' >>"$STUB_LOG"
 	fi
 	if [[ -n ${STUB_QORY_OUTPUT:-} ]]; then
 		printf '%s\n' "qory run: a status line" >&"$QORY_STATUS_FD"
@@ -198,8 +217,8 @@ type env struct {
 	dataStays bool
 }
 
-// newEnv makes a root folder with /home/qory, /etc/hosts, /dev/urandom and /var/lib,
-// and the start data file with valid start data, mode 0600, in a folder of mode 0700.
+// newEnv makes a root folder with /home/qory, /etc/hosts, /dev/urandom, /proc/uptime
+// and /var/lib, and the start data file with valid start data, mode 0600, in a folder of mode 0700.
 // It also makes a user data file for the curl stub, with valid start data.
 func newEnv(t *testing.T, path string) *env {
 	t.Helper()
@@ -212,7 +231,7 @@ func newEnv(t *testing.T, path string) *env {
 		log:      filepath.Join(dir, "stub.log"),
 		path:     path,
 	}
-	for _, d := range []string{"/home/qory", "/etc", "/run", "/var/lib", "/dev"} {
+	for _, d := range []string{"/home/qory", "/etc", "/run", "/var/lib", "/dev", "/proc"} {
 		if err := os.MkdirAll(e.root+d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -222,6 +241,7 @@ func newEnv(t *testing.T, path string) *env {
 	}
 	write(t, e.root+"/etc/hosts", "127.0.0.1 localhost\n")
 	write(t, e.root+"/dev/urandom", string(randomBytes())+"more bytes after the 32 that head reads")
+	write(t, e.root+"/proc/uptime", uptime)
 	e.writeData(t, startData(runCode, gatewayURL, gatewayAddress, 60))
 	write(t, e.userData, startData(runCode, gatewayURL, gatewayAddress, 60))
 	return e
@@ -464,12 +484,13 @@ func TestStartUnitRunsQory(t *testing.T) {
 				"systemctl start docker.service",
 				"chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine",
 				"chown qory " + e.root + "/var/lib/qory-machine/work",
-				"runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + c.url,
+				"runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --machine-steps-file " + e.root + stepsFile + " --gateway " + c.url,
 				"runuser-home " + e.root + "/home/qory",
 				"runuser-notify-socket unset",
 				"runuser-pwd " + e.root + "/var/lib/qory-machine/work",
 				"runuser-status-fd 3",
 				"runuser-start-data absent",
+				"runuser-steps present",
 				"systemctl poweroff",
 			}
 			if !slices.Equal(r.log, want) {
@@ -561,7 +582,7 @@ func TestStartUnitRunsWithStderrClosed(t *testing.T) {
 		t.Fatalf("the script returned %v with stdout %q; want no error and no output", err, out)
 	}
 	log := strings.Split(strings.TrimSuffix(read(t, e.log), "\n"), "\n")
-	run := "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + gatewayURL
+	run := "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --machine-steps-file " + e.root + stepsFile + " --gateway " + gatewayURL
 	if !slices.Contains(log, run) || log[len(log)-1] != "systemctl poweroff" {
 		t.Errorf("the commands do not contain %q, or do not end with systemctl poweroff:\n%s", run, strings.Join(log, "\n"))
 	}
@@ -613,24 +634,30 @@ func skipRoot(t *testing.T) {
 }
 
 // otherOwner replaces the start data file with a file that the user who runs the test
-// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
-// it makes the start data file a hard link to a root-owned file, and skips when no such
-// link can be made. The script removes only the link.
+// does not own, see [otherOwnerFile].
 func otherOwner(t *testing.T, root string) {
 	t.Helper()
-	data := root + handOff
+	otherOwnerFile(t, root+handOff)
+}
+
+// otherOwnerFile replaces the file at path with a file that the user who runs the test
+// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
+// it makes path a hard link to a root-owned file, and skips when no such link can be
+// made. The script removes only the link.
+func otherOwnerFile(t *testing.T, path string) {
+	t.Helper()
 	if os.Geteuid() == 0 {
-		if err := os.Chown(data, 65534, 65534); err != nil {
+		if err := os.Chown(path, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	remove(t, data)
+	remove(t, path)
 	for _, f := range []string{"/etc/hosts", "/private/etc/hosts", "/etc/passwd", "/etc/protocols", "/etc/services"} {
 		if info, err := os.Lstat(f); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if os.Link(f, data) == nil {
+		if os.Link(f, path) == nil {
 			return
 		}
 	}
@@ -686,6 +713,339 @@ func linkFolder(t *testing.T, root string) {
 	write(t, root+"/elsewhere/start-data", startData(runCode, gatewayURL, gatewayAddress, 60))
 	write(t, root+"/elsewhere/.start-data.x", "a temporary file")
 	link(t, root+"/elsewhere", dir)
+}
+
+// runCodeLinesFile is the optional file of the machine image under the root folder.
+const runCodeLinesFile = "/etc/qory/run-code-lines"
+
+// paddedRegistry returns a registry line that, with the run code and the newline between
+// them, makes a run code file of size bytes, with or without a newline after the line.
+func paddedRegistry(size int, newline bool) string {
+	line := "registry "
+	end := ""
+	if newline {
+		end = "\n"
+	}
+	pad := size - len(runCode) - 1 - len(line) - len(".example") - len(end)
+	return line + strings.Repeat("a", pad) + ".example" + end
+}
+
+// TestStartUnitRunCodeLines checks the lines after the run code: without the file
+// /etc/qory/run-code-lines the run code file is the run code alone, and with it the file
+// is the run code, a newline and the lines of the file.
+func TestStartUnitRunCodeLines(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary, runtimes := "registry registry.example.com:5000", "apiary https://apiary.example.com", "runtimes /var/lib/qory/runtimes"
+	cases := []struct{ name, content string }{
+		{"no file", ""},
+		{"registry and apiary", registry + "\n" + apiary + "\n"},
+		{"registry and apiary, no newline at the end", registry + "\n" + apiary},
+		{"one line with a newline", registry + "\n"},
+		{"one line without a newline", apiary},
+		{"all three lines", registry + "\n" + apiary + "\n" + runtimes + "\n"},
+		{"the lines in another order", runtimes + "\n" + apiary + "\n" + registry},
+		{"registry without a port", "registry registry.example.com"},
+		{"registry localhost", "registry localhost"},
+		{"registry with a colon and no dot", "registry registry:5000"},
+		{"apiary with a port", "apiary https://apiary.example.com:8443"},
+		{"apiary on http for localhost", "apiary http://localhost:4000"},
+		{"apiary on http for a loopback address", "apiary http://127.0.0.1"},
+		{"runtimes at the root", "runtimes /"},
+		{"exactly 1 KiB with a newline", paddedRegistry(1024, true)},
+		{"exactly 1 KiB without a newline", paddedRegistry(1024, false)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if c.name != "no file" {
+				if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(t, e.root+runCodeLinesFile, c.content)
+			}
+			r := e.run(t, sh)
+			if r.status != 0 || r.stdout != "" || r.stderr != "" {
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and only stage lines", r.status, r.stdout, r.stderr)
+			}
+			equalStages(t, r.stages, stages)
+			want := runCode
+			if c.content != "" {
+				want += "\n" + c.content
+			}
+			if got := read(t, e.keep); got != want {
+				t.Errorf("the run code file that qory read has %d bytes and is not the run code and the lines of the file, %d bytes", len(got), len(want))
+			}
+			if got := mode(t, e.keep); got != 0o600 {
+				t.Errorf("the run code file had mode %v, want 0600", got)
+			}
+			if got := read(t, e.root+"/etc/hosts"); strings.Contains(got, "registry") {
+				t.Errorf("/etc/hosts contains a line of the file: %q", got)
+			}
+			// The chown call is in the log. The stage line is checked with the other lines.
+			wantChown := "chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine"
+			if !slices.Contains(r.log, wantChown) {
+				t.Errorf("the commands do not contain %q:\n%s", wantChown, strings.Join(r.log, "\n"))
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesFails checks each file that qory would refuse: the script
+// prints one line that starts with the fix and contains no line of the file, exits 1, and
+// writes no run code file, and qory does not run.
+func TestStartUnitRunCodeLinesFails(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary := "registry registry.example.com", "apiary https://apiary.example.com"
+	const (
+		other   = "Write each line of {file} as registry <host>, apiary <url> or runtimes <folder>. Line %d has another form."
+		blank   = "Remove the blank line, line %d, from {file}. The run code file may have no blank line."
+		badReg  = "Fix line %d of {file}. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535."
+		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with the scheme in lowercase, a port from 1 to 65535 and no user, path, query or fragment."
+		badRun  = "Fix line %d of {file}. The runtimes value must be an absolute path with no //, ., .. or trailing /, except the root /."
+		twice   = "Remove the second %s line, line %d, from {file}. Each of the lines registry, apiary and runtimes may appear once."
+		tooMany = "Keep at most 3 lines in {file}, one each of registry, apiary and runtimes. The file has more."
+		control = "Remove every control character and every byte above 126 from {file}. It may contain printable ASCII lines only."
+		secret  = "Remove the text qecr_, qak_ or qrk_, in any letter case, from {file}. It looks like a run code, a run key or an access key secret."
+		empty   = "Write the lines registry, apiary or runtimes into {file}, or remove it. The file is empty."
+		tooLong = "Shorten {file} so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
+	)
+	cases := []struct{ name, content, want string }{
+		{"empty file", "", empty},
+		{"a blank line", registry + "\n\n" + apiary + "\n", fmt.Sprintf(blank, 2)},
+		{"a blank line first", "\n" + registry + "\n", fmt.Sprintf(blank, 1)},
+		{"two newlines at the end", registry + "\n\n", fmt.Sprintf(blank, 2)},
+		{"only a newline", "\n", fmt.Sprintf(blank, 1)},
+		{"the same line twice", registry + "\n" + registry + "\n", fmt.Sprintf(twice, "registry", 2)},
+		{"the same key with another value", apiary + "\n" + registry + "\napiary https://other.example.com\n", fmt.Sprintf(twice, "apiary", 3)},
+		{"a fourth line", registry + "\n" + apiary + "\nruntimes /srv/runtimes\nruntimes /srv/other\n", tooMany},
+		{"an unknown key", "gateway https://gateway.example.com\n", fmt.Sprintf(other, 1)},
+		{"a key with no value", "registry\n", fmt.Sprintf(badReg, 1)},
+		{"a key in capitals", "REGISTRY registry.example.com\n", fmt.Sprintf(other, 1)},
+		{"a line with a leading space", " " + registry + "\n", fmt.Sprintf(other, 1)},
+		{"a registry with a path", "registry registry.example.com/v2\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with a user", "registry user@registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with an https scheme", "registry https://registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with no dot or colon", "registry registry\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 0", "registry registry.example.com:0\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 65536", "registry registry.example.com:65536\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with two spaces", "registry  registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"an apiary with a path", "apiary https://apiary.example.com/v1\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a slash at the end", "apiary https://apiary.example.com/\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a query", "apiary https://apiary.example.com?a=b\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a fragment", "apiary https://apiary.example.com#a\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a user", "apiary https://user@apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary on http for a remote host", "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with another scheme", "apiary ftp://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in capitals", "apiary HTTPS://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in mixed case", "apiary Https://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with no scheme", "apiary apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with port 0", "apiary https://apiary.example.com:0\n", fmt.Sprintf(badAp, 1)},
+		{"a runtimes folder that is relative", "runtimes var/runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with a slash at the end", "runtimes /var/runtimes/\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with //", "runtimes /var//runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with ..", "runtimes /var/../runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with .", "runtimes /var/./runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder that ends in ..", "runtimes /var/..\n", fmt.Sprintf(badRun, 1)},
+		{"a bad line after a good one", registry + "\n" + "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 2)},
+		{"a line ending with CR", registry + "\r\n", control},
+		{"a tab", "registry\tregistry.example.com\n", control},
+		{"a NUL byte", registry + "\x00\n", control},
+		{"a byte above 126", "runtimes /srv/caf\xc3\xa9\n", control},
+		{"a run code in the file", "registry " + runCode + "\n", secret},
+		{"a run code in capitals", "registry QECR_FOO.example.com\n", secret},
+		{"an access key secret", "registry qak_abc.example.com\n", secret},
+		{"a run key", "apiary https://qrk_abc.example.com\n", secret},
+		{"a secret in a mixed case", "registry x.QaK_1.example.com\n", secret},
+		{"1 KiB and 1 byte with a newline", paddedRegistry(1025, true), tooLong},
+		{"1 KiB and 1 byte without a newline", paddedRegistry(1025, false), tooLong},
+		{"far above 1 KiB", strings.Repeat(registry+"\n", 100), tooLong},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			e.expectRefused(t, sh, strings.ReplaceAll(c.want, "{file}", e.root+runCodeLinesFile), c.content)
+		})
+	}
+
+	file := func(e *env) string { return e.root + runCodeLinesFile }
+	t.Run("a symbolic link", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		write(t, e.root+"/elsewhere", registry+"\n")
+		link(t, e.root+"/elsewhere", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a link to nothing", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		link(t, e.root+"/missing", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a folder", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(file(e), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is not a regular file.", registry)
+	})
+	t.Run("another owner", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		otherOwnerFile(t, file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as root, or remove it. Another user owns the file.", registry)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		t.Parallel()
+		skipRoot(t)
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		if err := os.Chmod(file(e), 0); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Check that root can read "+file(e)+". Reading the file failed.", registry)
+	})
+}
+
+// watchHead returns path with a folder before the others that has a head command. It logs
+// to $STUB_LOG one line "head-watch <state> <arguments>" for each call, where state is
+// present or absent for the file $HEAD_WATCH_FILE at the time of the call, and then runs
+// the real head. A test that sets HEAD_WATCH_FILE to the run code file sees whether the
+// script wrote the file before a call.
+func watchHead(t *testing.T, sh, path string) string {
+	t.Helper()
+	real := resolve(path, "head")
+	if real == "" {
+		t.Skip("install head to run this test")
+	}
+	dir := t.TempDir()
+	body := "#!" + sh + "\n" +
+		"if [[ -e $HEAD_WATCH_FILE ]]; then state=present; else state=absent; fi\n" +
+		"printf 'head-watch %s %s\\n' \"$state\" \"$*\" >>\"$STUB_LOG\"\n" +
+		"exec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "head"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(filepath.ListSeparator) + path
+}
+
+// watched returns the lines that watchHead logged for calls that read file.
+func watched(r result, file string) []string {
+	var calls []string
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "head-watch ") && strings.HasSuffix(line, " "+file) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// TestStartUnitRunCodeLinesOrder checks that the script reads and validates the file
+// before it writes the run code file: at the time of the read, the run code file does not
+// exist, for a file that the script accepts and for one that it refuses.
+func TestStartUnitRunCodeLinesOrder(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	for _, c := range []struct {
+		name, content string
+		status        int
+	}{
+		{"accepted", "registry registry.example.com\n", 0},
+		{"refused", "registry registry\n", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			r := e.run(t, sh, "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+			if r.status != c.status {
+				t.Errorf("status %d, want %d", r.status, c.status)
+			}
+			calls := watched(r, e.root+runCodeLinesFile)
+			if len(calls) != 1 || !strings.HasPrefix(calls[0], "head-watch absent ") {
+				t.Errorf("the script read the file with %q, want one call made while the run code file does not exist", calls)
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesBoundedRead checks that the script reads at most 1025 bytes of
+// the file, one byte more than qory's limit of 1024, and so refuses a file of 1 GiB in
+// the time of a small one. The file is sparse, so it takes no disk space.
+func TestStartUnitRunCodeLinesBoundedRead(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	e := newEnv(t, path)
+	if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := e.root + runCodeLinesFile
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		f.Close()
+		t.Skipf("the file system cannot make a sparse file of 1 GiB: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	want := "Shorten " + file + " so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
+	r := e.expectRefused(t, sh, want, "", "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+	if took := time.Since(start); took > 30*time.Second {
+		t.Errorf("refusing a file of 1 GiB took %v, want at most 30s: the read is not bounded", took)
+	}
+	calls := watched(r, file)
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], " -c 1025 -- "+file) {
+		t.Errorf("the script read the file with %q, want one call: head -c 1025 -- %s", calls, file)
+	}
+}
+
+// expectRefused runs the script with vars added and returns the result. It checks that
+// the script refuses with the line want and no other line, exits 1, prints no stage after
+// "Docker started", runs no qory, and prints none of the lines of the file, content.
+func (e *env) expectRefused(t *testing.T, sh, want, content string, vars ...string) result {
+	t.Helper()
+	r := e.run(t, sh, append([]string{"STUB_QORY_OUTPUT=1"}, vars...)...)
+	if r.status != 1 || r.stdout != "" || r.stderr != want+"\n" {
+		t.Errorf("status %d, stdout %q, stderr %q; want 1, no stdout and the line %q", r.status, r.stdout, r.stderr, want)
+	}
+	equalStages(t, r.stages, stages[:3])
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "runuser") {
+			t.Errorf("the script ran qory after a refusal: %q", line)
+		}
+	}
+	if _, err := os.Lstat(e.keep); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("qory read a run code file after a refusal: %v", err)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		_, value, _ := strings.Cut(line, " ")
+		if len(value) > 9 && strings.Contains(r.stderr+r.stdout, value) {
+			t.Errorf("the output contains the value %q of a line of the file", value)
+		}
+	}
+	return r
 }
 
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
@@ -1014,10 +1374,337 @@ func TestStartUnitFails(t *testing.T) {
 			if c.status == 0 && slices.ContainsFunc(r.log, func(l string) bool { return strings.HasPrefix(l, "runuser") }) {
 				t.Errorf("the script ran qory after a failure:\n%s", strings.Join(r.log, "\n"))
 			}
+			if _, err := os.Lstat(e.root + stepsFile); c.status == 0 && !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the steps file exists after a failure before qory run: %v", err)
+			}
 			if c.check != nil {
 				c.check(t, e.root)
 			}
 		})
+	}
+}
+
+// stepNames are the names of the steps in the steps file, in order.
+var stepNames = []string{"boot", "read start data", "set firewall", "start Docker", "write run code"}
+
+// stepTime is a time in the steps file: UTC to the millisecond.
+var stepTime = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$`)
+
+// stepRecord is one line of the steps file.
+type stepRecord struct {
+	name           string
+	started, ended time.Time
+}
+
+// steps reads the steps file under root and checks each line: one JSON object with
+// exactly name, started and ended, times in UTC to the millisecond, each step's start
+// not after its end, and each step after the first starting where the one before it
+// ended.
+func steps(t *testing.T, root string) []stepRecord {
+	t.Helper()
+	text := read(t, root+stepsFile)
+	if !strings.HasSuffix(text, "\n") {
+		t.Errorf("the steps file %q does not end with a newline", text)
+	}
+	var records []stepRecord
+	for i, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		var fields map[string]string
+		if err := json.Unmarshal([]byte(line), &fields); err != nil || len(fields) != 3 {
+			t.Fatalf("line %d of the steps file is %q, want a JSON object with name, started and ended: %v", i+1, line, err)
+		}
+		var at [2]time.Time
+		for j, key := range []string{"started", "ended"} {
+			if !stepTime.MatchString(fields[key]) {
+				t.Fatalf("line %d of the steps file has %s %q, want UTC to the millisecond", i+1, key, fields[key])
+			}
+			var err error
+			if at[j], err = time.Parse(time.RFC3339Nano, fields[key]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if at[1].Before(at[0]) {
+			t.Errorf("line %d of the steps file ends before it starts: %s", i+1, line)
+		}
+		if i > 0 && !at[0].Equal(records[i-1].ended) {
+			t.Errorf("line %d of the steps file starts at %s, want the end of the step before it, %s", i+1, at[0].Format(time.RFC3339Nano), records[i-1].ended.Format(time.RFC3339Nano))
+		}
+		records = append(records, stepRecord{name: fields["name"], started: at[0], ended: at[1]})
+	}
+	return records
+}
+
+// failingTool makes a folder with a script named name that runs body, and returns the
+// PATH that lists it before path.
+func failingTool(t *testing.T, sh, path, name, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!"+sh+"\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(filepath.ListSeparator) + path
+}
+
+// TestStartUnitWritesSteps checks the steps file: it exists when qory run starts, has
+// one line for each step, in order, contains no value of the start data, and has mode
+// 0644. Without a number in /proc/uptime, it has no boot line. A failed or skipped write
+// prints one line, leaves no steps file and no temporary file, and qory run still runs.
+func TestStartUnitWritesSteps(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	const (
+		writeFailed = "Check that root can write {root}/var/lib/qory-machine. Writing {root}/var/lib/qory-machine/steps.jsonl failed, so qory run starts without it."
+		aFolder     = "Remove the folder {root}/var/lib/qory-machine/steps.jsonl. A folder is at the path of the steps file, so qory run starts without it."
+		badState    = "Make {root}/var/lib/qory-machine a folder, not a link, that root owns and that no group or other user can write. The folder fails this check, so qory run starts without {root}/var/lib/qory-machine/steps.jsonl."
+	)
+	stale := func(t *testing.T, root string) {
+		t.Helper()
+		if err := os.MkdirAll(root+"/var/lib/qory-machine", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, root+stepsFile, `{"name":"a step from the machine image"}`+"\n")
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		// tool is a tool that the run finds first on PATH, and toolBody its script.
+		tool, toolBody string
+		// tick is the milliseconds that each stub adds to the uptime, or 0.
+		tick int
+		// names are the steps in the file, or nil when the write fails or is skipped.
+		names []string
+		// durations are the lengths of the steps in milliseconds, or nil.
+		durations []int64
+		// want is the line on stderr, or "".
+		want   string
+		status int
+		stages []string
+		// check checks the root folder after the run.
+		check func(t *testing.T, root string)
+		// linked is set when the folder is a link, and the file in the folder that it
+		// links to stays.
+		linked bool
+	}{
+		{name: "a normal start", names: stepNames},
+		// The stubs that run in each step add 1005 ms each: none in read start data,
+		// four in set firewall, five in start Docker and one in write run code. The
+		// lengths follow the uptime, not the clock, which moves far less.
+		{name: "an uptime that moves", tick: 1005, names: stepNames, durations: []int64{12340, 0, 4020, 5025, 1005}},
+		{name: "no /proc/uptime", names: stepNames[1:], setup: func(t *testing.T, root string) { remove(t, root+"/proc/uptime") }},
+		{name: "empty /proc/uptime", names: stepNames[1:], setup: func(t *testing.T, root string) { write(t, root+"/proc/uptime", "") }},
+		{name: "/proc/uptime not a number", names: stepNames[1:], setup: func(t *testing.T, root string) { write(t, root+"/proc/uptime", "12,34 45,67\n") }},
+		{name: "/proc/uptime a whole number", names: stepNames, setup: func(t *testing.T, root string) { write(t, root+"/proc/uptime", "12 45\n") }},
+		{
+			name: "a link at steps.jsonl", names: stepNames,
+			setup: func(t *testing.T, root string) {
+				write(t, root+"/elsewhere", "the link's target")
+				link(t, root+"/elsewhere", root+stepsFile)
+			},
+			check: func(t *testing.T, root string) {
+				if got := mode(t, root+stepsFile); !got.IsRegular() {
+					t.Errorf("steps.jsonl has mode %v, want a regular file", got)
+				}
+				fileStays(t, root+"/elsewhere", "the link's target")
+			},
+		},
+		// rm fails on a folder for every user, root among them, so the script does not
+		// move the temporary file into it.
+		{
+			name: "a folder at steps.jsonl", want: aFolder,
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(root+stepsFile, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, root string) {
+				if got := entries(t, root+stepsFile); len(got) != 0 {
+					t.Errorf("the folder at steps.jsonl contains %q, want no file", got)
+				}
+			},
+		},
+		{
+			name: "folder not writable", want: writeFailed,
+			setup: func(t *testing.T, root string) {
+				skipRoot(t)
+				dir := root + "/var/lib/qory-machine"
+				if err := os.MkdirAll(dir+"/work", 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(dir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+			},
+		},
+		{name: "a stale file and mktemp fails", want: writeFailed, setup: stale, tool: "mktemp", toolBody: "exit 1"},
+		{name: "a stale file and mv fails", want: writeFailed, setup: stale, tool: "mv", toolBody: "exit 1"},
+		{
+			name: "a stale file and a group that can write the folder", want: badState,
+			setup: func(t *testing.T, root string) {
+				stale(t, root)
+				if err := os.Chmod(root+"/var/lib/qory-machine", 0o775); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "other users can write the folder", want: badState,
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(root+"/var/lib/qory-machine", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(root+"/var/lib/qory-machine", 0o757); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		// The script removes and writes nothing through the link.
+		{
+			name: "the folder is a link", want: badState, linked: true,
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(root+"/state", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(t, root+"/state/steps.jsonl", "a file in the folder that the link points to\n")
+				link(t, root+"/state", root+"/var/lib/qory-machine")
+			},
+			check: func(t *testing.T, root string) {
+				fileStays(t, root+"/state/steps.jsonl", "a file in the folder that the link points to\n")
+			},
+		},
+		// SIGTERM during the write: the exit removes the temporary file.
+		{
+			name: "SIGTERM during the write", want: "No action needed. The script stopped on SIGTERM, and the machine powers off.",
+			status: 143, stages: stages[:4], tool: "mv", toolBody: `kill -TERM "$PPID"; exit 1`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if c.tool != "" {
+				e.path = failingTool(t, sh, path, c.tool, c.toolBody)
+			}
+			var vars []string
+			if c.tick != 0 {
+				counter := filepath.Join(t.TempDir(), "uptime-ms")
+				write(t, counter, "12340")
+				vars = []string{"STUB_UPTIME_MS=" + counter, "STUB_UPTIME_TICK=" + strconv.Itoa(c.tick)}
+			}
+			if c.setup != nil {
+				c.setup(t, e.root)
+			}
+			before := time.Now()
+			r := e.run(t, sh, vars...)
+			after := time.Now()
+			wantStages := c.stages
+			if wantStages == nil {
+				wantStages = stages
+			}
+			equalStages(t, r.stages, wantStages)
+			want := ""
+			if c.want != "" {
+				want = strings.ReplaceAll(c.want, "{root}", e.root) + "\n"
+			}
+			if r.status != c.status || r.stderr != want {
+				t.Errorf("status %d, stderr %q; want %d and %q", r.status, r.stderr, c.status, want)
+			}
+			if c.status == 0 {
+				wantSteps := "runuser-steps present"
+				if c.names == nil && !c.linked {
+					wantSteps = "runuser-steps absent"
+				}
+				if !slices.Contains(r.log, wantSteps) {
+					t.Errorf("the commands do not contain %q:\n%s", wantSteps, strings.Join(r.log, "\n"))
+				}
+				run := "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --gateway " + gatewayURL
+				if c.names != nil {
+					run = "runuser -u qory -- qory run --run-code-file " + e.root + "/run/qory-machine/run-code --machine-steps-file " + e.root + stepsFile + " --gateway " + gatewayURL
+				}
+				if !slices.Contains(r.log, run) {
+					t.Errorf("the commands do not contain %q:\n%s", run, strings.Join(r.log, "\n"))
+				}
+			}
+			if c.check != nil {
+				c.check(t, e.root)
+			}
+			dir := e.root + "/var/lib/qory-machine"
+			if got := entries(t, dir); slices.ContainsFunc(got, func(n string) bool { return strings.HasPrefix(n, ".steps") }) {
+				t.Errorf("the folder %s contains %q after the run, want no temporary file", dir, got)
+			}
+			if c.names == nil {
+				if info, err := os.Lstat(e.root + stepsFile); !c.linked && err == nil && !info.IsDir() {
+					t.Errorf("a steps file exists after a failed or skipped write")
+				}
+				return
+			}
+			records := steps(t, e.root)
+			var names []string
+			for _, rec := range records {
+				names = append(names, rec.name)
+			}
+			if !slices.Equal(names, c.names) {
+				t.Errorf("the steps are %q, want %q", names, c.names)
+			}
+			if got := entries(t, dir); !slices.Equal(got, []string{"steps.jsonl", "work"}) {
+				t.Errorf("the folder %s contains %q, want steps.jsonl and work", dir, got)
+			}
+			if got := mode(t, e.root+stepsFile); got != 0o644 {
+				t.Errorf("the steps file has mode %v, want 0644", got)
+			}
+			text := read(t, e.root+stepsFile)
+			for _, s := range []string{runCode, "MARKER", password, gatewayURL, "gateway.example.com", gatewayAddress, "8443"} {
+				if strings.Contains(text, s) {
+					t.Errorf("the steps file contains %q, a value of the start data:\n%s", s, text)
+				}
+			}
+			if c.durations != nil {
+				for i, rec := range records {
+					if got := rec.ended.Sub(rec.started).Milliseconds(); got != c.durations[i] {
+						t.Errorf("the step %s lasts %d ms, want %d ms", rec.name, got, c.durations[i])
+					}
+				}
+				return
+			}
+			// The uptime stays the same during the run, so every step ends when the file
+			// is written, and boot starts the seconds in /proc/uptime before that.
+			from, to := before.Truncate(time.Millisecond), after
+			if records[0].name == "boot" {
+				up, err := strconv.ParseFloat(strings.Fields(read(t, e.root+"/proc/uptime"))[0], 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := time.Duration(up * float64(time.Second))
+				if got := records[0].ended.Sub(records[0].started); got != d {
+					t.Errorf("the boot step lasts %s, want %s", got, d)
+				}
+				from, to = from.Add(-d), to.Add(-d)
+			}
+			if first := records[0].started; first.Before(from) || first.After(to) {
+				t.Errorf("the first step starts at %s, want from %s to %s", first.Format(time.RFC3339Nano), from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
+
+// TestStartUnitStepTimes runs the script's function utc on fixed times: it writes UTC
+// to the millisecond, with the milliseconds padded to three digits, whatever the local
+// time zone.
+func TestStartUnitStepTimes(t *testing.T) {
+	sh := bash(t)
+	fn := regexp.MustCompile(`(?ms)^utc\(\) \{$.*?^\}$`).FindString(read(t, "qory-machine-start"))
+	if fn == "" {
+		t.Fatal("qory-machine-start has no function utc")
+	}
+	for _, us := range []int64{1762389104005000, 1762389104999999, 1762389104000999, 0} {
+		cmd := exec.Command(sh, "-c", fn+"\nutc \"$1\"\nprintf %s \"$REPLY\"", sh, strconv.FormatInt(us, 10))
+		cmd.Env = []string{"LC_ALL=C", "TZ=XXX-5"}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := time.UnixMicro(us).UTC().Format("2006-01-02T15:04:05.000Z"); string(out) != want {
+			t.Errorf("utc %d is %q, want %q", us, out, want)
+		}
 	}
 }
 
@@ -1152,13 +1839,51 @@ func TestStartUnitSecretLines(t *testing.T) {
 			`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 			`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
 			`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
+			// docker_log filters journal lines, and count_groups counts IPv6 groups. Neither
+			// reads the run code file.
+			`while IFS= read -r line || [[ -n $line ]]; do`,
+			`lower=${line,,}`,
+			`if [[ $lower == *qak_* || $lower == *qrk_* || $lower == *qecr_* ]]; then`,
+			`if [[ -n $rest ]]; then`,
+			`group=${rest%%:*}`,
+			`[[ $rest == *:* ]] || break`,
+			`rest=${rest#*:}`,
 			`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
+			// read_run_code_lines and its caller keep the content of the run code lines
+			// file in variables. These lines compare it, test it with a pattern, take its
+			// parts, count it, or append it to the run code file. None of them prints it.
+			// The failure lines show a path, a line number and a fixed key name.
+			`content=${content%x}`,
+			`if [[ -z $content ]]; then`,
+			`total=$((${#run_code} + 1 + ${#content}))`,
+			`if [[ $content =~ [^[:print:]$'\n'] ]]; then`,
+			`lower=${content,,}`,
+			`if [[ $lower == *qecr_* || $lower == *qak_* || $lower == *qrk_* ]]; then`,
+			`rest=${content%$'\n'}`,
+			`line=${rest%%$'\n'*}`,
+			`[[ -n $line ]] || fail "Remove the blank line, line $n, from $file. The run code file may have no blank line."`,
+			`key=${line%% *}`,
+			`[[ $line != *' '* ]] || value=${line#* }`,
+			`if [[ $value =~ ^[A-Za-z0-9.-]+(:([0-9]{1,5}))?$ ]] && valid_port "${BASH_REMATCH[2]}" &&`,
+			`[[ $value == *[.:]* || $value == localhost ]]; then`,
+			`if [[ $value =~ ^(https?)://([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then`,
+			`if [[ $value == /* && ( $value == / || ( $value != *//* && $value != */ && $value != */. && $value != */.. && $value != */./* && $value != */../* ) ) ]]; then`,
+			`[[ $rest == *$'\n'* ]] || break`,
+			`rest=${rest#*$'\n'}`,
+			`run_code_lines=$content`,
+			// read_uptime reads the first field of /proc/uptime into value. It reads no
+			// secret.
+			`{ IFS=' ' read -r value rest <"$uptime_file"; } 2>/dev/null || [[ -n $value ]] || return 1`,
+			`[[ $value =~ ^([0-9]{1,9})(\.([0-9]{1,6}))?$ ]] || return 1`,
+			// The length of the engine proxy password, not the password.
+			`[[ ${#password} -eq 43 ]] || fail "Check that root can read $urandom. Making the engine proxy password failed."`,
+			`printf '\n%s' "$run_code_lines" 2>/dev/null >>"$run_code_file" ||`,
 		},
 		"qory-machine-data-aws-ec2": {
 			`printf 'X-aws-ec2-metadata-token: %s\n' "$token" |`,
 		},
 	}
-	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)
+	secret := regexp.MustCompile(`\$\{?#?(token|data|run_code|password|content|run_code_lines|lower|rest|line|value)\b`)
 	for name, lines := range allowed {
 		for i, line := range strings.Split(read(t, name), "\n") {
 			line = strings.TrimSpace(line)

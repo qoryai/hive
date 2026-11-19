@@ -9,13 +9,15 @@ import (
 )
 
 // TestRecover returns one action for every phase and every result of the lookup of
-// the machine by its key, the dispatch id.
+// the machine by the dispatch id.
 func TestRecover(t *testing.T) {
 	release := journal.Action{Kind: journal.Release, Reason: journal.ReasonRestarted}
 	deleting := journal.Action{Kind: journal.Deleting, MachineID: oddID}
 	resume := journal.Action{Kind: journal.Resume, MachineID: oddID}
 	// keep resumes with the entry's machine id, when the list has no machine.
 	keep := journal.Action{Kind: journal.Resume, MachineID: machine}
+	// none resumes an ended entry that has no machine id.
+	none := journal.Action{Kind: journal.Resume}
 	lookups := []struct {
 		name   string
 		lookup journal.Lookup
@@ -36,6 +38,7 @@ func TestRecover(t *testing.T) {
 		{journal.PhaseDispatched, machine, []journal.Action{keep, resume, resume, resume, deleting}},
 		{journal.PhaseDeleting, machine, []journal.Action{keep, keep, keep, keep, keep}},
 		{journal.PhaseEnded, machine, []journal.Action{keep, keep, keep, keep, keep}},
+		{journal.PhaseEnded, "", []journal.Action{none, none, none, none, none}},
 	} {
 		e := journal.Entry{DispatchID: dispatchA, Phase: c.phase, MachineID: c.machine, MaxLifetimeMinutes: lifetime}
 		for i, l := range lookups {

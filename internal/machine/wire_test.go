@@ -101,7 +101,7 @@ const runReply = `<?xml version="1.0" encoding="UTF-8"?>
     <tagSet>
       <item><key>qory:managed</key><value>true</value></item>
       <item><key>qory:pool</key><value>np_0123456789abcdef</value></item>
-      <item><key>qory:key</key><value>dp_0123456789abcdef</value></item>
+      <item><key>qory:dispatch_id</key><value>dp_0123456789abcdef</value></item>
     </tagSet>
   </item></instancesSet>
 </RunInstancesResponse>`
@@ -127,6 +127,8 @@ func wantRunForm(extra ...[2]string) url.Values {
 		"MetadataOptions.HttpEndpoint":                {"enabled"},
 		"BlockDeviceMapping.1.DeviceName":             {"/dev/sda1"},
 		"BlockDeviceMapping.1.Ebs.Encrypted":          {"true"},
+		"BlockDeviceMapping.1.Ebs.VolumeSize":         {"30"},
+		"BlockDeviceMapping.1.Ebs.VolumeType":         {"gp3"},
 		"UserData":                                    {base64.StdEncoding.EncodeToString(testSpec().UserData)},
 	}
 	f.Set("BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
@@ -137,7 +139,7 @@ func wantRunForm(extra ...[2]string) url.Values {
 		f.Set(p+"Tag.1.Value", "true")
 		f.Set(p+"Tag.2.Key", "qory:pool")
 		f.Set(p+"Tag.2.Value", "np_0123456789abcdef")
-		f.Set(p+"Tag.3.Key", "qory:key")
+		f.Set(p+"Tag.3.Key", "qory:dispatch_id")
 		f.Set(p+"Tag.3.Value", "dp_0123456789abcdef")
 		for j, kv := range extra {
 			f.Set(fmt.Sprintf("%sTag.%d.Key", p, j+4), kv[0])
@@ -157,11 +159,11 @@ func TestWireCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.Key != testSpec().Key {
+	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.DispatchID != testSpec().DispatchID {
 		t.Errorf("machine %+v", m)
 	}
 	want := wantRunForm()
-	want.Set("ClientToken", testSpec().Key)
+	want.Set("ClientToken", "dp_0123456789abcdef.m7g.large")
 	if !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
 	}
@@ -173,9 +175,9 @@ func TestWireCreate(t *testing.T) {
 	}
 }
 
-// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool
-// and qory:key and sorted by key, on the instance and the volume, in Create's request
-// and in CheckRights' dry run.
+// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool and
+// qory:dispatch_id and sorted by key, on the instance and the volume, in Create's
+// request and in CheckRights' dry run.
 func TestWireTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": ""}
@@ -185,7 +187,7 @@ func TestWireTags(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := wantRunForm(extra...)
-	want.Set("ClientToken", spec.Key)
+	want.Set("ClientToken", "dp_0123456789abcdef.m7g.large")
 	if !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
 	}
@@ -214,7 +216,7 @@ func TestWireCreateRetrySameToken(t *testing.T) {
 		t.Fatalf("%d requests, want 3", len(s.forms))
 	}
 	for i, f := range s.forms {
-		if f.Get("ClientToken") != testSpec().Key {
+		if f.Get("ClientToken") != "dp_0123456789abcdef.m7g.large" {
 			t.Errorf("attempt %d: ClientToken %q", i+1, f.Get("ClientToken"))
 		}
 	}
@@ -261,7 +263,7 @@ func TestWireCheckRights(t *testing.T) {
 	}
 	got := s.forms[0]
 	token := got.Get("ClientToken")
-	if token == "" || token == testSpec().Key {
+	if token == "" || token == testSpec().DispatchID {
 		t.Errorf("ClientToken %q, want one the SDK sets", token)
 	}
 	got.Del("ClientToken")
@@ -298,7 +300,7 @@ func TestWireListAndConsole(t *testing.T) {
 		return `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
 <reservationSet><item><reservationId>r-1</reservationId><instancesSet><item>
 <instanceId>` + id + `</instanceId><instanceState><code>80</code><name>stopped</name></instanceState>
-<clientToken>dp_0123456789abcdef</clientToken><tagSet><item><key>qory:key</key><value>dp_0123456789abcdef</value></item></tagSet>
+<clientToken>dp_0123456789abcdef</clientToken><tagSet><item><key>qory:dispatch_id</key><value>dp_0123456789abcdef</value></item></tagSet>
 </item></instancesSet></item></reservationSet>` + next + `</DescribeInstancesResponse>`
 	}
 	c, s := newWireClient(t, reply{200, page("i-0aaaaaaaaaaaaaaa0", "<nextToken>page-2</nextToken>")}, reply{200, page("i-0bbbbbbbbbbbbbbb0", "")})
@@ -306,7 +308,7 @@ func TestWireListAndConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].Key != "dp_0123456789abcdef" {
+	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].DispatchID != "dp_0123456789abcdef" {
 		t.Errorf("machines %+v", ms)
 	}
 	want := url.Values{
@@ -362,16 +364,95 @@ func TestWireTerminate(t *testing.T) {
 	}
 }
 
-// TestWireRootDevice pins the DescribeImages request on the wire and the root device
-// name from its reply.
-func TestWireRootDevice(t *testing.T) {
+// TestWireImage pins the DescribeImages request on the wire, and the root device
+// name, its volume size and the architecture from its reply.
+func TestWireImage(t *testing.T) {
 	c, s := newWireClient(t, reply{200, `<DescribeImagesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
-<imagesSet><item><imageId>ami-0123456789abcdef0</imageId><rootDeviceName>/dev/sda1</rootDeviceName><rootDeviceType>ebs</rootDeviceType></item></imagesSet></DescribeImagesResponse>`})
-	name, err := c.RootDevice(context.Background(), "ami-0123456789abcdef0")
-	if err != nil || name != "/dev/sda1" {
-		t.Errorf("name %q, error %v", name, err)
+<imagesSet><item><imageId>ami-0123456789abcdef0</imageId><architecture>arm64</architecture><rootDeviceName>/dev/sda1</rootDeviceName><rootDeviceType>ebs</rootDeviceType>
+<blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeSize>30</volumeSize><volumeType>gp3</volumeType></ebs></item></blockDeviceMapping></item></imagesSet></DescribeImagesResponse>`})
+	img, err := c.Image(context.Background(), "ami-0123456789abcdef0")
+	if err != nil || img != (Image{RootDevice: "/dev/sda1", RootSizeGiB: 30, Arch: ArchARM64}) {
+		t.Errorf("image %+v, error %v", img, err)
 	}
 	want := url.Values{"Action": {"DescribeImages"}, "Version": {"2016-11-15"}, "ImageId.1": {"ami-0123456789abcdef0"}}
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
+	}
+}
+
+// TestWireInstanceTypes pins the DescribeInstanceTypes request on the wire and what
+// AllInstanceTypes reads from its reply: vCPUs, memory, architectures, nested
+// virtualization, bare metal and the usage class on-demand.
+func TestWireInstanceTypes(t *testing.T) {
+	c, s := newWireClient(t, reply{200, `<DescribeInstanceTypesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId><instanceTypeSet>
+<item><instanceType>m8i.large</instanceType><bareMetal>false</bareMetal><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>8192</sizeInMiB></memoryInfo>
+<processorInfo><supportedArchitectures><item>x86_64</item></supportedArchitectures><supportedFeatures><item>nested-virtualization</item></supportedFeatures></processorInfo>
+<supportedUsageClasses><item>on-demand</item><item>spot</item></supportedUsageClasses></item>
+<item><instanceType>m7g.metal</instanceType><bareMetal>true</bareMetal><vCpuInfo><defaultVCpus>64</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>262144</sizeInMiB></memoryInfo>
+<processorInfo><supportedArchitectures><item>arm64</item></supportedArchitectures></processorInfo>
+<supportedUsageClasses><item>capacity-block</item></supportedUsageClasses></item>
+</instanceTypeSet></DescribeInstanceTypesResponse>`})
+	got, err := c.AllInstanceTypes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []InstanceType{
+		{Name: "m8i.large", VCPUs: 2, MemoryMiB: 8192, Archs: []string{ArchAMD64}, NestedVirtualization: true, OnDemand: true},
+		{Name: "m7g.metal", VCPUs: 64, MemoryMiB: 262144, Archs: []string{ArchARM64}, BareMetal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("types %+v, want %+v", got, want)
+	}
+	wantForm := url.Values{"Action": {"DescribeInstanceTypes"}, "Version": {"2016-11-15"}, "MaxResults": {"100"}}
+	if !reflect.DeepEqual(s.forms[0], wantForm) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], wantForm)
+	}
+}
+
+// TestWireSubnetZoneAndZoneTypes pins the DescribeSubnets and the
+// DescribeInstanceTypeOfferings requests on the wire, and the zone and the zone's
+// types from their replies.
+func TestWireSubnetZoneAndZoneTypes(t *testing.T) {
+	c, s := newWireClient(t, reply{200, `<DescribeSubnetsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
+<subnetSet><item><subnetId>subnet-0123456789abcdef0</subnetId><availabilityZone>eu-west-1b</availabilityZone></item></subnetSet></DescribeSubnetsResponse>`})
+	zone, err := c.SubnetZone(context.Background(), "subnet-0123456789abcdef0")
+	if err != nil || zone != "eu-west-1b" {
+		t.Errorf("zone %q, error %v", zone, err)
+	}
+	want := url.Values{"Action": {"DescribeSubnets"}, "Version": {"2016-11-15"}, "SubnetId.1": {"subnet-0123456789abcdef0"}}
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
+	}
+
+	c, s = newWireClient(t, reply{200, `<DescribeInstanceTypeOfferingsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
+<instanceTypeOfferingSet><item><instanceType>t3.medium</instanceType><locationType>availability-zone</locationType><location>eu-west-1b</location></item></instanceTypeOfferingSet></DescribeInstanceTypeOfferingsResponse>`})
+	names, err := c.ZoneTypes(context.Background(), "eu-west-1b")
+	if err != nil || !reflect.DeepEqual(names, []string{"t3.medium"}) {
+		t.Errorf("zone types %v, error %v", names, err)
+	}
+	want = url.Values{
+		"Action": {"DescribeInstanceTypeOfferings"}, "Version": {"2016-11-15"}, "LocationType": {"availability-zone"},
+		"Filter.1.Name": {"location"}, "Filter.1.Value.1": {"eu-west-1b"}, "MaxResults": {"1000"},
+	}
+	if !reflect.DeepEqual(s.forms[0], want) {
+		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
+	}
+}
+
+// TestWireNestedVirtualization pins CpuOptions on the wire for a spec with nested
+// virtualization.
+func TestWireNestedVirtualization(t *testing.T) {
+	spec := testSpec()
+	spec.InstanceType = "m8i.large"
+	spec.NestedVirtualization = true
+	c, s := newWireClient(t, reply{200, runReply})
+	if _, err := c.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	want := wantRunForm()
+	want.Set("InstanceType", "m8i.large")
+	want.Set("ClientToken", "dp_0123456789abcdef.m8i.large")
+	want.Set("CpuOptions.NestedVirtualization", "enabled")
 	if !reflect.DeepEqual(s.forms[0], want) {
 		t.Errorf("request\n%v\nwant\n%v", s.forms[0], want)
 	}

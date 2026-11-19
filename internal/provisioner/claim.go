@@ -32,9 +32,13 @@ type Claimed struct {
 	// LeaseUntil is when the dispatch's lease lapses: the provisioner sends the first
 	// dispatched before then.
 	LeaseUntil time.Time
-	// Machine is the type of machine to create, such as small, or "" when the answer has
-	// none and the provisioner uses its default.
+	// Machine is the run's machine type, a name such as standard, or "" when the
+	// answer has none.
 	Machine string
+	// MachineSpec is the spec of the run's machine type: the provisioner makes a
+	// machine that fits it. It is nil when the answer has none, which is the answer to a
+	// claim without offers.
+	MachineSpec *contracts.MachineSpec
 	// RunCode is the run code, qecr_…, that the machine redeems. The caller copies it
 	// for the machine and then calls Clear, which zeros these bytes. Clear does not
 	// reach a copy: a Go string of the run code cannot be overwritten, and its bytes
@@ -49,16 +53,18 @@ type Claimed struct {
 }
 
 // Claim sends POST /v1/pools/claim, claim.schema.json, with waitSeconds, 0 to
-// [MaxWaitSeconds]: Qory Apiary holds the claim up to waitSeconds while no work can be
-// claimed. A signed 204 is no work: ok is false. A signed 200 is a request for one
-// machine, once checked, see [Claimed]; one of another revision than the one sent is
+// [MaxWaitSeconds], and offers, the machines the pool can make, 1 to 64 of them, or
+// none: Qory Apiary keeps the claim open up to waitSeconds while no work can be
+// claimed, and returns for a claim with offers only work that one of the offers fits.
+// A signed 204 is no work: ok is false. A signed 200 is a request for one machine,
+// once checked, see [Claimed]; one of another revision than the one sent is
 // [ErrAnswerUnusable]. A refusal is a [*Refusal]: [ErrForbidden], [ErrNoGateway],
 // [ErrNotFound] or [ErrRateLimited].
 //
 // The answer's bytes are cleared once read, and the run code is unquoted from them
 // straight into its [Hidden]: the schema checks a copy in which a stand-in takes the
 // run code's place, so no string ever contains the run code.
-func (c *Client) Claim(ctx context.Context, waitSeconds int) (claimed Claimed, ok bool, err error) {
+func (c *Client) Claim(ctx context.Context, waitSeconds int, offers []contracts.MachineSpec) (claimed Claimed, ok bool, err error) {
 	const what = "the claim"
 	if waitSeconds < 0 || waitSeconds > MaxWaitSeconds {
 		return Claimed{}, false, fmt.Errorf("%s: set wait_seconds from 0 to %d; %d is outside", what, MaxWaitSeconds, waitSeconds)
@@ -66,7 +72,9 @@ func (c *Client) Claim(ctx context.Context, waitSeconds int) (claimed Claimed, o
 	ans, err := c.do(ctx, request{
 		what: what, kind: kindClaim, path: routeClaim, schema: "claim.schema.json",
 		limit: MaxClaimAnswer, timeout: ClaimTimeout,
-		body: func(t string) any { return contracts.Claim{Version: 1, Time: t, WaitSeconds: waitSeconds} },
+		body: func(t string) any {
+			return contracts.Claim{Version: 1, Time: t, WaitSeconds: waitSeconds, Offers: offers}
+		},
 	})
 	if err != nil {
 		return Claimed{}, false, err
@@ -130,7 +138,7 @@ func readClaim(body []byte) (Claimed, error) {
 	}
 	return Claimed{
 		DispatchID: doc.DispatchID, PoolID: doc.PoolID, LeaseUntil: lease, Machine: doc.Machine,
-		RunCode: Hide(code), GatewayURL: doc.GatewayURL, MaxLifetimeMinutes: doc.MaxLifetimeMinutes,
+		MachineSpec: doc.MachineSpec, RunCode: Hide(code), GatewayURL: doc.GatewayURL, MaxLifetimeMinutes: doc.MaxLifetimeMinutes,
 	}, nil
 }
 

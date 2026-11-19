@@ -50,7 +50,7 @@ func (e *Error) Error() string {
 	var maxAttempts *retry.MaxAttemptsError
 	switch {
 	case e.Code == codeCapacity:
-		return fmt.Sprintf("Wait, or map the size to another instance type in %s: %s failed with %s in the subnet's zone: %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Wait, or set subnet_id in %s to a subnet in another zone: %s failed with %s in the subnet's zone: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Code == codeSubnetFull:
 		return fmt.Sprintf("Wait until machines end, or set subnet_id in %s to a subnet with free addresses: %s failed with %s: %v", settingsFile, e.Op, e.Code, e.Err)
 	case e.Kind == contracts.FailureLimit:
@@ -58,9 +58,9 @@ func (e *Error) Error() string {
 	case e.Code == codeUnauthorized:
 		return fmt.Sprintf("Give the instance role the EC2 rights that the EC2 machine adapter needs: %s failed with %s: %v", e.Op, e.Code, e.Err)
 	case e.Code == codeTokenMismatch:
-		return fmt.Sprintf("Report a provisioner defect, unless %s changed since the first make: %s reused a key with other parameters (%s): %v", settingsFile, e.Op, e.Code, e.Err)
+		return fmt.Sprintf("Report a provisioner defect, unless %s changed since the first make of this dispatch id: %s sent the dispatch id again with new input: %v", settingsFile, e.Op, e.Err)
 	case e.Code == codeTokenTerminated:
-		return fmt.Sprintf("No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: %v", e.Err)
+		return fmt.Sprintf("No action needed: the machine made for this dispatch id is terminated, and EC2 makes no second machine for the dispatch id: %v", e.Err)
 	case e.Kind == contracts.FailureRetry && errors.As(e.Err, &maxAttempts):
 		return fmt.Sprintf("If this repeats, check EC2's service health and the account's request rate in this region: %s failed after the SDK's %d attempts: %v", e.Op, maxAttempts.Attempt, e.Err)
 	case e.Kind == contracts.FailureRetry && errors.Is(e.Err, context.DeadlineExceeded):
@@ -126,6 +126,12 @@ func errorCode(err error) string {
 		return api.ErrorCode()
 	}
 	return ""
+}
+
+// NoCapacity reports whether err is InsufficientInstanceCapacity: EC2 has no capacity
+// for the instance type in the subnet's zone, and another instance type may have it.
+func NoCapacity(err error) bool {
+	return errorCode(err) == codeCapacity
 }
 
 // TokenTerminated reports whether err is IdempotentInstanceTerminated: the machine
