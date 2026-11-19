@@ -63,7 +63,7 @@ func wantFailure(t *testing.T, status int, out, kind, message string) {
 // makeRequest is a make request for a machine spec of vcpus, memory in MiB, disk in
 // GiB, the architecture amd64 and virtualization virt, with the start data data.
 func makeRequest(vcpus, mib, disk int, virt bool, data []byte) string {
-	return fmt.Sprintf(`{"version": 1, "key": "%s", "pool": "%s", "machine_spec": {"vcpus": %d, "memory_mib": %d, "disk_gib": %d, "arch": "amd64", "virtualization": %t}, "start_data": "%s"}`,
+	return fmt.Sprintf(`{"version": 1, "dispatch_id": "%s", "pool": "%s", "machine_spec": {"vcpus": %d, "memory_mib": %d, "disk_gib": %d, "arch": "amd64", "virtualization": %t}, "start_data": "%s"}`,
 		testKey, testPool, vcpus, mib, disk, virt, base64.StdEncoding.EncodeToString(data))
 }
 
@@ -1027,11 +1027,11 @@ func TestList(t *testing.T) {
 	}
 	const started = `"started":"2026-10-22T10:00:00Z"`
 	want := `{"machines":[` +
-		`{"id":"i-0000000000000000a","key":"dp_000000000000000a","state":"starting",` + started + `},` +
-		`{"id":"i-0000000000000000b","key":"dp_000000000000000b","state":"running",` + started + `},` +
-		`{"id":"i-0000000000000000c","key":"dp_000000000000000c","state":"running",` + started + `},` +
-		`{"id":"i-0000000000000000d","key":"dp_000000000000000d","state":"stopped",` + started + `},` +
-		`{"id":"i-0000000000000000e","key":"dp_000000000000000e","state":"deleting",` + started + `}]}` + "\n"
+		`{"id":"i-0000000000000000a","dispatch_id":"dp_000000000000000a","state":"starting",` + started + `},` +
+		`{"id":"i-0000000000000000b","dispatch_id":"dp_000000000000000b","state":"running",` + started + `},` +
+		`{"id":"i-0000000000000000c","dispatch_id":"dp_000000000000000c","state":"running",` + started + `},` +
+		`{"id":"i-0000000000000000d","dispatch_id":"dp_000000000000000d","state":"stopped",` + started + `},` +
+		`{"id":"i-0000000000000000e","dispatch_id":"dp_000000000000000e","state":"deleting",` + started + `}]}` + "\n"
 	if out != want {
 		t.Errorf("output\n%s\nwant\n%s", out, want)
 	}
@@ -1076,7 +1076,7 @@ func TestListNoLaunchTime(t *testing.T) {
 	}}
 	h, log, _ := testHandler(f)
 	status, out := serve(t, h, "list", "/nonexistent/aws-ec2.json", `{"version": 1, "pool": "`+testPool+`"}`)
-	want := `{"machines":[{"id":"i-0000000000000002b","key":"dp_000000000000002b","state":"running","started":"2026-10-22T10:00:00Z"}]}` + "\n"
+	want := `{"machines":[{"id":"i-0000000000000002b","dispatch_id":"dp_000000000000002b","state":"running","started":"2026-10-22T10:00:00Z"}]}` + "\n"
 	if status != adapterio.ExitOK || out != want {
 		t.Errorf("exit status %d, output\n%s\nwant\n%s", status, out, want)
 	}

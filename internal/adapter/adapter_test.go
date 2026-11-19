@@ -235,7 +235,7 @@ func TestCommands(t *testing.T) {
 
 	list, err := f.r.List(ctx, testPool)
 	check("list", err)
-	if len(list.Machines) != 1 || list.Machines[0].Key != testKey || list.Machines[0].State != contracts.MachineRunning {
+	if len(list.Machines) != 1 || list.Machines[0].DispatchID != testKey || list.Machines[0].State != contracts.MachineRunning {
 		t.Errorf("list: %+v", list)
 	}
 
@@ -444,7 +444,7 @@ func TestInvalidRequest(t *testing.T) {
 	if err == nil || errors.As(err, &e) || leaks(err.Error()) {
 		t.Fatalf("the error is %v", err)
 	}
-	if err.Error() != "Report this defect in the provisioner: its make request to the machine adapter is not valid: the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$" {
+	if err.Error() != "Report this defect in the provisioner: its make request to the machine adapter is not valid: the member dispatch_id must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$" {
 		t.Errorf("the error text is %q", err.Error())
 	}
 	if _, err := os.Stat(f.cfg.Report); err == nil {

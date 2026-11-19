@@ -249,11 +249,11 @@ func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, 
 		return contracts.MachinesMakeAnswer{}, &adapterio.Failure{Kind: contracts.FailureDefect, Message: "Add a machine that fits the machine spec to the adapter's settings: none fits"}
 	}
 	m := h.machines()
-	if id, ok := m[req.Key]; ok {
+	if id, ok := m[req.DispatchID]; ok {
 		return contracts.MachinesMakeAnswer{ID: id, MachineType: "example-type"}, nil
 	}
 	id := fmt.Sprintf("i-%017x", len(m)+1)
-	m[req.Key] = id
+	m[req.DispatchID] = id
 	b, _ := json.Marshal(m)
 	if err := os.WriteFile(h.cfg.Report+".machines", b, 0o600); err != nil {
 		return contracts.MachinesMakeAnswer{}, err
@@ -262,7 +262,7 @@ func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, 
 }
 
 func (h *handler) List(_ context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
-	m := contracts.Machine{ID: "i-0123456789abcdef0", Key: testKey, State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
+	m := contracts.Machine{ID: "i-0123456789abcdef0", DispatchID: testKey, State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
 	return contracts.MachinesListAnswer{Machines: []contracts.Machine{m}}, h.err(nil)
 }
 

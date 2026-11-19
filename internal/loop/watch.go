@@ -108,19 +108,19 @@ func (l *loop) watchOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if known[m.Key] || l.isPending(m.Key) || l.goneIsRecent(m.Key) || m.State == contracts.MachineDeleting && !journal.IsDispatchID(m.Key) {
+		if known[m.DispatchID] || l.isPending(m.DispatchID) || l.goneIsRecent(m.DispatchID) || m.State == contracts.MachineDeleting && !journal.IsDispatchID(m.DispatchID) {
 			continue
 		}
-		strays[m.Key] = true
-		if !l.strays[m.Key] {
-			l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID), slog.String("state", m.State))
+		strays[m.DispatchID] = true
+		if !l.strays[m.DispatchID] {
+			l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.DispatchID), slog.String("machine_id", m.ID), slog.String("state", m.State))
 		}
 		// Each later machine with this key waits for a later watch. While the key has
 		// a journal entry, the watch acts only on the entry's machine. Once the entry
 		// leaves, or when no entry was written, the next watch acts on the machines of
 		// the key again, in the order of keyOrder.
 		if l.takeBack(ctx, m) || l.cleanUpStray(ctx, m) {
-			known[m.Key] = true
+			known[m.DispatchID] = true
 		}
 	}
 }
@@ -132,8 +132,8 @@ func (l *loop) watchOnce(ctx context.Context) {
 func keyOrder(list []contracts.Machine) []contracts.Machine {
 	first := map[string]int{}
 	for i, m := range list {
-		if _, ok := first[m.Key]; !ok {
-			first[m.Key] = i
+		if _, ok := first[m.DispatchID]; !ok {
+			first[m.DispatchID] = i
 		}
 	}
 	deleting := func(m contracts.Machine) int {
@@ -144,7 +144,7 @@ func keyOrder(list []contracts.Machine) []contracts.Machine {
 	}
 	out := slices.Clone(list)
 	slices.SortStableFunc(out, func(a, b contracts.Machine) int {
-		if c := cmp.Compare(first[a.Key], first[b.Key]); c != 0 {
+		if c := cmp.Compare(first[a.DispatchID], first[b.DispatchID]); c != 0 {
 			return c
 		}
 		return cmp.Compare(deleting(a), deleting(b))
@@ -231,8 +231,8 @@ func (l *loop) inJournal(e journal.Entry) bool {
 func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
 	byKey := make(map[string]contracts.Machine, len(list))
 	for _, m := range list {
-		if old, ok := byKey[m.Key]; !ok || old.State == contracts.MachineDeleting {
-			byKey[m.Key] = m
+		if old, ok := byKey[m.DispatchID]; !ok || old.State == contracts.MachineDeleting {
+			byKey[m.DispatchID] = m
 		}
 	}
 	return byKey
@@ -360,11 +360,11 @@ func (l *loop) cleanUpLogged(ctx context.Context, e journal.Entry) {
 // After a failed write of the journal, the machine stays, and the next watch sends
 // dispatched again.
 func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
-	if !journal.IsDispatchID(m.Key) || m.State == contracts.MachineDeleting || m.State == contracts.MachineStopped {
+	if !journal.IsDispatchID(m.DispatchID) || m.State == contracts.MachineDeleting || m.State == contracts.MachineStopped {
 		return false
 	}
-	attrs := []any{slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID)}
-	err := l.Apiary.Dispatched(ctx, m.Key, m.ID, "")
+	attrs := []any{slog.String("dispatch_id", m.DispatchID), slog.String("machine_id", m.ID)}
+	err := l.Apiary.Dispatched(ctx, m.DispatchID, m.ID, "")
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrGone), errors.Is(err, ErrLeaseExpired), errors.Is(err, ErrForbidden):
@@ -377,12 +377,12 @@ func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
 		l.Log.Warn("sending dispatched failed, and the machine stays until the next watch", append(attrs, errorAttr(err, nil))...)
 		return true
 	}
-	e := journal.Entry{DispatchID: m.Key, Phase: journal.PhaseDispatched, MachineID: m.ID, MaxLifetimeMinutes: journal.MaxLifetime}
+	e := journal.Entry{DispatchID: m.DispatchID, Phase: journal.PhaseDispatched, MachineID: m.ID, MaxLifetimeMinutes: journal.MaxLifetime}
 	if err := l.Journal.Set(e); err != nil {
 		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
 		return true
 	}
-	l.setTime(l.made, m.Key)
+	l.setTime(l.made, m.DispatchID)
 	l.Log.Info("took back the machine for its dispatch", attrs...)
 	return true
 }
@@ -397,13 +397,13 @@ func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
 // describes. Any other key has no dispatch, so it gets one delete and no machine-end,
 // and the next watch finds the machine again if it is still listed and not deleting.
 func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
-	attrs := []any{slog.String("dispatch_id", m.Key), slog.String("machine_id", m.ID)}
+	attrs := []any{slog.String("dispatch_id", m.DispatchID), slog.String("machine_id", m.ID)}
 	if m.State == contracts.MachineDeleting {
 		l.setLogged(m.ID, true)
 	}
-	dispatch := journal.IsDispatchID(m.Key)
+	dispatch := journal.IsDispatchID(m.DispatchID)
 	if dispatch {
-		e := journal.Entry{DispatchID: m.Key, Phase: journal.PhaseDeleting, MachineID: m.ID, MaxLifetimeMinutes: journal.MinLifetime}
+		e := journal.Entry{DispatchID: m.DispatchID, Phase: journal.PhaseDeleting, MachineID: m.ID, MaxLifetimeMinutes: journal.MinLifetime}
 		err := l.Journal.Set(e)
 		if err == nil {
 			l.cleanUp(ctx, e)
@@ -411,7 +411,7 @@ func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 		}
 		l.Log.Error("writing the journal failed", append(attrs, errorAttr(err, nil))...)
 	}
-	state, err := l.deleteMachine(ctx, m.Key, m.ID, attrs)
+	state, err := l.deleteMachine(ctx, m.DispatchID, m.ID, attrs)
 	if err == nil {
 		// The machine has no entry that would end its record. While its delete
 		// fails, the record stays, so a later watch reads its log no more.
@@ -428,16 +428,16 @@ func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 		end = contracts.MachineEndGone
 	}
 	sent := !l.endsArePaused()
-	done := l.sendMachineEnd(ctx, m.Key, end, attrs)
+	done := l.sendMachineEnd(ctx, m.DispatchID, end, attrs)
 	// The key has no entry, so the post leaves no record.
-	l.forgetEnds(m.Key)
+	l.forgetEnds(m.DispatchID)
 	switch {
 	case end != contracts.MachineEndGone:
-		l.setPending(m.Key, m.ID)
+		l.setPending(m.DispatchID, m.ID)
 	case !done:
-		l.setPending(m.Key, "")
+		l.setPending(m.DispatchID, "")
 		if sent {
-			l.goneFailed(m.Key)
+			l.goneFailed(m.DispatchID)
 		}
 	}
 	return false

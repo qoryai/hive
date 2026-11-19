@@ -349,13 +349,13 @@ func (m *fakeMachines) Make(_ context.Context, key, pool string, spec contracts.
 	}
 	// One key makes at most one machine.
 	for _, x := range m.machines {
-		if x.Key == key {
+		if x.DispatchID == key {
 			return contracts.MachinesMakeAnswer{ID: x.ID, MachineType: madeType}, nil
 		}
 	}
 	m.made++
 	id := machineID(m.made)
-	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
+	m.machines = append(m.machines, contracts.Machine{ID: id, DispatchID: key, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
 	if m.otherType != nil {
 		return contracts.MachinesMakeAnswer{ID: id, MachineType: *m.otherType}, nil
 	}
@@ -408,7 +408,7 @@ func (m *fakeMachines) Delete(_ context.Context, id string) (contracts.MachinesD
 func (m *fakeMachines) add(id, key, state string, started time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: state, Started: contracts.FormatTime(started)})
+	m.machines = append(m.machines, contracts.Machine{ID: id, DispatchID: key, State: state, Started: contracts.FormatTime(started)})
 }
 
 // drop takes the machine id out of the adapter's list.

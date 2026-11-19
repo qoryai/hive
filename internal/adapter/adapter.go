@@ -114,11 +114,11 @@ func (r *Runner) Check(ctx context.Context) ([]contracts.MachineSpec, error) {
 	return a.Offers, err
 }
 
-// Make runs make: the adapter makes one machine that fits spec in pool for key, the
-// dispatch id, and delivers startData to it. startData contains the machine's run
-// code, and it travels only on the adapter's standard input.
-func (r *Runner) Make(ctx context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
-	req := contracts.MachinesMake{Version: adapterio.Version, Key: key, Pool: pool, MachineSpec: spec, StartData: base64.StdEncoding.EncodeToString(startData)}
+// Make runs make: the adapter makes one machine that fits spec in pool for dispatchID, and
+// delivers startData to it. startData contains the machine's run code, and it travels
+// only on the adapter's standard input.
+func (r *Runner) Make(ctx context.Context, dispatchID, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
+	req := contracts.MachinesMake{Version: adapterio.Version, DispatchID: dispatchID, Pool: pool, MachineSpec: spec, StartData: base64.StdEncoding.EncodeToString(startData)}
 	return run(ctx, r, "make", req, startData, adapterio.DecodeMakeAnswer)
 }
 

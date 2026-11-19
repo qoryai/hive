@@ -188,9 +188,9 @@ type Machines interface {
 	// Check shows that the adapter's rights and settings work, and returns the
 	// machines the adapter can make, its offers.
 	Check(ctx context.Context) ([]contracts.MachineSpec, error)
-	// Make makes one machine that fits spec in pool for key and delivers startData to
-	// it.
-	Make(ctx context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error)
+	// Make makes one machine that fits spec in pool for dispatchID and delivers
+	// startData to it.
+	Make(ctx context.Context, dispatchID, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error)
 	// List lists the machines of pool.
 	List(ctx context.Context, pool string) (contracts.MachinesListAnswer, error)
 	// Log reads the console text of the machine id.

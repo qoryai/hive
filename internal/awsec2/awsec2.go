@@ -312,7 +312,7 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	}
 	order(fits, prices)
 	fits = fits[:min(len(fits), maxTries)]
-	found, ok, err := c.FindByKey(ctx, req.Pool, req.Key)
+	found, ok, err := c.FindByKey(ctx, req.Pool, req.DispatchID)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
@@ -322,11 +322,11 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	root := max(want.DiskGiB, img.RootSizeGiB)
 	var last error
 	for i, t := range fits {
-		sp := spec(s, t.Name, img, root, req.Pool, req.Key, startData)
+		sp := spec(s, t.Name, img, root, req.Pool, req.DispatchID, startData)
 		sp.NestedVirtualization = want.Virtualization && t.NestedCPUOptions()
 		m, err := c.Create(ctx, sp)
 		if machine.TokenTerminated(err) {
-			found, ok, findErr := c.FindByToken(ctx, machine.ClientToken(req.Key, t.Name))
+			found, ok, findErr := c.FindByToken(ctx, machine.ClientToken(req.DispatchID, t.Name))
 			if findErr != nil {
 				return contracts.MachinesMakeAnswer{}, failure(findErr)
 			}
@@ -403,7 +403,7 @@ func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList
 			h.log.Warn("Check the instance in EC2: list leaves out an instance that DescribeInstances returned with no launch time", "instance", m.ID)
 			continue
 		}
-		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, Key: m.Key, State: state, Started: contracts.FormatTime(m.LaunchTime)})
+		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, DispatchID: m.Key, State: state, Started: contracts.FormatTime(m.LaunchTime)})
 	}
 	return a, nil
 }

@@ -52,7 +52,7 @@ func b64(n int) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([
 
 func fixtures() []fixture {
 	makeReq := func(key, pool, spec, data string) string {
-		return `{"version": 1, "key": ` + key + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
+		return `{"version": 1, "dispatch_id": ` + key + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
 	}
 	// spec is a machine_spec with the vCPUs, memory, disk, architecture and
 	// virtualization written as JSON.
@@ -63,7 +63,7 @@ func fixtures() []fixture {
 	offers := func(n int) string { return `{"offers": [` + strings.TrimSuffix(strings.Repeat(s+",", n), ",") + `]}` }
 	good := `"` + b64(10) + `"`
 	machine := func(id, key, state, started string) string {
-		return `{"machines": [{"id": ` + id + `, "key": ` + key + `, "state": ` + state + `, "started": ` + started + `}]}`
+		return `{"machines": [{"id": ` + id + `, "dispatch_id": ` + key + `, "state": ` + state + `, "started": ` + started + `}]}`
 	}
 	t0 := `"2026-10-22T10:00:00Z"`
 	// both is a fixture that the schema and the decoder accept or refuse alike.
@@ -117,7 +117,7 @@ func fixtures() []fixture {
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `{"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64"}`, good), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, strings.Replace(s, "}", `, "gpus": 1}`, 1), good), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"standard"`, good), false),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "eA=="}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "eA=="}`, false),
 		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `""`), true, false},
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(1)+`"`), true),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(2)+`"`), true),
@@ -133,9 +133,9 @@ func fixtures() []fixture {
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHg\n="`), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eH-="`), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHh4"`), true),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`}`, false),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, false),
-		both("make", `{"version": 2, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`, "start_data": "eA=="}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, false),
+		both("make", `{"version": 2, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`, "start_data": "eA=="}`, false),
 
 		both("make-answer", `{"id": "i-0123456789abcdef0"}`, true),
 		both("make-answer", `{"id": "-"}`, false),
@@ -175,8 +175,8 @@ func fixtures() []fixture {
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `"2016-12-31T23:59:60Z"`), false),
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `"2026-10-22T10:00:00"`), false),
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `1761127200`), false),
-		both("list-answer", `{"machines": [{"id": "i-1", "key": "dp_0123456789abcdef", "state": "running"}]}`, false),
-		both("list-answer", `{"machines": [{"id": "i-1", "key": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "size": "s"}]}`, false),
+		both("list-answer", `{"machines": [{"id": "i-1", "dispatch_id": "dp_0123456789abcdef", "state": "running"}]}`, false),
+		both("list-answer", `{"machines": [{"id": "i-1", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "size": "s"}]}`, false),
 		both("list-answer", `{"machines": [7]}`, false),
 		both("list-answer", `{"machines": null}`, false),
 		both("list-answer", `{"machines": {}}`, false),
@@ -332,9 +332,9 @@ func TestDecoderRefusesLogBytes(t *testing.T) {
 func TestDecodeErrorsHaveNoValue(t *testing.T) {
 	const marker = "qecr_MARKER7f3a"
 	cases := map[string]string{
-		"make":         `{"version": 1, "key": "` + marker + `", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`,
+		"make":         `{"version": 1, "dispatch_id": "` + marker + `", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`,
 		"make-answer":  `{"id": "` + marker + ` "}`,
-		"list-answer":  `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "` + marker + `", "started": "2026-10-22T10:00:00Z"}]}`,
+		"list-answer":  `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "` + marker + `", "started": "2026-10-22T10:00:00Z"}]}`,
 		"error":        `{"error": {"kind": "` + marker + `", "message": "m"}}`,
 		"check-answer": `{"` + marker + `": 1}`,
 		"log-answer":   `{"log": 1, "` + marker + `": 2}`,
@@ -353,14 +353,14 @@ func TestDecodeErrors(t *testing.T) {
 		{"check", `{"version": 2}`, "the member version must be 1"},
 		{"check", `{"version": 1, "x": 1}`, "the document has a member that version 1 does not define"},
 		{"check", `[]`, "the document must be one JSON object in UTF-8, with no member name twice"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
-		{"make", `{"version": 1, "key": "d", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`, "the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
+		{"make", `{"version": 1, "dispatch_id": "d", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`, "the member dispatch_id must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
 		{"make-answer", `{"id": 7}`, "the member id must be a string"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}]}`, "machines[0]: the document has a member that version 1 does not define"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}]}`, "machines[0]: the document has a member that version 1 does not define"},
 		{"error", `{"error": {"kind": "other", "message": ""}}`, "the member error.message must not be empty"},
 		{"error", `{"error": {"kind": "fatal", "message": "m"}}`, "the member error.kind must be limit, retry, defect or other"},
 	} {

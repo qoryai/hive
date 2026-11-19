@@ -104,7 +104,7 @@ func TestMessagesFit(t *testing.T) {
 	}
 	wantFits(t, err.Error())
 	spec := contracts.MachineSpec{VCPUs: 1024, MemoryMiB: 8388608, DiskGiB: 16384, Arch: "arm64", Virtualization: true}
-	_, err = region(longZone(world())).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
+	_, err = region(longZone(world())).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, DispatchID: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "ap-southeast-4-wl1-mel-wlz-1") {
 		t.Fatalf("make with a spec that nothing fits: error %v", err)
 	}
@@ -112,7 +112,7 @@ func TestMessagesFit(t *testing.T) {
 
 	// The defect of a disk above the largest gp3 volume, with the largest value.
 	spec.DiskGiB = 65536
-	_, err = region(world()).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, Key: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
+	_, err = region(world()).Make(context.Background(), writeSettings(t, validSettings), contracts.MachinesMake{Version: 1, DispatchID: testKey, Pool: testPool, MachineSpec: spec}, []byte("x"))
 	if err == nil || !strings.HasPrefix(err.Error(), "Report this defect") {
 		t.Fatalf("make with a disk larger than a gp3 volume: error %v", err)
 	}

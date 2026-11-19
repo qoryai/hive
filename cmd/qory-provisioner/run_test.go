@@ -220,7 +220,7 @@ func TestServeRuns(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(work.RunCode))
 	want := made{
-		Key: d.ID, Pool: provisionertest.PoolID, MachineSpec: spec, RunCodeSHA256: hex.EncodeToString(sum[:]),
+		DispatchID: d.ID, Pool: provisionertest.PoolID, MachineSpec: spec, RunCodeSHA256: hex.EncodeToString(sum[:]),
 		GatewayURL: "https://gateway.example.com:8443", GatewayAddress: "10.0.1.5", MaxLifetimeMinutes: 60,
 	}
 	if m != want {
