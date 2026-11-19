@@ -149,23 +149,23 @@ func TestZoneTypes(t *testing.T) {
 	}
 }
 
-// TestFindByKey pins the tag filters, the not-found case, the choice of a machine that
+// TestFindByDispatchID pins the tag filters, the not-found case, the choice of a machine that
 // is not terminated, and the instance type of the machine found.
-func TestFindByKey(t *testing.T) {
+func TestFindByDispatchID(t *testing.T) {
 	var reply []types.Instance
 	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: reply}}}, nil
 	}}
 	c := New(f)
 	const key, pool = "dp_0123456789abcdef", "np_0123456789abcdef"
-	if _, found, err := c.FindByKey(context.Background(), pool, key); err != nil || found {
+	if _, found, err := c.FindByDispatchID(context.Background(), pool, key); err != nil || found {
 		t.Fatalf("no machine: found %v, error %v", found, err)
 	}
 	wantIn := &ec2.DescribeInstancesInput{
 		Filters: []types.Filter{
 			{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},
 			{Name: aws.String("tag:qory:pool"), Values: []string{pool}},
-			{Name: aws.String("tag:qory:key"), Values: []string{key}},
+			{Name: aws.String("tag:qory:dispatch_id"), Values: []string{key}},
 		},
 		MaxResults: aws.Int32(1000),
 	}
@@ -176,7 +176,7 @@ func TestFindByKey(t *testing.T) {
 	running := instance("i-0bbbbbbbbbbbbbbb0", StateRunning, key)
 	running.InstanceType = "m7i.large"
 	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, key), running}
-	m, found, err := c.FindByKey(context.Background(), pool, key)
+	m, found, err := c.FindByDispatchID(context.Background(), pool, key)
 	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.InstanceType != "m7i.large" {
 		t.Errorf("machine %+v, found %v, error %v", m, found, err)
 	}
@@ -184,7 +184,7 @@ func TestFindByKey(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
-	if _, _, err := c.FindByKey(context.Background(), pool, key); kindOf(err) != contracts.FailureRetry {
+	if _, _, err := c.FindByDispatchID(context.Background(), pool, key); kindOf(err) != contracts.FailureRetry {
 		t.Errorf("error %v, want kind retry", err)
 	}
 }

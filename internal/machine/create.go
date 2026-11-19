@@ -23,10 +23,11 @@ const maxClientToken = 64
 
 // Spec is the input for one machine.
 type Spec struct {
-	// Key is the key of the make request, the value of the qory:key tag. Create sends
-	// [ClientToken] of Key and InstanceType as RunInstances' client token, so a
-	// repeated call for one key and one instance type makes no second machine.
-	Key string
+	// DispatchID is the dispatch id of the make request, the value of the
+	// qory:dispatch_id tag. Create sends [ClientToken] of DispatchID and InstanceType as
+	// RunInstances' client token, so a repeated call for one dispatch id and one
+	// instance type makes no second machine.
+	DispatchID string
 	// PoolID is the value of the qory:pool tag.
 	PoolID string
 	// InstanceType is the EC2 instance type, such as m7g.large.
@@ -49,22 +50,22 @@ type Spec struct {
 	// with base64.
 	UserData []byte
 	// Tags maps more tag keys to their values. The machine and its volume get them
-	// after qory:managed, qory:pool and qory:key, sorted by key, so a repeated Create
-	// sends the same input. EC2 accepts at most 50 tags
-	// on a resource.
+	// after qory:managed, qory:pool and qory:dispatch_id, sorted by key, so a repeated
+	// Create sends the same input. EC2 accepts at most 50 tags on a resource.
 	Tags map[string]string
 }
 
-// ClientToken is the client token of RunInstances for the key and the instance type:
-// key, a dot and the instance type. The make of one key sends one token per instance
-// type that it tries, so a try of the next type after a failed one is a new request.
-func ClientToken(key, instanceType string) string {
-	return key + "." + instanceType
+// ClientToken is the client token of RunInstances for the dispatch id and the instance
+// type: dispatch id, a dot and the instance type. The make of one dispatch id sends one
+// token per instance type that it tries, so a try of the next type after a failed one
+// is a new request.
+func ClientToken(dispatchID, instanceType string) string {
+	return dispatchID + "." + instanceType
 }
 
 // Create makes one machine for spec and returns it as RunInstances returned it,
 // usually in state pending. A repeated Create with the same spec returns the same
-// machine, because the client token is [ClientToken] of the key and the instance type.
+// machine, because the client token is [ClientToken] of the dispatch id and the instance type.
 // Errors from the call are *Error.
 func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 	in, err := runInput(spec, true)
@@ -76,7 +77,7 @@ func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 		return Machine{}, wrap("RunInstances", err)
 	}
 	if len(out.Instances) != 1 {
-		return Machine{}, other(fmt.Sprintf("If this repeats, check EC2's service health in this region: RunInstances for key %s returned %d instances, not 1", spec.Key, len(out.Instances)))
+		return Machine{}, other(fmt.Sprintf("If this repeats, check EC2's service health in this region: RunInstances for dispatch id %s returned %d instances, not 1", spec.DispatchID, len(out.Instances)))
 	}
 	return fromInstance(out.Instances[0]), nil
 }
@@ -84,7 +85,7 @@ func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 // CheckRights sends RunInstances with DryRun set and the input Create sends for spec,
 // so EC2 checks the instance role's rights and makes no machine. It returns nil when
 // EC2 returns DryRunOperation, which means the rights are there. The dry run sends
-// spec.Key only as the qory:key tag; the SDK sets a random client token.
+// spec.DispatchID only as the qory:dispatch_id tag; the SDK sets a random client token.
 func (c *Client) CheckRights(ctx context.Context, spec Spec) error {
 	in, err := runInput(spec, false)
 	if err != nil {
@@ -102,8 +103,8 @@ func (c *Client) CheckRights(ctx context.Context, spec Spec) error {
 	return wrap("RunInstances dry run", err)
 }
 
-// runInput builds the RunInstances input for spec. withToken requires the key and
-// sends [ClientToken] of the key and the instance type as the client token.
+// runInput builds the RunInstances input for spec. withToken requires the dispatch id and
+// sends [ClientToken] of the dispatch id and the instance type as the client token.
 func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 	if err := validate(spec, withToken); err != nil {
 		return nil, err
@@ -111,7 +112,7 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 	tags := []types.Tag{
 		{Key: aws.String(TagManaged), Value: aws.String("true")},
 		{Key: aws.String(TagPool), Value: aws.String(spec.PoolID)},
-		{Key: aws.String(TagKey), Value: aws.String(spec.Key)},
+		{Key: aws.String(TagDispatchID), Value: aws.String(spec.DispatchID)},
 	}
 	for _, k := range slices.Sorted(maps.Keys(spec.Tags)) {
 		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(spec.Tags[k])})
@@ -154,7 +155,7 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 		},
 	}
 	if withToken {
-		in.ClientToken = aws.String(ClientToken(spec.Key, spec.InstanceType))
+		in.ClientToken = aws.String(ClientToken(spec.DispatchID, spec.InstanceType))
 	}
 	if spec.NestedVirtualization {
 		in.CpuOptions = &types.CpuOptionsRequest{NestedVirtualization: types.NestedVirtualizationSpecificationEnabled}
@@ -169,12 +170,12 @@ func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 // validate checks spec before any call.
 func validate(spec Spec, withToken bool) error {
 	if withToken {
-		if err := validToken(ClientToken(spec.Key, spec.InstanceType)); err != nil {
+		if err := validToken(ClientToken(spec.DispatchID, spec.InstanceType)); err != nil {
 			return err
 		}
 	}
 	for _, f := range []struct{ name, value string }{
-		{"key", spec.Key},
+		{"dispatch id", spec.DispatchID},
 		{"pool id", spec.PoolID},
 		{"instance type", spec.InstanceType},
 		{"image id", spec.ImageID},
@@ -198,11 +199,11 @@ func validate(spec Spec, withToken bool) error {
 // validToken checks that token is a client token EC2 accepts.
 func validToken(token string) error {
 	if token == "" || len(token) > maxClientToken {
-		return defect(fmt.Sprintf("Report this defect in the provisioner: the client token of the key has %d bytes, and a client token has 1 to %d characters", len(token), maxClientToken))
+		return defect(fmt.Sprintf("Report this defect in the provisioner: the client token of the dispatch id has %d bytes, and a client token has 1 to %d characters", len(token), maxClientToken))
 	}
 	for i := 0; i < len(token); i++ {
 		if token[i] < 0x21 || token[i] > 0x7e {
-			return defect(fmt.Sprintf("Report this defect in the provisioner: byte %d of the client token of the key is 0x%02x, and a client token has only ASCII letters, digits and punctuation", i, token[i]))
+			return defect(fmt.Sprintf("Report this defect in the provisioner: byte %d of the client token of the dispatch id is 0x%02x, and a client token has only ASCII letters, digits and punctuation", i, token[i]))
 		}
 	}
 	return nil

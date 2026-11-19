@@ -133,7 +133,7 @@ func TestParseSettingsErrors(t *testing.T) {
 	tagsRule := "Set tags in " + file + " to an object of at most 20 members, each a tag key of 1 to 128 characters set to a string of 0 to 256 characters."
 	tagText := "Write the keys and values of tags in " + file + " with only letters, digits, spaces and _ . : / = + - @."
 	tagAWS := "Remove every key that starts with aws: from tags in " + file + ": AWS reserves that prefix."
-	tagAdapter := "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + file + ": the adapter sets these tags on every machine."
+	tagAdapter := "Remove qory:managed, qory:pool and qory:dispatch_id, in any case, from tags in " + file + ": the adapter sets these tags on every machine."
 	var manyTags []string
 	for i := range 21 {
 		manyTags = append(manyTags, fmt.Sprintf(`"tag-%d": "x"`, i))
@@ -185,10 +185,10 @@ func TestParseSettingsErrors(t *testing.T) {
 		{withTags(`{"aWs:": "` + marker + `"}`), tagAWS},
 		{withTags(`{"qory:managed": "` + marker + `"}`), tagAdapter},
 		{withTags(`{"QORY:POOL": "` + marker + `"}`), tagAdapter},
-		{withTags(`{"qory:Key": "` + marker + `"}`), tagAdapter},
+		{withTags(`{"qory:Dispatch_ID": "` + marker + `"}`), tagAdapter},
 		// Of several faults, the error is the one of the first check, on every read.
-		{withTags(`{"aws:a": "x", "qory:key": "y", "b": "z!"}`), tagText},
-		{withTags(`{"qory:key": "y", "aws:a": "x"}`), tagAWS},
+		{withTags(`{"aws:a": "x", "qory:dispatch_id": "y", "b": "z!"}`), tagText},
+		{withTags(`{"qory:dispatch_id": "y", "aws:a": "x"}`), tagAWS},
 	}
 	for _, tc := range cases {
 		_, err := ParseSettings([]byte(tc.doc))

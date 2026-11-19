@@ -467,7 +467,7 @@ func TestCancelledBeforeStart(t *testing.T) {
 }
 
 // TestFakeRules checks the rules of the protocol that the fake adapter follows: one
-// machine per key, gone for an unknown id, and defect for a spec that nothing fits.
+// machine per dispatch id, gone for an unknown id, and defect for a spec that nothing fits.
 func TestFakeRules(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, config{Mode: "serve"})
@@ -477,11 +477,11 @@ func TestFakeRules(t *testing.T) {
 	}
 	again, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
 	if err != nil || again != first {
-		t.Errorf("a second make with the same key returned %+v, %v; want %+v", again, err, first)
+		t.Errorf("a second make with the same dispatch id returned %+v, %v; want %+v", again, err, first)
 	}
 	other, err := f.r.Make(ctx, "dp_0123456789abcdeg", testPool, testSpec, startData)
 	if err != nil || other == first {
-		t.Errorf("a make with another key returned %+v, %v", other, err)
+		t.Errorf("a make with another dispatch id returned %+v, %v", other, err)
 	}
 	del, err := f.r.Delete(ctx, "i-ffffffffffffffff0")
 	if err != nil || del.State != contracts.MachineGone {

@@ -26,11 +26,11 @@ import (
 	"github.com/qoryai/integrations/contracts"
 )
 
-// The placeholder tags of check's dry run, in the shapes of a pool id and a key. The
-// dry run makes no machine, so no instance gets these values.
+// The placeholder tags of check's dry run, in the shapes of a pool id and a dispatch
+// id. The dry run makes no machine, so no instance gets these values.
 const (
-	checkPool = "np_0000000000000000"
-	checkKey  = "dp_0000000000000000"
+	checkPool       = "np_0000000000000000"
+	checkDispatchID = "dp_0000000000000000"
 )
 
 // The states of an EC2 instance that list asks EC2 for. A terminated instance is left
@@ -118,14 +118,14 @@ func (h *Handler) Check(ctx context.Context, path string, _ contracts.MachinesCh
 // for the first such type. ts is in the order of [order] and is not empty. It returns
 // the error of the first dry run that failed, or nil.
 func checkRights(ctx context.Context, c *machine.Client, s Settings, ts []machine.InstanceType, img machine.Image) error {
-	if err := c.CheckRights(ctx, spec(s, ts[0].Name, img, img.RootSizeGiB, checkPool, checkKey, nil)); err != nil {
+	if err := c.CheckRights(ctx, spec(s, ts[0].Name, img, img.RootSizeGiB, checkPool, checkDispatchID, nil)); err != nil {
 		return err
 	}
 	i := slices.IndexFunc(ts, machine.InstanceType.NestedCPUOptions)
 	if i < 0 {
 		return nil
 	}
-	sp := spec(s, ts[i].Name, img, img.RootSizeGiB, checkPool, checkKey, nil)
+	sp := spec(s, ts[i].Name, img, img.RootSizeGiB, checkPool, checkDispatchID, nil)
 	sp.NestedVirtualization = true
 	return c.CheckRights(ctx, sp)
 }
@@ -260,7 +260,7 @@ const maxTries = 8
 // lowest on-demand price, then the name. It considers the types that the subnet's
 // zone offers on demand and that run the image's architecture, which it reads through
 // the cache of [Handler.catalog]. It passes the start data as the user data, sends
-// [machine.ClientToken] of the key and the type as the client token, and sizes the
+// [machine.ClientToken] of the dispatch id and the type as the client token, and sizes the
 // root volume to the larger of the spec's disk and the image's root volume. When the
 // spec sets virtualization and the type has nested virtualization and is not bare
 // metal, it turns that on. When EC2 has no capacity for the type, make tries the next
@@ -271,11 +271,11 @@ const maxTries = 8
 // an offer of check has at most that disk, so such a spec is a defect of the
 // provisioner.
 //
-// Before the first try, make looks up a machine of the pool with the key in its qory:key
-// tag. When there is one, in any state, make returns its id and makes no machine, so a
-// second make with the same key returns the first machine also when that machine is of
-// another type than the first that fits, once DescribeInstances lists the first machine:
-// EC2 lists a new machine after a short delay. A try whose client token EC2 reports as
+// Before the first try, make looks up a machine of the pool with the dispatch id in its
+// qory:dispatch_id tag. When there is one, in any state, make returns its id and makes
+// no machine, so a second make with the same dispatch id returns the first machine also
+// when that machine is of another type than the first that fits, once DescribeInstances
+// lists the first machine: EC2 lists a new machine after a short delay. A try whose client token EC2 reports as
 // terminated returns the id of the machine with that token.
 func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	s, err := ReadSettings(path)
@@ -312,7 +312,7 @@ func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesM
 	}
 	order(fits, prices)
 	fits = fits[:min(len(fits), maxTries)]
-	found, ok, err := c.FindByKey(ctx, req.Pool, req.DispatchID)
+	found, ok, err := c.FindByDispatchID(ctx, req.Pool, req.DispatchID)
 	if err != nil {
 		return contracts.MachinesMakeAnswer{}, failure(err)
 	}
@@ -360,10 +360,10 @@ func answer(m machine.Machine, instanceType string) contracts.MachinesMakeAnswer
 }
 
 // spec is the machine spec of the settings s, with their tags, and the instance type,
-// the image's root device, the root volume size, the pool, the key and the user data.
-func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool, key string, userData []byte) machine.Spec {
+// the image's root device, the root volume size, the pool, the dispatch id and the user data.
+func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool, dispatchID string, userData []byte) machine.Spec {
 	return machine.Spec{
-		Key:             key,
+		DispatchID:      dispatchID,
 		PoolID:          pool,
 		InstanceType:    instanceType,
 		ImageID:         s.ImageID,
@@ -376,10 +376,10 @@ func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool,
 	}
 }
 
-// List lists the pool's instances that are not terminated, with the key from the
-// qory:key tag and the start time from LaunchTime, in UTC and whole seconds. An
-// instance whose qory:key tag is not a key, and an instance that EC2 returns with no
-// LaunchTime, are left out, each with a log line.
+// List lists the pool's instances that are not terminated, with the dispatch id from the
+// qory:dispatch_id tag and the start time from LaunchTime, in UTC and whole seconds. An
+// instance whose qory:dispatch_id tag is not a dispatch id, and an instance that EC2
+// returns with no LaunchTime, are left out, each with a log line.
 func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {
@@ -395,15 +395,15 @@ func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList
 		if !ok {
 			continue
 		}
-		if adapterio.CheckKey(m.Key) != nil {
-			h.log.Warn("Set the instance's qory:key tag to the key of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:key tag is not a key", "instance", m.ID)
+		if adapterio.CheckDispatchID(m.DispatchID) != nil {
+			h.log.Warn("Set the instance's qory:dispatch_id tag to the dispatch id of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:dispatch_id tag is not a dispatch id", "instance", m.ID)
 			continue
 		}
 		if m.LaunchTime.IsZero() {
 			h.log.Warn("Check the instance in EC2: list leaves out an instance that DescribeInstances returned with no launch time", "instance", m.ID)
 			continue
 		}
-		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, DispatchID: m.Key, State: state, Started: contracts.FormatTime(m.LaunchTime)})
+		a.Machines = append(a.Machines, contracts.Machine{ID: m.ID, DispatchID: m.DispatchID, State: state, Started: contracts.FormatTime(m.LaunchTime)})
 	}
 	return a, nil
 }

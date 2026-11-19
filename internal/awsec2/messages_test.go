@@ -45,7 +45,7 @@ func TestMessagesFit(t *testing.T) {
 		withTags(`[]`),
 		withTags(`{"!": ""}`),
 		withTags(`{"aws:a": ""}`),
-		withTags(`{"qory:key": ""}`),
+		withTags(`{"qory:dispatch_id": ""}`),
 	} {
 		_, err := ParseSettings([]byte(doc))
 		if err == nil {

@@ -370,13 +370,13 @@ func TestDecodeErrors(t *testing.T) {
 	}
 }
 
-// TestCheckKey checks the shape of a key.
-func TestCheckKey(t *testing.T) {
-	if err := adapterio.CheckKey("dp_0123456789abcdef"); err != nil {
+// TestCheckDispatchID checks the shape of a dispatch id.
+func TestCheckDispatchID(t *testing.T) {
+	if err := adapterio.CheckDispatchID("dp_0123456789abcdef"); err != nil {
 		t.Error(err)
 	}
 	for _, key := range []string{"", "dp_0123456789abcdeu", "np_0123456789abcdef", "dp_0123456789abcdef0"} {
-		if adapterio.CheckKey(key) == nil {
+		if adapterio.CheckDispatchID(key) == nil {
 			t.Errorf("%q passes", key)
 		}
 	}

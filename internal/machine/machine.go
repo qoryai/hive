@@ -1,5 +1,5 @@
 // Package machine makes, lists, reads and terminates EC2 instances for the EC2 machine
-// adapter, qory-machines-aws-ec2: one instance per key of a make request. It calls EC2
+// adapter, qory-machines-aws-ec2: one instance per dispatch id of a make request. It calls EC2
 // at its standard endpoint with the host's instance role, whose credentials it reads
 // from the instance metadata service; see [LoadConfig].
 package machine
@@ -26,9 +26,9 @@ import (
 
 // The tags on every machine and its volume. A machine has all three.
 const (
-	TagManaged = "qory:managed"
-	TagPool    = "qory:pool"
-	TagKey     = "qory:key"
+	TagManaged    = "qory:managed"
+	TagPool       = "qory:pool"
+	TagDispatchID = "qory:dispatch_id"
 )
 
 // The machine states that EC2 reports, as Machine.State has them.
@@ -241,8 +241,8 @@ type Machine struct {
 	ID string
 	// State is one of the State constants.
 	State string
-	// Key is the value of the qory:key tag.
-	Key string
+	// DispatchID is the value of the qory:dispatch_id tag.
+	DispatchID string
 	// InstanceType is the EC2 instance type, such as t3.medium; "" when EC2 returned
 	// none.
 	InstanceType string
@@ -261,8 +261,8 @@ func fromInstance(in types.Instance) Machine {
 		m.State = string(in.State.Name)
 	}
 	for _, t := range in.Tags {
-		if aws.ToString(t.Key) == TagKey {
-			m.Key = aws.ToString(t.Value)
+		if aws.ToString(t.Key) == TagDispatchID {
+			m.DispatchID = aws.ToString(t.Value)
 		}
 	}
 	return m

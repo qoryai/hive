@@ -41,14 +41,14 @@ const (
 	errorFile        = "error.schema.json"
 )
 
-// keyDefinition is the definition of a dispatch id in the provisioner contract, which
-// the key of a make request and of a listed machine refers to.
-const keyDefinition = "definitions.schema.json#/$defs/dispatch_id"
+// dispatchIDDefinition is the definition of a dispatch id in the provisioner contract, which
+// the dispatch_id member of a make request and of a listed machine refers to.
+const dispatchIDDefinition = "definitions.schema.json#/$defs/dispatch_id"
 
-// compiled are the schemas of machines/v1 by file name, and the definition of a key.
+// compiled are the schemas of machines/v1 by file name, and the definition of a dispatch id.
 type compiled struct {
-	files map[string]*jsonschema.Schema
-	key   *jsonschema.Schema
+	files      map[string]*jsonschema.Schema
+	dispatchID *jsonschema.Schema
 }
 
 // schemas compiles the schemas once.
@@ -61,11 +61,11 @@ var schemas = sync.OnceValues(func() (compiled, error) {
 		}
 		c.files[f] = s
 	}
-	s, err := contracts.CompileProvisioner(keyDefinition)
+	s, err := contracts.CompileProvisioner(dispatchIDDefinition)
 	if err != nil {
-		return compiled{}, fmt.Errorf("the schema provisioner/v1 %s does not compile: %w", keyDefinition, err)
+		return compiled{}, fmt.Errorf("the schema provisioner/v1 %s does not compile: %w", dispatchIDDefinition, err)
 	}
-	c.key = s
+	c.dispatchID = s
 	return c, nil
 })
 
@@ -232,15 +232,16 @@ func checkLog(log string) error {
 	return nil
 }
 
-// CheckKey returns an error when key is not a dispatch id, the shape of the key of a
-// make request and of a listed machine. The error contains no value of key.
-func CheckKey(key string) error {
+// CheckDispatchID returns an error when dispatchID is not a dispatch id, the shape of
+// the dispatch_id member of a make request and of a listed machine. The error contains
+// no value of dispatchID.
+func CheckDispatchID(dispatchID string) error {
 	c, err := schemas()
 	if err != nil {
 		return err
 	}
-	if c.key.Validate(key) != nil {
-		return errors.New("the key must be dp_ and 16 characters of 0-9 and a-z without i, l, o and u")
+	if c.dispatchID.Validate(dispatchID) != nil {
+		return errors.New("the dispatch id must be dp_ and 16 characters of 0-9 and a-z without i, l, o and u")
 	}
 	return nil
 }

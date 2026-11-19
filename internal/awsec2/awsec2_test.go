@@ -171,7 +171,7 @@ func priceDoc(name, usd string) string {
 // world returns a fake EC2 with the image of validSettings, its subnet in testZone,
 // the instance types of catalog, of which testZone offers those in offered, or all
 // when offered is empty, the prices of testPrices, dry runs that return
-// DryRunOperation, no machine for any key, and a RunInstances that returns a pending
+// DryRunOperation, no machine for any dispatch id, and a RunInstances that returns a pending
 // instance of the type it got.
 func world(offered ...string) *fakeAPI {
 	if len(offered) == 0 {
@@ -220,7 +220,7 @@ func world(offered ...string) *fakeAPI {
 	}
 }
 
-// launched returns an instance with id, state, the qory:key tag key and a launch time
+// launched returns an instance with id, state, the qory:dispatch_id tag key and a launch time
 // in UTC+2 with half a second.
 func launched(id, state, key string) types.Instance {
 	return types.Instance{
@@ -230,7 +230,7 @@ func launched(id, state, key string) types.Instance {
 		Tags: []types.Tag{
 			{Key: aws.String("qory:managed"), Value: aws.String("true")},
 			{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
-			{Key: aws.String("qory:key"), Value: aws.String(key)},
+			{Key: aws.String("qory:dispatch_id"), Value: aws.String(key)},
 		},
 	}
 }
@@ -238,7 +238,7 @@ func launched(id, state, key string) types.Instance {
 // TestCheck pins check: one DescribeImages for the image, one DescribeSubnets for the
 // subnet, one DescribeInstanceTypes for the region's types, one
 // DescribeInstanceTypeOfferings for the subnet's zone and one price lookup, then two
-// RunInstances dry runs, with placeholder tags in the shapes of a pool id and a key:
+// RunInstances dry runs, with placeholder tags in the shapes of a pool id and a dispatch id:
 // one for the first type in make's order, and one with CpuOptions for the first type
 // that needs them. Then one DescribeInstances dry run. It makes no machine, and its
 // answer has the one shape that covers every other.
@@ -534,10 +534,10 @@ func makes(f *fakeAPI) []*ec2.RunInstancesInput {
 }
 
 // TestMake pins make: the smallest type that fits, the start data as base64 user
-// data, the client token of the key and the type, the key as the qory:key tag, the
-// pool as the qory:pool tag, an encrypted gp3 root volume of the image's 30 GiB for a
-// smaller disk, no CpuOptions, a lookup of the key before the launch, and the id and
-// the type of the instance in the answer.
+// data, the client token of the dispatch id and the type, the dispatch id as the
+// qory:dispatch_id tag, the pool as the qory:pool tag, an encrypted gp3 root volume of
+// the image's 30 GiB for a smaller disk, no CpuOptions, a lookup of the dispatch id
+// before the launch, and the id and the type of the instance in the answer.
 func TestMake(t *testing.T) {
 	f := world("t3.medium", "m7i.large")
 	h, _, _ := testHandler(f)
@@ -569,15 +569,15 @@ func TestMake(t *testing.T) {
 	wantLookup := []types.Filter{
 		{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},
 		{Name: aws.String("tag:qory:pool"), Values: []string{testPool}},
-		{Name: aws.String("tag:qory:key"), Values: []string{testKey}},
+		{Name: aws.String("tag:qory:dispatch_id"), Values: []string{testKey}},
 	}
 	if len(f.describes) != 2 || !reflect.DeepEqual(f.describes[0].Filters, wantLookup) {
-		t.Errorf("DescribeInstances calls %+v, want one lookup by key per make", f.describes)
+		t.Errorf("DescribeInstances calls %+v, want one lookup by dispatch id per make", f.describes)
 	}
 	wantTags := []types.Tag{
 		{Key: aws.String("qory:managed"), Value: aws.String("true")},
 		{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
-		{Key: aws.String("qory:key"), Value: aws.String(testKey)},
+		{Key: aws.String("qory:dispatch_id"), Value: aws.String(testKey)},
 	}
 	wantTagSpecs(t, in, wantTags)
 	ni := in.NetworkInterfaces
@@ -839,11 +839,11 @@ func TestMakeCapacityAllFail(t *testing.T) {
 	}
 }
 
-// TestMakeOneMachinePerKey pins that a second make with the same key makes no second
-// machine after a capacity fallback: make finds the first make's machine by its
-// qory:key tag and returns its id and type, also when the type that the first make
-// tried first has capacity again.
-func TestMakeOneMachinePerKey(t *testing.T) {
+// TestMakeOneMachinePerDispatchID pins that a second make with the same dispatch id
+// makes no second machine after a capacity fallback: make finds the first make's
+// machine by its qory:dispatch_id tag and returns its id and type, also when the type
+// that the first make tried first has capacity again.
+func TestMakeOneMachinePerDispatchID(t *testing.T) {
 	f := world("t3.medium", "m7i.large")
 	capacityFor(f, "t3.medium")
 	var made []types.Instance
@@ -900,7 +900,7 @@ func wantTagSpecs(t *testing.T, in *ec2.RunInstancesInput, tags []types.Tag) {
 }
 
 // TestTags pins that make and check's dry run send the tags of the settings after
-// qory:managed, qory:pool and qory:key, sorted by key, on the instance and the
+// qory:managed, qory:pool and qory:dispatch_id, sorted by key, on the instance and the
 // volume.
 func TestTags(t *testing.T) {
 	f := world()
@@ -923,14 +923,14 @@ func TestTags(t *testing.T) {
 		wantTagSpecs(t, in, []types.Tag{
 			{Key: aws.String("qory:managed"), Value: aws.String("true")},
 			{Key: aws.String("qory:pool"), Value: aws.String(pool)},
-			{Key: aws.String("qory:key"), Value: aws.String(key)},
+			{Key: aws.String("qory:dispatch_id"), Value: aws.String(key)},
 			{Key: aws.String("env"), Value: aws.String("test")},
 			{Key: aws.String("qory:stack"), Value: aws.String("example-stack")},
 		})
 	}
 }
 
-// TestMakeTerminated pins make for a key whose machine is terminated: EC2 returns
+// TestMakeTerminated pins make for a dispatch id whose machine is terminated: EC2 returns
 // IdempotentInstanceTerminated, and make returns the id that DescribeInstances returns
 // for the client token, or the error when EC2 no longer returns the machine.
 func TestMakeTerminated(t *testing.T) {
@@ -958,7 +958,7 @@ func TestMakeTerminated(t *testing.T) {
 
 	found = nil
 	status, out = serve(t, h, "make", path, smallRequest(testData))
-	wantFailure(t, status, out, contracts.FailureOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated")
+	wantFailure(t, status, out, contracts.FailureOther, "No action needed: the machine made for this dispatch id is terminated, and EC2 makes no second machine for the dispatch id: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated")
 }
 
 // TestMakeErrorKinds pins the kind of each class of RunInstances error in the error
@@ -1006,8 +1006,9 @@ func TestMakeErrorKinds(t *testing.T) {
 }
 
 // TestList pins list: the tag and state filters, the state of each EC2 state,
-// terminated left out, the key from the qory:key tag, the start time in UTC, and an
-// instance whose qory:key tag is not a key left out with a log line.
+// terminated left out, the dispatch id from the qory:dispatch_id tag, the start time in
+// UTC, and an instance whose qory:dispatch_id tag is not a dispatch id left out with a
+// log line.
 func TestList(t *testing.T) {
 	f := &fakeAPI{describe: func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: []types.Instance{
@@ -1043,7 +1044,7 @@ func TestList(t *testing.T) {
 	if !reflect.DeepEqual(f.describes[0].Filters, wantFilters) {
 		t.Errorf("filters %+v", f.describes[0].Filters)
 	}
-	const line = `level=WARN msg="Set the instance's qory:key tag to the key of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:key tag is not a key" instance=i-0000000000000001a`
+	const line = `level=WARN msg="Set the instance's qory:dispatch_id tag to the dispatch id of its make request, or remove its qory:managed tag: list leaves out an instance whose qory:dispatch_id tag is not a dispatch id" instance=i-0000000000000001a`
 	if !strings.Contains(log.String(), line) || strings.Count(log.String(), "\n") != 1 {
 		t.Errorf("log\n%s\nwant the line\n%s", log, line)
 	}
