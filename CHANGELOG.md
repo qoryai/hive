@@ -202,6 +202,14 @@ The changes to Hive that no release contains yet, in the shape of
   "Read the journal of docker.service for the cause", and that journal is gone once the
   machine is deleted. After, it reads "Read the lines of docker.service above this line
   in the machine log for the cause".
+- The documents of `make` and `list` between the provisioner and the machine adapter
+  have the member `dispatch_id` where they had `key`, as in `contracts/machines/v1` of
+  qoryai/integrations. The AWS EC2 adapter tags each machine and its volume with
+  `qory:dispatch_id` where it tagged `qory:key`, finds a machine by that tag, and
+  reserves that tag name in `tags`. The `aws:TagKeys` condition in the instance role
+  policy lists `qory:dispatch_id` in place of `qory:key`. The adapter does not read
+  the tag `qory:key`, so `list` leaves out a machine that has only that tag, with a
+  warning, and `make` does not find it.
 
 ### Removed
 

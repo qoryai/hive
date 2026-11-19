@@ -79,9 +79,9 @@ the least machine that its run needs, and `serve` passes the spec unchanged to `
 machine was not made: the claim has no machine spec, so the provisioner cannot choose
 a machine". The answer of `make` contains the machine's type, such as `m7i.large`.
 `serve` keeps the type in the journal and sends it in each `dispatched` of the
-dispatch. A machine that `serve` finds by its key after a restart, or takes back with
-no journal entry, has no type, because the answer of `list` contains none, and its
-`dispatched` contains no type.
+dispatch. A machine that `serve` finds by its dispatch id after a restart, or takes
+back with no journal entry, has no type, because the answer of `list` contains none,
+and its `dispatched` contains no type.
 
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
@@ -108,11 +108,11 @@ machine type:
   watch. Once the machine has run longer than 1470 minutes and 15 minutes by its start
   time in the list, `serve` deletes it.
 
-A stopped or deleting machine, and a machine whose key is not a dispatch id, get no
-`dispatched`. `serve` deletes such a machine, except a deleting machine whose key is
-not a dispatch id, which it leaves as it is. `serve` logs `found a machine with no
-journal entry` once for a key, at the first of the watches in a row that find the key
-with no entry.
+A stopped or deleting machine, and a machine whose `dispatch_id` does not have the shape of
+a dispatch id, get no `dispatched`. `serve` deletes such a machine, except a deleting
+machine whose `dispatch_id` does not have that shape, which it leaves as it is. `serve` logs
+`found a machine with no journal entry` once for a dispatch id, at the first of the
+watches in a row that find the dispatch id with no entry.
 
 Two provisioners of one node pool each take back the other's machines: each sends
 `dispatched` for them, deletes them and sends `gone` when their dispatch ends. A
@@ -202,16 +202,17 @@ JSON object:
   machine's network interface. Required.
 - `image_id`: the image that each machine starts from. Required.
 - `tags`: at most 20 entries, each a tag key set to its value. Optional. Each machine
-  and its volume get these tags after `qory:managed`, `qory:pool` and `qory:key`. The
-  dry run of `check` sends them too.
+  and its volume get these tags after `qory:managed`, `qory:pool` and
+  `qory:dispatch_id`. The dry run of `check` sends them too.
 
 A tag key has 1 to 128 characters, and a tag value 0 to 256 characters, of letters,
 digits, spaces and `_ . : / = + - @`. A key may not start with `aws:`, and may not be
-`qory:managed`, `qory:pool` or `qory:key`, in any case. EC2 accepts at most 50 tags on
-a resource: the 20 entries and the adapter's 3 tags stay within that limit. When a
-member breaks a rule, `check` and `make` fail, and the error starts with the fix. A
-file with another member, such as `instance_types`, fails with the error "Remove every
-member other than subnet_id, security_group_id, image_id and tags from aws-ec2.json."
+`qory:managed`, `qory:pool` or `qory:dispatch_id`, in any case. EC2 accepts at most 50
+tags on a resource: the 20 entries and the adapter's 3 tags stay within that limit.
+When a member breaks a rule, `check` and `make` fail, and the error starts with the
+fix. A file with another member, such as `instance_types`, fails with the error
+"Remove every member other than subnet_id, security_group_id, image_id and tags from
+aws-ec2.json."
 
 ### Instance types
 
@@ -248,10 +249,11 @@ and its size is the larger of the spec's `disk_gib` and the size of the root vol
 `image_id`. When EC2 has no capacity for a type in the subnet's zone
 (`InsufficientInstanceCapacity`), `make` tries the next type that fits, at most 8
 types, and then returns the last error. When no type fits, `make` fails with the kind
-`defect`. A key gets one machine: each start sends a client token made of the key and
-the type, and before the first start, `make` looks for a machine with the key's tags.
-EC2 lists a new machine after a short delay, so a second `make` with the same key
-right after the first can start a second machine of another type.
+`defect`. A dispatch id gets one machine: each start sends a client token made of the
+dispatch id and the type, and before the first start, `make` looks for a machine with
+the dispatch id in its `qory:dispatch_id` tag. EC2 lists a new machine after a short
+delay, so a second `make` with the same dispatch id right after the first can start a
+second machine of another type.
 
 ### Prices
 
@@ -313,7 +315,7 @@ example values before you attach it to the instance role:
           "ec2:MetadataHttpTokens": "required"
         },
         "ForAllValues:StringEquals": {
-          "aws:TagKeys": ["qory:managed", "qory:pool", "qory:key"]
+          "aws:TagKeys": ["qory:managed", "qory:pool", "qory:dispatch_id"]
         },
         "NumericLessThanEquals": {
           "ec2:MetadataHttpPutResponseHopLimit": "1"
@@ -330,7 +332,7 @@ example values before you attach it to the instance role:
           "aws:RequestTag/qory:managed": "true"
         },
         "ForAllValues:StringEquals": {
-          "aws:TagKeys": ["qory:managed", "qory:pool", "qory:key"]
+          "aws:TagKeys": ["qory:managed", "qory:pool", "qory:dispatch_id"]
         },
         "Bool": {
           "ec2:Encrypted": "true"
@@ -410,7 +412,7 @@ What each statement allows, and why:
 
 - `LaunchInstance` allows `ec2:RunInstances` to make an instance only with the tag
   `qory:managed` set to `true`, no tag keys other than `qory:managed`, `qory:pool` and
-  `qory:key`, IMDSv2 required, and a metadata hop limit of 1. The adapter sends each
+  `qory:dispatch_id`, IMDSv2 required, and a metadata hop limit of 1. The adapter sends each
   make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
   key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
   `UnauthorizedOperation`.
@@ -424,7 +426,7 @@ What each statement allows, and why:
 - `TagAtLaunch` allows `ec2:CreateTags` only inside `ec2:RunInstances`, which tags the
   instance and its volume as it makes them. The adapter tags nothing after a launch.
 - `Describe` allows `ec2:DescribeInstances`, which lists the node pool's machines and
-  finds a machine by its key; `ec2:DescribeImages`, which reads the image's root
+  finds a machine by its dispatch id; `ec2:DescribeImages`, which reads the image's root
   device, the size of its root volume and its architecture;
   `ec2:DescribeInstanceTypes`, which reads the vCPUs, memory, architectures,
   virtualization and usage classes of every type in the region;
