@@ -230,7 +230,7 @@ func (h *handler) Check(context.Context, string, contracts.MachinesCheck) (contr
 	return contracts.MachinesCheckAnswer{Offers: []contracts.MachineSpec{fakeOffer}}, h.err(nil)
 }
 
-// machines reads the fake's machines, by key, from the file beside its report.
+// machines reads the fake's machines, by dispatch id, from the file beside its report.
 func (h *handler) machines() map[string]string {
 	m := map[string]string{}
 	if b, err := os.ReadFile(h.cfg.Report + ".machines"); err == nil {
@@ -239,8 +239,8 @@ func (h *handler) machines() map[string]string {
 	return m
 }
 
-// Make makes at most one machine per key, of the one machine fakeOffer, the type
-// example-type, for a machine spec that fakeOffer fits.
+// Make makes at most one machine per dispatch id, of the one machine fakeOffer, the
+// type example-type, for a machine spec that fakeOffer fits.
 func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	if err := h.err(startData); err != nil {
 		return contracts.MachinesMakeAnswer{}, err
@@ -262,7 +262,7 @@ func (h *handler) Make(_ context.Context, _ string, req contracts.MachinesMake, 
 }
 
 func (h *handler) List(_ context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
-	m := contracts.Machine{ID: "i-0123456789abcdef0", DispatchID: testKey, State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
+	m := contracts.Machine{ID: "i-0123456789abcdef0", DispatchID: testDispatchID, State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
 	return contracts.MachinesListAnswer{Machines: []contracts.Machine{m}}, h.err(nil)
 }
 

@@ -27,9 +27,9 @@ import (
 
 // Neutral example values of the requests.
 const (
-	testKey  = "dp_0123456789abcdef"
-	testPool = "np_0123456789abcdef"
-	testID   = "i-0123456789abcdef0"
+	testDispatchID = "dp_0123456789abcdef"
+	testPool       = "np_0123456789abcdef"
+	testID         = "i-0123456789abcdef0"
 )
 
 // serve runs command through adapterio.Serve with h, the settings file path and the
@@ -64,7 +64,7 @@ func wantFailure(t *testing.T, status int, out, kind, message string) {
 // GiB, the architecture amd64 and virtualization virt, with the start data data.
 func makeRequest(vcpus, mib, disk int, virt bool, data []byte) string {
 	return fmt.Sprintf(`{"version": 1, "dispatch_id": "%s", "pool": "%s", "machine_spec": {"vcpus": %d, "memory_mib": %d, "disk_gib": %d, "arch": "amd64", "virtualization": %t}, "start_data": "%s"}`,
-		testKey, testPool, vcpus, mib, disk, virt, base64.StdEncoding.EncodeToString(data))
+		testDispatchID, testPool, vcpus, mib, disk, virt, base64.StdEncoding.EncodeToString(data))
 }
 
 // testData is start data that no error message contains by chance.
@@ -168,11 +168,11 @@ func priceDoc(name, usd string) string {
 	return string(b)
 }
 
-// world returns a fake EC2 with the image of validSettings, its subnet in testZone,
-// the instance types of catalog, of which testZone offers those in offered, or all
-// when offered is empty, the prices of testPrices, dry runs that return
-// DryRunOperation, no machine for any dispatch id, and a RunInstances that returns a pending
-// instance of the type it got.
+// world returns a fake EC2 with the image of validSettings, its subnet in testZone, the
+// instance types of catalog, of which testZone offers those in offered, or all when
+// offered is empty, the prices of testPrices, dry runs that return DryRunOperation, no
+// machine for any dispatch id, and a RunInstances that returns a pending instance of
+// the type it got.
 func world(offered ...string) *fakeAPI {
 	if len(offered) == 0 {
 		offered = slices.Sorted(maps.Keys(catalog))
@@ -207,7 +207,7 @@ func world(offered ...string) *fakeAPI {
 			if aws.ToBool(in.DryRun) {
 				return nil, apiError("DryRunOperation")
 			}
-			m := launched(testID, "pending", testKey)
+			m := launched(testID, "pending", testDispatchID)
 			m.InstanceType = in.InstanceType
 			return &ec2.RunInstancesOutput{Instances: []types.Instance{m}}, nil
 		},
@@ -220,9 +220,9 @@ func world(offered ...string) *fakeAPI {
 	}
 }
 
-// launched returns an instance with id, state, the qory:dispatch_id tag key and a launch time
-// in UTC+2 with half a second.
-func launched(id, state, key string) types.Instance {
+// launched returns an instance with id, state, the qory:dispatch_id tag key and a
+// launch time in UTC+2 with half a second.
+func launched(id, state, dispatchID string) types.Instance {
 	return types.Instance{
 		InstanceId: aws.String(id),
 		State:      &types.InstanceState{Name: types.InstanceStateName(state)},
@@ -230,7 +230,7 @@ func launched(id, state, key string) types.Instance {
 		Tags: []types.Tag{
 			{Key: aws.String("qory:managed"), Value: aws.String("true")},
 			{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
-			{Key: aws.String("qory:dispatch_id"), Value: aws.String(key)},
+			{Key: aws.String("qory:dispatch_id"), Value: aws.String(dispatchID)},
 		},
 	}
 }
@@ -238,10 +238,10 @@ func launched(id, state, key string) types.Instance {
 // TestCheck pins check: one DescribeImages for the image, one DescribeSubnets for the
 // subnet, one DescribeInstanceTypes for the region's types, one
 // DescribeInstanceTypeOfferings for the subnet's zone and one price lookup, then two
-// RunInstances dry runs, with placeholder tags in the shapes of a pool id and a dispatch id:
-// one for the first type in make's order, and one with CpuOptions for the first type
-// that needs them. Then one DescribeInstances dry run. It makes no machine, and its
-// answer has the one shape that covers every other.
+// RunInstances dry runs, with placeholder tags in the shapes of a pool id and a
+// dispatch id: one for the first type in make's order, and one with CpuOptions for the
+// first type that needs them. Then one DescribeInstances dry run. It makes no machine,
+// and its answer has the one shape that covers every other.
 func TestCheck(t *testing.T) {
 	f := world()
 	h, log, _ := testHandler(f)
@@ -553,7 +553,7 @@ func TestMake(t *testing.T) {
 		t.Fatalf("RunInstances calls %d, or the second input differs", len(f.runs))
 	}
 	in := f.runs[0]
-	if aws.ToString(in.ClientToken) != testKey+".t3.medium" || in.DryRun != nil || in.InstanceType != "t3.medium" || in.CpuOptions != nil {
+	if aws.ToString(in.ClientToken) != testDispatchID+".t3.medium" || in.DryRun != nil || in.InstanceType != "t3.medium" || in.CpuOptions != nil {
 		t.Errorf("client token %q, dry run %v, instance type %q, CpuOptions %+v", aws.ToString(in.ClientToken), in.DryRun, in.InstanceType, in.CpuOptions)
 	}
 	if got, err := base64.StdEncoding.DecodeString(aws.ToString(in.UserData)); err != nil || !bytes.Equal(got, data) {
@@ -569,7 +569,7 @@ func TestMake(t *testing.T) {
 	wantLookup := []types.Filter{
 		{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},
 		{Name: aws.String("tag:qory:pool"), Values: []string{testPool}},
-		{Name: aws.String("tag:qory:dispatch_id"), Values: []string{testKey}},
+		{Name: aws.String("tag:qory:dispatch_id"), Values: []string{testDispatchID}},
 	}
 	if len(f.describes) != 2 || !reflect.DeepEqual(f.describes[0].Filters, wantLookup) {
 		t.Errorf("DescribeInstances calls %+v, want one lookup by dispatch id per make", f.describes)
@@ -577,7 +577,7 @@ func TestMake(t *testing.T) {
 	wantTags := []types.Tag{
 		{Key: aws.String("qory:managed"), Value: aws.String("true")},
 		{Key: aws.String("qory:pool"), Value: aws.String(testPool)},
-		{Key: aws.String("qory:dispatch_id"), Value: aws.String(testKey)},
+		{Key: aws.String("qory:dispatch_id"), Value: aws.String(testDispatchID)},
 	}
 	wantTagSpecs(t, in, wantTags)
 	ni := in.NetworkInterfaces
@@ -773,7 +773,7 @@ func TestMakeCapacityFallback(t *testing.T) {
 	if want := []string{"t3a.medium", "t3.medium", "m6i.large"}; !reflect.DeepEqual(tried, want) {
 		t.Errorf("tried %v, want %v", tried, want)
 	}
-	if want := []string{testKey + ".t3a.medium", testKey + ".t3.medium", testKey + ".m6i.large"}; !reflect.DeepEqual(tokens, want) {
+	if want := []string{testDispatchID + ".t3a.medium", testDispatchID + ".t3.medium", testDispatchID + ".m6i.large"}; !reflect.DeepEqual(tokens, want) {
 		t.Errorf("client tokens %v, want %v", tokens, want)
 	}
 	if n := strings.Count(log.String(), "EC2 has no capacity for the instance type"); n != 2 || !strings.Contains(log.String(), "instance_type=t3.medium next=m6i.large") {
@@ -916,23 +916,23 @@ func TestTags(t *testing.T) {
 		t.Fatalf("%d RunInstances calls, want make's and 2 dry runs", len(f.runs))
 	}
 	for i, in := range f.runs {
-		pool, key := testPool, testKey
+		pool, dispatchID := testPool, testDispatchID
 		if i > 0 {
-			pool, key = "np_0000000000000000", "dp_0000000000000000"
+			pool, dispatchID = "np_0000000000000000", "dp_0000000000000000"
 		}
 		wantTagSpecs(t, in, []types.Tag{
 			{Key: aws.String("qory:managed"), Value: aws.String("true")},
 			{Key: aws.String("qory:pool"), Value: aws.String(pool)},
-			{Key: aws.String("qory:dispatch_id"), Value: aws.String(key)},
+			{Key: aws.String("qory:dispatch_id"), Value: aws.String(dispatchID)},
 			{Key: aws.String("env"), Value: aws.String("test")},
 			{Key: aws.String("qory:stack"), Value: aws.String("example-stack")},
 		})
 	}
 }
 
-// TestMakeTerminated pins make for a dispatch id whose machine is terminated: EC2 returns
-// IdempotentInstanceTerminated, and make returns the id that DescribeInstances returns
-// for the client token, or the error when EC2 no longer returns the machine.
+// TestMakeTerminated pins make for a dispatch id whose machine is terminated: EC2
+// returns IdempotentInstanceTerminated, and make returns the id that DescribeInstances
+// returns for the client token, or the error when EC2 no longer returns the machine.
 func TestMakeTerminated(t *testing.T) {
 	var found []types.Instance
 	f := world("t3.medium", "m7i.large")
@@ -947,12 +947,12 @@ func TestMakeTerminated(t *testing.T) {
 	}
 	h, _, _ := testHandler(f)
 	path := writeSettings(t, validSettings)
-	found = []types.Instance{launched(testID, "terminated", testKey)}
+	found = []types.Instance{launched(testID, "terminated", testDispatchID)}
 	status, out := serve(t, h, "make", path, smallRequest(testData))
 	if status != adapterio.ExitOK || out != `{"id":"`+testID+`","machine_type":"t3.medium"}`+"\n" {
 		t.Fatalf("exit status %d, output %q", status, out)
 	}
-	if want := []types.Filter{{Name: aws.String("client-token"), Values: []string{testKey + ".t3.medium"}}}; !reflect.DeepEqual(f.describes[1].Filters, want) {
+	if want := []types.Filter{{Name: aws.String("client-token"), Values: []string{testDispatchID + ".t3.medium"}}}; !reflect.DeepEqual(f.describes[1].Filters, want) {
 		t.Errorf("filters %+v", f.describes[1].Filters)
 	}
 

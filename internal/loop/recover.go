@@ -27,9 +27,9 @@ func (l *loop) recoverJournal(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("Check the machine adapter, then start the provisioner again: listing the pool's machines to recover the journal of live dispatches failed: %s", shown(err, nil))
 	}
-	byKey := machinesByKey(list.Machines)
+	byDispatchID := machinesByDispatchID(list.Machines)
 	for _, e := range l.Journal.List() {
-		m, found := byKey[e.DispatchID]
+		m, found := byDispatchID[e.DispatchID]
 		action := journal.Recover(e, journal.Lookup{Found: found, MachineID: m.ID, State: string(m.State)})
 		attrs := []any{slog.String("dispatch_id", e.DispatchID)}
 		switch action.Kind {

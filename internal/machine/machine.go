@@ -1,7 +1,7 @@
 // Package machine makes, lists, reads and terminates EC2 instances for the EC2 machine
-// adapter, qory-machines-aws-ec2: one instance per dispatch id of a make request. It calls EC2
-// at its standard endpoint with the host's instance role, whose credentials it reads
-// from the instance metadata service; see [LoadConfig].
+// adapter, qory-machines-aws-ec2: one instance per dispatch id of a make request. It
+// calls EC2 at its standard endpoint with the host's instance role, whose credentials
+// it reads from the instance metadata service; see [LoadConfig].
 package machine
 
 import (

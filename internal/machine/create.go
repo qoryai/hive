@@ -63,9 +63,9 @@ func ClientToken(dispatchID, instanceType string) string {
 	return dispatchID + "." + instanceType
 }
 
-// Create makes one machine for spec and returns it as RunInstances returned it,
-// usually in state pending. A repeated Create with the same spec returns the same
-// machine, because the client token is [ClientToken] of the dispatch id and the instance type.
+// Create makes one machine for spec and returns it as RunInstances returned it, usually
+// in state pending. A repeated Create with the same spec returns the same machine,
+// because the client token is [ClientToken] of the dispatch id and the instance type.
 // Errors from the call are *Error.
 func (c *Client) Create(ctx context.Context, spec Spec) (Machine, error) {
 	in, err := runInput(spec, true)
@@ -103,8 +103,8 @@ func (c *Client) CheckRights(ctx context.Context, spec Spec) error {
 	return wrap("RunInstances dry run", err)
 }
 
-// runInput builds the RunInstances input for spec. withToken requires the dispatch id and
-// sends [ClientToken] of the dispatch id and the instance type as the client token.
+// runInput builds the RunInstances input for spec. withToken requires the dispatch id
+// and sends [ClientToken] of the dispatch id and the instance type as the client token.
 func runInput(spec Spec, withToken bool) (*ec2.RunInstancesInput, error) {
 	if err := validate(spec, withToken); err != nil {
 		return nil, err

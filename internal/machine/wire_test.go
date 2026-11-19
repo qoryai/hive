@@ -175,9 +175,9 @@ func TestWireCreate(t *testing.T) {
 	}
 }
 
-// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool
-// and qory:dispatch_id and sorted by key, on the instance and the volume, in Create's request
-// and in CheckRights' dry run.
+// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool and
+// qory:dispatch_id and sorted by key, on the instance and the volume, in Create's
+// request and in CheckRights' dry run.
 func TestWireTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": ""}

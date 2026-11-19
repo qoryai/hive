@@ -239,9 +239,10 @@ func TestAMachinePastItsLifetimeIsCleanedUp(t *testing.T) {
 	}
 }
 
-// TestAStrayIsCleanedUp cleans up a listed machine whose key has no journal entry and
-// whose dispatch ended, with its key as the dispatch id, and leaves a deleting stray
-// whose key is not a dispatch id as it is, with no entry and no machine-end.
+// TestAStrayIsCleanedUp cleans up a listed machine whose dispatch id has no journal
+// entry and whose dispatch ended, with its dispatch_id as the dispatch id, and leaves a
+// deleting stray whose dispatch_id is not a dispatch id as it is, with no entry and no
+// machine-end.
 func TestAStrayIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	h.machines.logText = "stray log"
@@ -682,9 +683,9 @@ func takenBack(id, machine string) journal.Entry {
 }
 
 // TestAStrayOfALiveDispatchIsTakenBack takes back a listed machine with no journal
-// entry when dispatched for its key returns 204. The watch then sends dispatched for it
-// as for any dispatched entry, and once the dispatch ends, it cleans up the machine and
-// sends gone once.
+// entry when dispatched for its dispatch id returns 204. The watch then sends
+// dispatched for it as for any dispatched entry, and once the dispatch ends, it cleans
+// up the machine and sends gone once.
 func TestAStrayOfALiveDispatchIsTakenBack(t *testing.T) {
 	h := newHarness(t)
 	h.start()
@@ -720,8 +721,8 @@ func TestAStrayOfALiveDispatchIsTakenBack(t *testing.T) {
 }
 
 // TestAStrayOfAnEndedDispatchIsCleanedUp cleans up a listed machine with no journal
-// entry when dispatched for its key returns 410 gone, 409 lease_expired or a signed
-// 403 forbidden, and sends gone.
+// entry when dispatched for its dispatch id returns 410 gone, 409 lease_expired or a
+// signed 403 forbidden, and sends gone.
 func TestAStrayOfAnEndedDispatchIsCleanedUp(t *testing.T) {
 	for name, err := range map[string]error{
 		"410 gone":          fmt.Errorf("Qory Apiary returned 410 gone: %w", loop.ErrGone),
@@ -749,8 +750,9 @@ func TestAStrayOfAnEndedDispatchIsCleanedUp(t *testing.T) {
 }
 
 // TestAStrayIsKeptWhileDispatchedFails keeps a listed machine with no journal entry
-// while dispatched for its key fails with no refusal, such as no answer, a server error
-// or an answer with no valid signature, and takes it back once dispatched returns 204.
+// while dispatched for its dispatch id fails with no refusal, such as no answer, a
+// server error or an answer with no valid signature, and takes it back once dispatched
+// returns 204.
 func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
 	h := newHarness(t)
 	h.apiary.setDispatched(dispatchC, errors.New("no answer from Qory Apiary"))
@@ -767,7 +769,7 @@ func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
 		t.Errorf("the log has %d lines for a failed dispatched", n)
 	}
 	if n := len(h.find("found a machine with no journal entry")); n != 1 {
-		t.Errorf("the log has %d lines for a stray, want 1 for the key", n)
+		t.Errorf("the log has %d lines for a stray, want 1 for the dispatch id", n)
 	}
 	h.apiary.setDispatched(dispatchC, nil)
 	h.tick()
@@ -780,9 +782,9 @@ func TestAStrayIsKeptWhileDispatchedFails(t *testing.T) {
 }
 
 // TestAStrayPastTheLongestLifetimeIsCleanedUp cleans up a listed machine with no
-// journal entry when dispatched for its key fails and the machine ran longer than the
-// longest lifetime and 15 minutes by its start time in the list, the bound of an entry
-// taken back. A machine exactly at that bound stays.
+// journal entry when dispatched for its dispatch id fails and the machine ran longer
+// than the longest lifetime and 15 minutes by its start time in the list, the bound of
+// an entry taken back. A machine exactly at that bound stays.
 func TestAStrayPastTheLongestLifetimeIsCleanedUp(t *testing.T) {
 	h := newHarness(t)
 	failed := errors.New("no answer from Qory Apiary")
@@ -888,10 +890,11 @@ func TestATakenBackMachineGetsTheListGraceFromItsTakeBack(t *testing.T) {
 	}
 }
 
-// TestARunningStrayComesBeforeADeletingOneOfItsKey takes back the running machine of a
-// live dispatch when the list also has a deleting machine with its key, in either
-// order. The deleting machine gets no entry, and the dispatch gets no gone.
-func TestARunningStrayComesBeforeADeletingOneOfItsKey(t *testing.T) {
+// TestARunningStrayComesBeforeADeletingOneOfItsDispatchID takes back the running
+// machine of a live dispatch when the list also has a deleting machine with its
+// dispatch id, in either order. The deleting machine gets no entry, and the dispatch
+// gets no gone.
+func TestARunningStrayComesBeforeADeletingOneOfItsDispatchID(t *testing.T) {
 	for name, deletingFirst := range map[string]bool{"deleting first": true, "running first": false} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)

@@ -257,26 +257,25 @@ const maxTries = 8
 
 // Make makes one machine of the first instance type that fits the request's machine
 // spec, in the order of [order]: the fewest vCPUs, then the least memory, then the
-// lowest on-demand price, then the name. It considers the types that the subnet's
-// zone offers on demand and that run the image's architecture, which it reads through
-// the cache of [Handler.catalog]. It passes the start data as the user data, sends
-// [machine.ClientToken] of the dispatch id and the type as the client token, and sizes the
-// root volume to the larger of the spec's disk and the image's root volume. When the
-// spec sets virtualization and the type has nested virtualization and is not bare
+// lowest on-demand price, then the name. It considers the types that the subnet's zone
+// offers on demand and that run the image's architecture, which it reads through the
+// cache of [Handler.catalog]. It passes the start data as the user data, sends
+// [machine.ClientToken] of the dispatch id and the type as the client token, and sizes
+// the root volume to the larger of the spec's disk and the image's root volume. When
+// the spec sets virtualization and the type has nested virtualization and is not bare
 // metal, it turns that on. When EC2 has no capacity for the type, make tries the next
 // type that fits, in the same order, at most [maxTries] types, and when each of them
 // fails for lack of capacity, it returns the last failure. When no type fits, make
 // fails with the kind defect. When the spec's disk is larger than the largest gp3
-// volume, [machine.MaxRootGiB], make fails with the kind defect before any EC2 call:
-// an offer of check has at most that disk, so such a spec is a defect of the
-// provisioner.
+// volume, [machine.MaxRootGiB], make fails with the kind defect before any EC2 call: an
+// offer of check has at most that disk, so such a spec is a defect of the provisioner.
 //
 // Before the first try, make looks up a machine of the pool with the dispatch id in its
 // qory:dispatch_id tag. When there is one, in any state, make returns its id and makes
 // no machine, so a second make with the same dispatch id returns the first machine also
 // when that machine is of another type than the first that fits, once DescribeInstances
-// lists the first machine: EC2 lists a new machine after a short delay. A try whose client token EC2 reports as
-// terminated returns the id of the machine with that token.
+// lists the first machine: EC2 lists a new machine after a short delay. A try whose
+// client token EC2 reports as terminated returns the id of the machine with that token.
 func (h *Handler) Make(ctx context.Context, path string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	s, err := ReadSettings(path)
 	if err != nil {
@@ -360,7 +359,8 @@ func answer(m machine.Machine, instanceType string) contracts.MachinesMakeAnswer
 }
 
 // spec is the machine spec of the settings s, with their tags, and the instance type,
-// the image's root device, the root volume size, the pool, the dispatch id and the user data.
+// the image's root device, the root volume size, the pool, the dispatch id and the user
+// data.
 func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool, dispatchID string, userData []byte) machine.Spec {
 	return machine.Spec{
 		DispatchID:      dispatchID,
@@ -376,10 +376,10 @@ func spec(s Settings, instanceType string, img machine.Image, rootGiB int, pool,
 	}
 }
 
-// List lists the pool's instances that are not terminated, with the dispatch id from the
-// qory:dispatch_id tag and the start time from LaunchTime, in UTC and whole seconds. An
-// instance whose qory:dispatch_id tag is not a dispatch id, and an instance that EC2
-// returns with no LaunchTime, are left out, each with a log line.
+// List lists the pool's instances that are not terminated, with the dispatch id from
+// the qory:dispatch_id tag and the start time from LaunchTime, in UTC and whole
+// seconds. An instance whose qory:dispatch_id tag is not a dispatch id, and an instance
+// that EC2 returns with no LaunchTime, are left out, each with a log line.
 func (h *Handler) List(ctx context.Context, _ string, req contracts.MachinesList) (contracts.MachinesListAnswer, error) {
 	c, err := h.client(ctx)
 	if err != nil {

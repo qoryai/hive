@@ -41,11 +41,12 @@ const (
 	errorFile        = "error.schema.json"
 )
 
-// dispatchIDDefinition is the definition of a dispatch id in the provisioner contract, which
-// the dispatch_id member of a make request and of a listed machine refers to.
+// dispatchIDDefinition is the definition of a dispatch id in the provisioner contract,
+// which the dispatch_id member of a make request and of a listed machine refers to.
 const dispatchIDDefinition = "definitions.schema.json#/$defs/dispatch_id"
 
-// compiled are the schemas of machines/v1 by file name, and the definition of a dispatch id.
+// compiled are the schemas of machines/v1 by file name, and the definition of a
+// dispatch id.
 type compiled struct {
 	files      map[string]*jsonschema.Schema
 	dispatchID *jsonschema.Schema

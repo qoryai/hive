@@ -476,7 +476,7 @@ func TestTheReasonsFitTheContract(t *testing.T) {
 
 // TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop returns the journal's error
 // when the made entry cannot be written, and sends no release. After a restart, the
-// claimed entry finds the machine by its key and keeps the claim's lifetime.
+// claimed entry finds the machine by its dispatch id and keeps the claim's lifetime.
 func TestAJournalThatCannotBeWrittenAfterTheMakeStopsTheLoop(t *testing.T) {
 	h := newHarness(t)
 	h.machines.makeStarted = make(chan struct{})

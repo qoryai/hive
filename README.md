@@ -108,11 +108,11 @@ machine type:
   watch. Once the machine has run longer than 1470 minutes and 15 minutes by its start
   time in the list, `serve` deletes it.
 
-A stopped or deleting machine, and a machine whose `dispatch_id` does not have the shape of
-a dispatch id, get no `dispatched`. `serve` deletes such a machine, except a deleting
-machine whose `dispatch_id` does not have that shape, which it leaves as it is. `serve` logs
-`found a machine with no journal entry` once for a dispatch id, at the first of the
-watches in a row that find the dispatch id with no entry.
+A stopped or deleting machine, and a machine whose `dispatch_id` does not have the
+shape of a dispatch id, get no `dispatched`. `serve` deletes such a machine, except a
+deleting machine whose `dispatch_id` does not have that shape, which it leaves as it
+is. `serve` logs `found a machine with no journal entry` once for a dispatch id, at the
+first of the watches in a row that find the dispatch id with no entry.
 
 Two provisioners of one node pool each take back the other's machines: each sends
 `dispatched` for them, deletes them and sends `gone` when their dispatch ends. A
@@ -412,9 +412,9 @@ What each statement allows, and why:
 
 - `LaunchInstance` allows `ec2:RunInstances` to make an instance only with the tag
   `qory:managed` set to `true`, no tag keys other than `qory:managed`, `qory:pool` and
-  `qory:dispatch_id`, IMDSv2 required, and a metadata hop limit of 1. The adapter sends each
-  make with these tags and metadata options. If `aws-ec2.json` has `tags`, add each
-  key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
+  `qory:dispatch_id`, IMDSv2 required, and a metadata hop limit of 1. The adapter
+  sends each make with these tags and metadata options. If `aws-ec2.json` has `tags`,
+  add each key of `tags` to `aws:TagKeys`. Without those keys, `check` fails with
   `UnauthorizedOperation`.
 - `LaunchVolume` allows the volumes of a launch only with the same tags, and only
   encrypted. The adapter marks the root volume encrypted. Add the keys of `tags` to

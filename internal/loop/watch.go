@@ -37,26 +37,27 @@ func (l *loop) watch(ctx context.Context) {
 //     [loop.goneFailed] between failed posts. It gets no delete and no dispatched.
 //   - A claimed entry stays after a release that did not return 204, or after a
 //     release when Journal.Remove failed before the entry left the journal.
-//     When the list has a machine with its key, the entry adopts the machine: it
-//     becomes made with the machine's id, and the rules of a made entry apply. When
-//     the machine is deleting, the entry is cleaned up with the machine's id. When no
-//     machine is listed once the entry's lifetime and 15 minutes have passed since the
-//     claim, or since the start of Run for an entry that the journal had at the start,
-//     the entry gets gone with no delete, as [loop.sendGone] sends it.
+//     When the list has a machine with its dispatch id, the entry adopts the machine:
+//     it becomes made with the machine's id, and the rules of a made entry apply.
+//     When the machine is deleting, the entry is cleaned up with the machine's id.
+//     When no machine is listed once the entry's lifetime and 15 minutes have passed
+//     since the claim, or since the start of Run for an entry that the journal had at
+//     the start, the entry gets gone with no delete, as [loop.sendGone] sends it.
 //   - A made or dispatched entry whose machine is not listed is cleaned up only after
 //     [ListGrace]. Inside the grace, it gets dispatched as usual.
 //
 // Then the watch acts on each pending stray, as [loop.watchPending] does. Last, it acts
-// on each listed machine whose key had no journal entry, neither before the list nor
-// after it: a make that starts during the list has a claimed entry after it. The
-// watch acts on the machines of one key in the order of [keyOrder]. It takes such a
-// machine back for its dispatch when [loop.takeBack] does, and cleans it up otherwise.
-// A key gets at most one dispatched per watch. The watch logs a key with no journal
-// entry once, at the first of the watches in a row that find the key with no entry.
-// The watch skips a machine whose key is a pending stray, and one whose key had gone
-// done in the last [ListGrace], because a vendor's list can show a machine for a while
-// after its delete returned gone. It also skips a deleting machine whose key is not a
-// dispatch id, because it has no dispatch to send machine-end for.
+// on each listed machine whose dispatch id had no journal entry, neither before the
+// list nor after it: a make that starts during the list has a claimed entry after it.
+// The watch acts on the machines of one dispatch id in the order of [dispatchIDOrder].
+// It takes such a machine back for its dispatch when [loop.takeBack] does, and cleans
+// it up otherwise. A dispatch id gets at most one dispatched per watch. The watch logs
+// a dispatch id with no journal entry once, at the first of the watches in a row that
+// find the dispatch id with no entry. The watch skips a machine whose dispatch id is a
+// pending stray, and one whose dispatch id had gone done in the last [ListGrace],
+// because a vendor's list can show a machine for a while after its delete returned
+// gone. It also skips a deleting machine whose dispatch_id is not a dispatch id,
+// because it has no dispatch to send machine-end for.
 //
 // Each machine-end is one try. After the first failure, the watch sends no more
 // machine-end, and its deletes and dispatched go on. So a Qory Apiary with no
@@ -71,7 +72,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 	}
 	// The no-record gone of a claimed entry counts from the time the list arrived.
 	listedAt := l.Clock.Now()
-	byKey := machinesByKey(list.Machines)
+	byDispatchID := machinesByDispatchID(list.Machines)
 	for _, e := range before {
 		if ctx.Err() != nil {
 			return
@@ -87,7 +88,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 			l.watchEnded(ctx, e)
 			continue
 		}
-		m, found := byKey[e.DispatchID]
+		m, found := byDispatchID[e.DispatchID]
 		if e.Phase == journal.PhaseClaimed {
 			var ok bool
 			if e, ok = l.adopt(ctx, e, m, found, listedAt); !ok {
@@ -104,7 +105,7 @@ func (l *loop) watchOnce(ctx context.Context) {
 	l.pruneGoneDone()
 	strays := map[string]bool{}
 	defer func() { l.strays = strays }()
-	for _, m := range keyOrder(list.Machines) {
+	for _, m := range dispatchIDOrder(list.Machines) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -115,21 +116,22 @@ func (l *loop) watchOnce(ctx context.Context) {
 		if !l.strays[m.DispatchID] {
 			l.Log.Warn("found a machine with no journal entry", slog.String("dispatch_id", m.DispatchID), slog.String("machine_id", m.ID), slog.String("state", m.State))
 		}
-		// Each later machine with this key waits for a later watch. While the key has
-		// a journal entry, the watch acts only on the entry's machine. Once the entry
-		// leaves, or when no entry was written, the next watch acts on the machines of
-		// the key again, in the order of keyOrder.
+		// Each later machine with this dispatch id waits for a later watch. While the
+		// dispatch id has a journal entry, the watch acts only on the entry's machine. Once
+		// the entry leaves, or when no entry was written, the next watch acts on the machines
+		// of the dispatch id again, in the order of dispatchIDOrder.
 		if l.takeBack(ctx, m) || l.cleanUpStray(ctx, m) {
 			known[m.DispatchID] = true
 		}
 	}
 }
 
-// keyOrder is the machines of list grouped by key, with the keys in the order of
-// their first machine in list. Within a key, each machine that is not deleting comes
-// before each deleting one, so that a running machine of a live dispatch gets
-// dispatched before a deleting machine with its key gets an entry.
-func keyOrder(list []contracts.Machine) []contracts.Machine {
+// dispatchIDOrder is the machines of list grouped by dispatch id, with the dispatch ids
+// in the order of their first machine in list. Within a dispatch id, each machine that
+// is not deleting comes before each deleting one, so that a running machine of a live
+// dispatch gets dispatched before a deleting machine with its dispatch id gets an
+// entry.
+func dispatchIDOrder(list []contracts.Machine) []contracts.Machine {
 	first := map[string]int{}
 	for i, m := range list {
 		if _, ok := first[m.DispatchID]; !ok {
@@ -226,16 +228,16 @@ func (l *loop) inJournal(e journal.Entry) bool {
 	return false
 }
 
-// machinesByKey maps each key to its machine. When two machines have one key, a
-// machine that is not deleting comes first.
-func machinesByKey(list []contracts.Machine) map[string]contracts.Machine {
-	byKey := make(map[string]contracts.Machine, len(list))
+// machinesByDispatchID maps each dispatch id to its machine. When two machines have one
+// dispatch id, a machine that is not deleting comes first.
+func machinesByDispatchID(list []contracts.Machine) map[string]contracts.Machine {
+	byDispatchID := make(map[string]contracts.Machine, len(list))
 	for _, m := range list {
-		if old, ok := byKey[m.DispatchID]; !ok || old.State == contracts.MachineDeleting {
-			byKey[m.DispatchID] = m
+		if old, ok := byDispatchID[m.DispatchID]; !ok || old.State == contracts.MachineDeleting {
+			byDispatchID[m.DispatchID] = m
 		}
 	}
-	return byKey
+	return byDispatchID
 }
 
 // cleanUp reads the log of the entry's machine, uploads it, deletes the machine and
@@ -342,10 +344,11 @@ func (l *loop) cleanUpLogged(ctx context.Context, e journal.Entry) {
 	l.cleanUp(ctx, e)
 }
 
-// takeBack sends dispatched with no machine type for the listed machine m, whose key
-// has no journal entry, as the journal may have been lost while the machine runs a
-// dispatch. It returns whether the machine stays. A machine that is deleting or
-// stopped, or whose key is not a dispatch id, gets no dispatched and does not stay.
+// takeBack sends dispatched with no machine type for the listed machine m, whose
+// dispatch id has no journal entry, as the journal may have been lost while the machine
+// runs a dispatch. It returns whether the machine stays. A machine that is deleting or
+// stopped, or whose dispatch_id is not a dispatch id, gets no dispatched and does not
+// stay.
 //   - On 204, the machine gets a dispatched entry with the lifetime
 //     [journal.MaxLifetime], because the claim's lifetime is not known, and its make
 //     counts from now. The watch then acts on it as on any dispatched entry.
@@ -387,15 +390,16 @@ func (l *loop) takeBack(ctx context.Context, m contracts.Machine) bool {
 	return true
 }
 
-// cleanUpStray cleans up the listed machine m, whose key has no journal entry, and
-// returns whether the journal has an entry for it. A machine that is deleting gets no
-// read of its log. A key in the shape of a dispatch id gets a deleting entry, and
-// [loop.cleanUp] does the rest. After a failed write of the journal, such a key gets
-// one delete with no entry, and then one try of machine-end: gone when the delete
-// returns gone, deleting when it returns deleting, and delete_failed when it fails.
-// Unless gone is done, the key becomes a pending stray, as [loop.watchPending]
-// describes. Any other key has no dispatch, so it gets one delete and no machine-end,
-// and the next watch finds the machine again if it is still listed and not deleting.
+// cleanUpStray cleans up the listed machine m, whose dispatch id has no journal entry,
+// and returns whether the journal has an entry for it. A machine that is deleting gets
+// no read of its log. A dispatch_id in the shape of a dispatch id gets a deleting
+// entry, and [loop.cleanUp] does the rest. After a failed write of the journal, such a
+// dispatch id gets one delete with no entry, and then one try of machine-end: gone when
+// the delete returns gone, deleting when it returns deleting, and delete_failed when it
+// fails. Unless gone is done, the dispatch id becomes a pending stray, as
+// [loop.watchPending] describes. Any other dispatch id has no dispatch, so it gets one
+// delete and no machine-end, and the next watch finds the machine again if it is still
+// listed and not deleting.
 func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 	attrs := []any{slog.String("dispatch_id", m.DispatchID), slog.String("machine_id", m.ID)}
 	if m.State == contracts.MachineDeleting {
@@ -429,7 +433,7 @@ func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 	}
 	sent := !l.endsArePaused()
 	done := l.sendMachineEnd(ctx, m.DispatchID, end, attrs)
-	// The key has no entry, so the post leaves no record.
+	// The dispatch id has no entry, so the post leaves no record.
 	l.forgetEnds(m.DispatchID)
 	switch {
 	case end != contracts.MachineEndGone:
@@ -443,7 +447,7 @@ func (l *loop) cleanUpStray(ctx context.Context, m contracts.Machine) bool {
 	return false
 }
 
-// watchPending acts on each pending stray: a stray with a dispatch key whose journal
+// watchPending acts on each pending stray: a stray with a dispatch id whose journal
 // write failed, and whose gone is not done. A pending stray with a machine id gets a
 // delete with no read of its log at each watch, also when the list no longer shows the
 // machine, until the delete returns gone. Then it gets gone with the waits of

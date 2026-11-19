@@ -50,12 +50,11 @@ func instance(id, state, token string) types.Instance {
 }
 
 // TestCreateInput pins every field of the RunInstances input that Create sends: the
-// client token of the dispatch id and the instance type, the subnet and the security group
-// only on the network interface, which has no public address, the IMDSv2 options, the
-// stop on shutdown, the encrypted gp3 root volume of the spec's size, no CpuOptions,
-// and
-// only the tags qory:managed, qory:pool and qory:dispatch_id on the instance and its volume
-// when the spec has no more tags.
+// client token of the dispatch id and the instance type, the subnet and the security
+// group only on the network interface, which has no public address, the IMDSv2 options,
+// the stop on shutdown, the encrypted gp3 root volume of the spec's size, no
+// CpuOptions, and only the tags qory:managed, qory:pool and qory:dispatch_id on the
+// instance and its volume when the spec has no more tags.
 func TestCreateInput(t *testing.T) {
 	spec := testSpec()
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
@@ -119,8 +118,8 @@ func TestCreateInput(t *testing.T) {
 }
 
 // TestCreateTags pins that the tags of the spec follow qory:managed, qory:pool and
-// qory:dispatch_id, sorted by key, on the instance and the volume, in Create's input and in
-// CheckRights' dry run.
+// qory:dispatch_id, sorted by key, on the instance and the volume, in Create's input
+// and in CheckRights' dry run.
 func TestCreateTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": "test", "empty": ""}
@@ -274,7 +273,7 @@ func TestCreateErrorKinds(t *testing.T) {
 		{apiError("VcpuLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit, "Wait, or set subnet_id in aws-ec2.json to a subnet in another zone: RunInstances failed with InsufficientInstanceCapacity in the subnet's zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
 		{apiError("InsufficientFreeAddressesInSubnet"), contracts.FailureLimit, "Wait until machines end, or set subnet_id in aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
-		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report a provisioner defect, unless aws-ec2.json changed since its first make: RunInstances reused a dispatch id with new input (IdempotentParameterMismatch): api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
+		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report a provisioner defect, unless aws-ec2.json changed since the first make of this dispatch id: RunInstances sent it again with new input: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
 		{apiError("IdempotentInstanceTerminated"), contracts.FailureOther, "No action needed: the machine made for this dispatch id is terminated, and EC2 makes no second machine for the dispatch id: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
 		{apiError("RequestLimitExceeded"), contracts.FailureRetry, "If this repeats, check EC2's service health and the account's request rate in this region: RunInstances failed with an error the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, contracts.FailureRetry, "If this repeats, check EC2's service health and the account's request rate in this region: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InternalError: test message for InternalError"},
@@ -421,27 +420,27 @@ func TestFindByToken(t *testing.T) {
 		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: reply}}}, nil
 	}}
 	c := New(f)
-	const key = "dp_0123456789abcdef"
-	_, found, err := c.FindByToken(context.Background(), key)
+	const dispatchID = "dp_0123456789abcdef"
+	_, found, err := c.FindByToken(context.Background(), dispatchID)
 	if err != nil || found {
 		t.Fatalf("no machine: found %v, error %v", found, err)
 	}
 	wantIn := &ec2.DescribeInstancesInput{
-		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{key}}},
+		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{dispatchID}}},
 		MaxResults: aws.Int32(1000),
 	}
 	if !reflect.DeepEqual(f.describes[0], wantIn) {
 		t.Errorf("input %+v, want %+v", f.describes[0], wantIn)
 	}
 
-	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, key), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, key)}
-	m, found, err := c.FindByToken(context.Background(), key)
-	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.DispatchID != key {
+	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, dispatchID), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, dispatchID)}
+	m, found, err := c.FindByToken(context.Background(), dispatchID)
+	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.DispatchID != dispatchID {
 		t.Errorf("machine %+v, found %v, error %v", m, found, err)
 	}
 
 	reply = reply[:1]
-	m, found, err = c.FindByToken(context.Background(), key)
+	m, found, err = c.FindByToken(context.Background(), dispatchID)
 	if err != nil || !found || m.State != StateTerminated {
 		t.Errorf("terminated only: machine %+v, found %v, error %v", m, found, err)
 	}
@@ -449,7 +448,7 @@ func TestFindByToken(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
-	if _, _, err := c.FindByToken(context.Background(), key); kindOf(err) != contracts.FailureRetry {
+	if _, _, err := c.FindByToken(context.Background(), dispatchID); kindOf(err) != contracts.FailureRetry {
 		t.Errorf("error %v, want kind retry", err)
 	}
 }
@@ -472,16 +471,16 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ids, keys []string
+	var ids, dispatchIDs []string
 	for _, m := range ms {
 		ids = append(ids, m.ID)
-		keys = append(keys, m.DispatchID)
+		dispatchIDs = append(dispatchIDs, m.DispatchID)
 	}
 	if want := []string{"i-0aaaaaaaaaaaaaaa0", "i-0bbbbbbbbbbbbbbb0", "i-0ccccccccccccccc0"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("ids %v, want %v", ids, want)
 	}
-	if want := []string{"dp_000000000000000a", "dp_000000000000000b", "dp_000000000000000c"}; !reflect.DeepEqual(keys, want) {
-		t.Errorf("keys %v, want %v", keys, want)
+	if want := []string{"dp_000000000000000a", "dp_000000000000000b", "dp_000000000000000c"}; !reflect.DeepEqual(dispatchIDs, want) {
+		t.Errorf("dispatch ids %v, want %v", dispatchIDs, want)
 	}
 	wantFilters := []types.Filter{
 		{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},

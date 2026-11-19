@@ -51,8 +51,8 @@ type fixture struct {
 func b64(n int) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, n)) }
 
 func fixtures() []fixture {
-	makeReq := func(key, pool, spec, data string) string {
-		return `{"version": 1, "dispatch_id": ` + key + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
+	makeReq := func(dispatchID, pool, spec, data string) string {
+		return `{"version": 1, "dispatch_id": ` + dispatchID + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
 	}
 	// spec is a machine_spec with the vCPUs, memory, disk, architecture and
 	// virtualization written as JSON.
@@ -62,8 +62,8 @@ func fixtures() []fixture {
 	s := spec("2", "4096", "30", `"amd64"`, "false")
 	offers := func(n int) string { return `{"offers": [` + strings.TrimSuffix(strings.Repeat(s+",", n), ",") + `]}` }
 	good := `"` + b64(10) + `"`
-	machine := func(id, key, state, started string) string {
-		return `{"machines": [{"id": ` + id + `, "dispatch_id": ` + key + `, "state": ` + state + `, "started": ` + started + `}]}`
+	machine := func(id, dispatchID, state, started string) string {
+		return `{"machines": [{"id": ` + id + `, "dispatch_id": ` + dispatchID + `, "state": ` + state + `, "started": ` + started + `}]}`
 	}
 	t0 := `"2026-10-22T10:00:00Z"`
 	// both is a fixture that the schema and the decoder accept or refuse alike.
@@ -375,9 +375,9 @@ func TestCheckDispatchID(t *testing.T) {
 	if err := adapterio.CheckDispatchID("dp_0123456789abcdef"); err != nil {
 		t.Error(err)
 	}
-	for _, key := range []string{"", "dp_0123456789abcdeu", "np_0123456789abcdef", "dp_0123456789abcdef0"} {
-		if adapterio.CheckDispatchID(key) == nil {
-			t.Errorf("%q passes", key)
+	for _, dispatchID := range []string{"", "dp_0123456789abcdeu", "np_0123456789abcdef", "dp_0123456789abcdef0"} {
+		if adapterio.CheckDispatchID(dispatchID) == nil {
+			t.Errorf("%q passes", dispatchID)
 		}
 	}
 }

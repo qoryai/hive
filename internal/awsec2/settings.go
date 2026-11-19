@@ -241,7 +241,8 @@ func tags(raw jsontext.Value) (map[string]string, string) {
 	return out, ""
 }
 
-// adapterTag reports whether key is qory:managed, qory:pool or qory:dispatch_id in any case.
+// adapterTag reports whether key is qory:managed, qory:pool or qory:dispatch_id in any
+// case.
 func adapterTag(key string) bool {
 	for _, t := range []string{machine.TagManaged, machine.TagPool, machine.TagDispatchID} {
 		if strings.EqualFold(key, t) {

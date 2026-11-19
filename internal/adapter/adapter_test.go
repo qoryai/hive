@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	testKey  = "dp_0123456789abcdef"
-	testPool = "np_0123456789abcdef"
+	testDispatchID = "dp_0123456789abcdef"
+	testPool       = "np_0123456789abcdef"
 	// marker stands for the run code. No error, argument, stderr line or test output
 	// may contain it.
 	marker = "qecr_MARKERc0ffee7a1b"
@@ -227,7 +227,7 @@ func TestCommands(t *testing.T) {
 		t.Errorf("check: the offers are %+v", offers)
 	}
 
-	made, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
+	made, err := f.r.Make(ctx, testDispatchID, testPool, testSpec, startData)
 	check("make", err)
 	if made.ID != "i-00000000000000001" || made.MachineType != "example-type" || !f.report(t).StartDataMatch {
 		t.Errorf("make: the answer is %+v, the start data arrived intact: %v", made, f.report(t).StartDataMatch)
@@ -235,7 +235,7 @@ func TestCommands(t *testing.T) {
 
 	list, err := f.r.List(ctx, testPool)
 	check("list", err)
-	if len(list.Machines) != 1 || list.Machines[0].DispatchID != testKey || list.Machines[0].State != contracts.MachineRunning {
+	if len(list.Machines) != 1 || list.Machines[0].DispatchID != testDispatchID || list.Machines[0].State != contracts.MachineRunning {
 		t.Errorf("list: %+v", list)
 	}
 
@@ -266,7 +266,7 @@ func TestCommands(t *testing.T) {
 // a line feed.
 func TestStderrFiltered(t *testing.T) {
 	f := newFixture(t, config{Mode: "stderr"})
-	if _, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData); err != nil {
+	if _, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData); err != nil {
 		t.Fatal(err)
 	}
 	want := "fake adapter: make ran\n" +
@@ -286,7 +286,7 @@ func TestStderrFiltered(t *testing.T) {
 
 func TestErrorDocument(t *testing.T) {
 	f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."})
-	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+	_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 	var e *Error
 	if !errors.As(err, &e) || *e != (Error{Command: "make", Kind: contracts.FailureLimit, Message: "Raise the instance quota of the account."}) {
 		t.Fatalf("the error is %v", err)
@@ -300,7 +300,7 @@ func TestErrorMessageWithSecret(t *testing.T) {
 	// The fake adapter's Serve replaces such a message before the runner reads it.
 	for _, msg := range []string{"echo", "echo64", "Check the code qecr_abc"} {
 		f := newFixture(t, config{Mode: "fail", Kind: contracts.FailureOther, Message: msg})
-		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+		_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 		defect(t, err, "make", "Fix the machine adapter: its error message for make contains what looks like a run code or the start data, so the machine adapter wrote this message in its place")
 	}
 	// The runner replaces it when the adapter writes it: the start data, raw (as a
@@ -312,7 +312,7 @@ func TestErrorMessageWithSecret(t *testing.T) {
 	enc := base64.StdEncoding.EncodeToString(startData)
 	for _, part := range []string{string(raw[1 : len(raw)-1]), enc, "QECR_abc", enc[:80], enc[1:60], enc[2:50], enc[3:45], enc[21:52], enc[100:116], "MARKERc0ffee7a1b"} {
 		f := newFixture(t, config{Mode: "raw", Status: 1, Stdout: `{"error": {"kind": "other", "message": "Check the start data ` + part + `"}}`})
-		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+		_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 		defect(t, err, "make", want)
 	}
 }
@@ -343,7 +343,7 @@ func TestDefects(t *testing.T) {
 	}
 	for _, c := range cases {
 		f := newFixture(t, config{Mode: "raw", Stdout: c.stdout, Status: c.status})
-		_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+		_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 		defect(t, err, "make", c.prefix)
 	}
 }
@@ -361,7 +361,7 @@ func TestNotStarted(t *testing.T) {
 func TestOutputBound(t *testing.T) {
 	f := newFixture(t, config{Mode: "flood"})
 	start := time.Now()
-	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+	_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 	defect(t, err, "make", "Fix the machine adapter: it wrote more than 1048576 bytes on standard output for make, so the provisioner killed its process group")
 	if time.Since(start) > 30*time.Second {
 		t.Errorf("the runner took %s to stop the adapter", time.Since(start))
@@ -382,7 +382,7 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 	f := newFixture(t, config{Mode: "hang"})
 	// The limit leaves the fake adapter time to start its child under load.
 	f.r.timeout = func(string) time.Duration { return 2 * time.Second }
-	_, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+	_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 	defect(t, err, "make", "Fix the machine adapter: make ran longer than its time limit of 2s, so the provisioner killed its process group")
 	f.gone(t)
 }
@@ -430,7 +430,7 @@ func TestChildOutlivesSuccess(t *testing.T) {
 func TestAnswerWithOutputLeftOpen(t *testing.T) {
 	f := newFixture(t, config{Mode: "daemon", Stdout: `{"id": "i-0123456789abcdef0"}`})
 	f.r.waitDelay = 300 * time.Millisecond
-	made, err := f.r.Make(context.Background(), testKey, testPool, testSpec, startData)
+	made, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 	if err != nil || made.ID != "i-0123456789abcdef0" {
 		t.Errorf("make returned %+v, %v", made, err)
 	}
@@ -450,7 +450,7 @@ func TestInvalidRequest(t *testing.T) {
 	if _, err := os.Stat(f.cfg.Report); err == nil {
 		t.Error("the runner started the adapter with an invalid request")
 	}
-	_, err = f.r.Make(context.Background(), testKey, testPool, testSpec, make([]byte, contracts.MaxStartData+1))
+	_, err = f.r.Make(context.Background(), testDispatchID, testPool, testSpec, make([]byte, contracts.MaxStartData+1))
 	if err == nil || !strings.HasSuffix(err.Error(), "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero") {
 		t.Errorf("the error is %v", err)
 	}
@@ -467,15 +467,16 @@ func TestCancelledBeforeStart(t *testing.T) {
 }
 
 // TestFakeRules checks the rules of the protocol that the fake adapter follows: one
-// machine per dispatch id, gone for an unknown id, and defect for a spec that nothing fits.
+// machine per dispatch id, gone for an unknown id, and defect for a spec that nothing
+// fits.
 func TestFakeRules(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, config{Mode: "serve"})
-	first, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
+	first, err := f.r.Make(ctx, testDispatchID, testPool, testSpec, startData)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := f.r.Make(ctx, testKey, testPool, testSpec, startData)
+	again, err := f.r.Make(ctx, testDispatchID, testPool, testSpec, startData)
 	if err != nil || again != first {
 		t.Errorf("a second make with the same dispatch id returned %+v, %v; want %+v", again, err, first)
 	}
