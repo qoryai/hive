@@ -60,7 +60,7 @@ var (
 	// ErrUnreachable is no answer from Qory Apiary after every try.
 	ErrUnreachable = errors.New("no answer from Qory Apiary")
 	// ErrAnswerUnusable is a signed answer within its bound that breaks the contract: a
-	// success status the request does not have, a body that is not one JSON document or
+	// success status the request does not have, a body that is not one JSON object or
 	// fails its schema, a must_understand that lists a member the client does not define,
 	// or another revision than the one sent. Nothing in it is used.
 	// The request is not sent again, since Qory Apiary acted on it.

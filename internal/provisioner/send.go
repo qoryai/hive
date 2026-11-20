@@ -250,33 +250,32 @@ func readLimited(r io.Reader, length, limit int64) (b []byte, tooLarge bool, err
 	return nil, false, err
 }
 
-// errNotOneDocument is a body that is not one JSON document with valid UTF-8 and no
-// member twice.
-var errNotOneDocument = errors.New("it is not one JSON document with valid UTF-8 and no member twice")
+// errNotObject is a body that is not one JSON object with valid UTF-8 and no member
+// twice.
+var errNotObject = errors.New("it is not one JSON object with valid UTF-8 and no member twice")
 
-// errMustUnderstand is a body whose must_understand lists a member that the client does
-// not define, or is not a list of JSON Pointers. Its text has no pointer, which is a value
-// of the body.
-var errMustUnderstand = errors.New("its must_understand lists a member that this client does not read, or is not a list of JSON Pointers")
+// errMustUnderstand is a body whose must_understand lists a pointer to a member that the
+// client does not define, or is not a list of valid JSON Pointers. Its text has no
+// pointer, which is a value of the body.
+var errMustUnderstand = errors.New("its must_understand lists a pointer to a member that this client does not read, or is not a list of valid JSON Pointers")
 
 // updateFix starts the error of a signed answer whose must_understand the client cannot
 // meet.
 const updateFix = "update the provisioner to a version that reads this Qory Apiary's answers: "
 
 // readAnswer reads body, a signed answer's, into out, a pointer to a struct of the
-// contracts package: one JSON document with valid UTF-8 and no member twice in any
+// contracts package: one JSON object with valid UTF-8 and no member twice in any
 // object, whose must_understand lists only members that out defines
 // ([contracts.CheckMustUnderstand]), and which passes the schema name of provisioner/v1.
 // A member that out does not define is ignored, and a member is matched by its exact
-// name. Its error contains the schema, never a
-// value of body.
+// name. Its error contains the schema, never a value of body.
 //
 // With the pinned schemas, the pattern of must_understand also rejects such a body. The
 // call is the contract's reader step and insurance for a later pin whose schema lists a
 // pointer that out does not define.
 func readAnswer(name string, body []byte, out any) error {
-	if !jsontext.Value(body).IsValid() {
-		return errNotOneDocument
+	if v := jsontext.Value(body); !v.IsValid() || v.Kind() != '{' {
+		return errNotObject
 	}
 	if contracts.CheckMustUnderstand(body, out) != nil {
 		return errMustUnderstand

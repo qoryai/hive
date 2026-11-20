@@ -105,7 +105,7 @@ func readClaim(body []byte) (Claimed, error) {
 	const name = "claim-answer.schema.json"
 	broken := fmt.Errorf("it fails %s", name)
 	if !jsontext.Value(body).IsValid() {
-		return Claimed{}, errNotOneDocument
+		return Claimed{}, errNotObject
 	}
 	start, end, ok := memberSpan(body, "run_code")
 	if !ok {
