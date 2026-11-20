@@ -120,6 +120,31 @@ func TestTheFakeChecksRequestsInOrder(t *testing.T) {
 	}
 }
 
+// TestTheFakeRefusesEachClosedRequestFixture posts the contract's closed request fixtures,
+// each with a member that the schema does not define, to its route: each gets the signed
+// 400 invalid_request, because the fake validates against the closed copy of the schema.
+func TestTheFakeRefusesEachClosedRequestFixture(t *testing.T) {
+	s := provisionertest.New(t)
+	for _, c := range []struct{ name, path string }{
+		{"claim-undefined-member", "/v1/pools/claim"},
+		{"claim-offers-undefined-member", "/v1/pools/claim"},
+		{"dispatched-undefined-member", "/v1/dispatches/dp_0000000000000000/dispatched"},
+		{"dispatched-external-undefined-member", "/v1/dispatches/dp_0000000000000000/dispatched"},
+		{"release-with-retry", "/v1/dispatches/dp_0000000000000000/release"},
+		{"machine-log-undefined-member", "/v1/dispatches/dp_0000000000000000/machine-log"},
+		{"machine-end-undefined-member", "/v1/dispatches/dp_0000000000000000/machine-end"},
+	} {
+		body, err := fs.ReadFile(contracts.ProvisionerFS, "fixtures/closed/"+c.name+".json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, signed, got := post(t, s, s.Pool, c.path, body, nil)
+		if status != 400 || !signed || !strings.Contains(got, `"invalid_request"`) {
+			t.Errorf("%s: %d signed %v %s", c.name, status, signed, got)
+		}
+	}
+}
+
 // TestTheFakeRefusesEachInvalidRequestFixture posts each of the contract's invalid
 // request fixtures of dispatched, release, machine-log and machine-end to its route: each gets the
 // signed 400 invalid_request, before the fake looks up the dispatch.
