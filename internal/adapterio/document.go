@@ -20,10 +20,10 @@ import (
 
 // The rules that a document fails beyond a schema's rules.
 var (
-	errNotObject = errors.New("the document must be one JSON object in UTF-8, with no member name twice")
-	errUnknown   = errors.New("the document has a member that version 1 does not define")
-	errStartData = fmt.Errorf("the member start_data must be standard base64 of 1 to %d bytes, with padding bits of zero", contracts.MaxStartData)
-	errLog       = fmt.Errorf("the member log must be at most %d bytes of UTF-8", MaxLog)
+	errNotObject      = errors.New("the document must be one JSON object in UTF-8, with no member name twice")
+	errMustUnderstand = errors.New("the member must_understand lists a pointer that version 1 does not define, or is not a list")
+	errStartData      = fmt.Errorf("the member start_data must be standard base64 of 1 to %d bytes, with padding bits of zero", contracts.MaxStartData)
+	errLog            = fmt.Errorf("the member log must be at most %d bytes of UTF-8", MaxLog)
 )
 
 // The schema files of machines/v1, in contracts.MachinesFS.
@@ -46,28 +46,29 @@ const (
 const dispatchIDDefinition = "definitions.schema.json#/$defs/dispatch_id"
 
 // compiled are the schemas of machines/v1 by file name, and the definition of a
-// dispatch id.
+// dispatch id. A reader checks a document against the open schemas, which accept a
+// member that the contract does not define. [Encode], the writer, checks against the
+// closed copies, which refuse such a member.
 type compiled struct {
-	files      map[string]*jsonschema.Schema
+	open       map[string]*jsonschema.Schema
+	closed     map[string]*jsonschema.Schema
 	dispatchID *jsonschema.Schema
 }
 
-// schemas compiles the schemas once, as the closed copies of machines/v1: a document with
-// a member that the schema does not define fails the check.
-//
-// shortcut: the machines/v1 readers stay strict, and no must_understand check exists in
-// them, although the CHANGELOG [Unreleased] of the pinned integrations module asks every
-// reader to ignore an undefined member unless must_understand lists it; replace it when
-// the function check in document.go reads with the open schemas and calls
-// contracts.CheckMustUnderstand.
+// schemas compiles the schemas once.
 var schemas = sync.OnceValues(func() (compiled, error) {
-	c := compiled{files: map[string]*jsonschema.Schema{}}
+	c := compiled{open: map[string]*jsonschema.Schema{}, closed: map[string]*jsonschema.Schema{}}
 	for _, f := range []string{checkFile, checkAnswerFile, makeFile, makeAnswerFile, listFile, listAnswerFile, logFile, logAnswerFile, deleteFile, deleteAnswerFile, errorFile} {
-		s, err := contracts.CompileMachinesClosed(f)
+		s, err := contracts.CompileMachines(f)
 		if err != nil {
 			return compiled{}, fmt.Errorf("the schema machines/v1 %s does not compile: %w", f, err)
 		}
-		c.files[f] = s
+		c.open[f] = s
+		s, err = contracts.CompileMachinesClosed(f)
+		if err != nil {
+			return compiled{}, fmt.Errorf("the closed schema machines/v1 %s does not compile: %w", f, err)
+		}
+		c.closed[f] = s
 	}
 	s, err := contracts.CompileProvisioner(dispatchIDDefinition)
 	if err != nil {
@@ -77,12 +78,21 @@ var schemas = sync.OnceValues(func() (compiled, error) {
 	return c, nil
 })
 
-// check returns the first rule that b fails: one JSON object in UTF-8 with no member
-// name twice, then the schema file of machines/v1.
-func check(file string, b []byte) error {
-	v := jsontext.Value(b)
-	if !v.IsValid() || v.Kind() != '{' {
+// checkObject returns errNotObject unless b is one JSON object in UTF-8 with no member
+// name twice.
+func checkObject(b []byte) error {
+	if v := jsontext.Value(b); !v.IsValid() || v.Kind() != '{' {
 		return errNotObject
+	}
+	return nil
+}
+
+// check returns the first rule that b fails: one JSON object in UTF-8 with no member
+// name twice, then the schema file of machines/v1, in its closed copy when closed is
+// true and otherwise in its open form.
+func check(file string, b []byte, closed bool) error {
+	if err := checkObject(b); err != nil {
+		return err
 	}
 	c, err := schemas()
 	if err != nil {
@@ -92,7 +102,11 @@ func check(file string, b []byte) error {
 	if err != nil {
 		return errNotObject
 	}
-	err = c.files[file].Validate(doc)
+	files := c.open
+	if closed {
+		files = c.closed
+	}
+	err = files[file].Validate(doc)
 	var failed *jsonschema.ValidationError
 	if errors.As(err, &failed) {
 		return rule(file, failed)
@@ -128,11 +142,6 @@ func rule(file string, e *jsonschema.ValidationError) error {
 		return fmt.Errorf("the member %s has a value that the rule not of machines/v1 %s refuses", at, file)
 	case *kind.Required:
 		return fmt.Errorf("the member %s is missing", place(append(slices.Clone(e.InstanceLocation), k.Missing[0])))
-	case *kind.AdditionalProperties:
-		if at == "" {
-			return errUnknown
-		}
-		return fmt.Errorf("%s: %w", at, errUnknown)
 	case *kind.Type:
 		return fmt.Errorf("the member %s must be %s", at, oneOf(k.Want, typeName))
 	case *kind.Const:
@@ -209,10 +218,20 @@ var wholeNumbers = json.WithUnmarshalers(json.UnmarshalFromFunc(func(dec *jsonte
 	return nil
 }))
 
-// decode checks b against the schema file and reads it into a T.
+// decode reads b into a T. It ignores a member that the schema file does not define,
+// unless the must_understand of b lists it. It returns an error when b is not one JSON
+// object, when its must_understand lists a pointer that T does not define
+// ([contracts.CheckMustUnderstand]), or when a member that the schema defines fails the
+// schema.
 func decode[T any](file string, b []byte) (T, error) {
 	var v T
-	if err := check(file, b); err != nil {
+	if err := checkObject(b); err != nil {
+		return v, err
+	}
+	if contracts.CheckMustUnderstand(b, &v) != nil {
+		return v, errMustUnderstand
+	}
+	if err := check(file, b, false); err != nil {
 		return v, err
 	}
 	if err := json.Unmarshal(b, &v, wholeNumbers); err != nil {
@@ -293,7 +312,7 @@ func Encode(doc any) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("the document cannot be written as JSON in UTF-8")
 	}
-	if err := check(file, b); err != nil {
+	if err := check(file, b, true); err != nil {
 		return nil, err
 	}
 	if err := extra(); err != nil {

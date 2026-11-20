@@ -82,6 +82,9 @@ func TestEncodeRefusesInvalid(t *testing.T) {
 		contracts.MachinesError{Error: contracts.MachinesFailure{Kind: "fatal", Message: "m"}},
 		contracts.MachinesError{Error: contracts.MachinesFailure{Kind: contracts.FailureOther, Message: strings.Repeat("m", adapterio.MaxMessage+1)}},
 		&contracts.MachinesCheck{Version: 1},
+		// Encode writes a document that a reader may ignore a member of, and never one
+		// whose must_understand lists a member that the contract does not define.
+		contracts.MachinesCheck{Version: 1, MustUnderstand: []string{"/extra"}},
 	} {
 		if b, err := adapterio.Encode(doc); err == nil {
 			t.Errorf("%#v encoded as %s", doc, b)
