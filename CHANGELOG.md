@@ -219,7 +219,12 @@ The changes to Hive that no release contains yet, in the shape of
   again. A refusal whose `must_understand` lists such a pointer is read by its status
   alone, as a refusal with no readable body is. A `409 lease_expired` that the
   provisioner cannot read changes nothing, and the next watch sends `dispatched` again.
-  The documents of `contracts/machines/v1` are still read strictly.
+  The machine adapter and the provisioner read the documents of `contracts/machines/v1`
+  by the same rule. A request, an answer or an error document with a member that the
+  contract does not define is read without it, unless its `must_understand` lists it.
+  Until this change, such a member failed the document. When `must_understand` lists a
+  pointer to a member that the reader does not define, the reader fails with kind
+  `defect`. The writers still refuse a member that the contract does not define.
 
 ### Removed
 

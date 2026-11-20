@@ -90,9 +90,16 @@ Pointers ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)), counted from the
 document's top level. When `must_understand` lists a pointer to a member that `serve`
 does not read, `serve` uses nothing in an answer to a claim, and reads a refusal by its
 status alone. A `409 lease_expired` that `serve` cannot read changes nothing: `serve`
-sends `dispatched` again at the next watch. The documents of `contracts/machines/v1`
-between the provisioner and the machine adapter are still read strictly: a member that
-the contract does not define fails the document.
+sends `dispatched` again at the next watch.
+
+The machine adapter and the provisioner read the documents of `contracts/machines/v1` by
+the same rule. The adapter reads each request, and the provisioner reads each answer and
+each error document. A document with a member that the contract does not define is read
+without it, unless its `must_understand` lists it. When `must_understand` lists a pointer
+to a member that the reader does not define, the reader fails with kind `defect`: the
+adapter writes an error document and exits with status 1, and the provisioner treats the
+adapter's answer as a failure of kind `defect`. A document that has data after its one
+JSON object, or a known member of the wrong type, fails the same way.
 
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
