@@ -933,8 +933,11 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 			t.Errorf("a claim with %s: %v", name, err)
 			continue
 		}
-		if strings.Contains(name, "pointer") && !strings.HasPrefix(err.Error(), "update the provisioner to a version that reads this Qory Apiary's answers: ") {
-			t.Errorf("a claim with %s: the error does not start with the fix: %v", name, err)
+		// Only an answer whose must_understand the client cannot meet starts with the
+		// update; any other answer that breaks the contract does not.
+		wantFix := strings.Contains(name, "pointer") || strings.Contains(name, "must_understand")
+		if strings.HasPrefix(err.Error(), updateText) != wantFix {
+			t.Errorf("a claim with %s: the error starts with the update: %t, want %t: %v", name, !wantFix, wantFix, err)
 		}
 		if text := strings.ToLower(err.Error() + log.String()); strings.Contains(text, "ticket") || strings.Contains(text, "qecr_") {
 			t.Errorf("a claim with %s: the error or the log quotes a value: %v", name, err)
@@ -983,6 +986,79 @@ func TestAnAnswerIgnoresWhatItDoesNotDefine(t *testing.T) {
 	}
 }
 
+// updateText starts the error of an answer or a refusal whose must_understand the client
+// cannot meet.
+const updateText = "update the provisioner to a version that reads this Qory Apiary's answers: "
+
+// TestARefusalThatIsNotAnObjectIsReadByItsStatus sends a signed 409 whose body is a JSON
+// value that is not an object: the client reads the status alone, with the text of a
+// refusal that has no readable body, and never says that a must_understand is unmet.
+func TestARefusalThatIsNotAnObjectIsReadByItsStatus(t *testing.T) {
+	for _, body := range []string{`[]`, `null`, `"lease_expired"`, `7`, `[{"error":"lease_expired"}]`} {
+		srv, c, _, _ := setup(t)
+		cl := claimed(t, srv, c, provisionertest.Work{})
+		cl.RunCode.Clear()
+		srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: 409, Body: body})
+		err := c.Dispatched(context.Background(), cl.DispatchID, nil, "")
+		var r *provisioner.Refusal
+		if !errors.As(err, &r) || r.Status != 409 || !r.Signed || r.Code != "" || errors.Is(err, provisioner.ErrLeaseExpired) {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		if want := "dispatched for " + cl.DispatchID + ": Qory Apiary returned 409"; err.Error() != want {
+			t.Errorf("%s: the error is %q, want %q", body, err.Error(), want)
+		}
+	}
+}
+
+// TestAnUnmetPointerInAnotherRefusalIsReadByItsStatus sends signed refusals with a
+// must_understand that lists a pointer the client does not define, for the statuses 403,
+// 410 and 429: each has its status, no code, and matches no code of the contract, so the
+// loop sees no sentinel. A 429 keeps the wait of its Retry-After. A machine end still
+// stops on a signed 400, 403 or 404 by status alone.
+func TestAnUnmetPointerInAnotherRefusalIsReadByItsStatus(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		code   string
+		target error
+	}{
+		{403, "forbidden", provisioner.ErrForbidden},
+		{410, "gone", provisioner.ErrGone},
+		{429, "rate_limited", provisioner.ErrRateLimited},
+	} {
+		srv, cl, _, _ := setup(t)
+		got := claimed(t, srv, cl, provisionertest.Work{})
+		got.RunCode.Clear()
+		body := `{"error":"` + c.code + `","extra":1,"must_understand":["/extra"]}`
+		srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: c.status, Body: body, RetryAfter: "7"})
+		err := cl.Dispatched(context.Background(), got.DispatchID, nil, "")
+		var r *provisioner.Refusal
+		if !errors.As(err, &r) || r.Status != c.status || !r.Signed || r.Code != "" || errors.Is(err, c.target) || errors.Is(err, provisioner.ErrAnswerUnusable) {
+			t.Errorf("%d: %v", c.status, err)
+			continue
+		}
+		if !strings.HasPrefix(err.Error(), updateText) {
+			t.Errorf("%d: the error does not start with the fix: %v", c.status, err)
+		}
+		if want := 7 * time.Second; c.status == 429 && r.RetryAfter != want {
+			t.Errorf("429: the wait is %s, want %s", r.RetryAfter, want)
+		}
+		if c.status != 429 && r.RetryAfter != 0 {
+			t.Errorf("%d: the wait is %s, want none", c.status, r.RetryAfter)
+		}
+	}
+	for _, status := range []int{400, 403, 404} {
+		srv, cl, _, _ := setup(t)
+		got := claimed(t, srv, cl, provisionertest.Work{})
+		got.RunCode.Clear()
+		srv.Script(provisionertest.RouteMachineEnd, provisionertest.Reply{Status: status, Body: `{"error":"forbidden","extra":1,"must_understand":["/extra"]}`})
+		err := cl.MachineEnd(context.Background(), got.DispatchID, contracts.MachineEndGone)
+		if !errors.Is(err, provisioner.ErrMachineEndStopped) || errors.Is(err, provisioner.ErrForbidden) {
+			t.Errorf("a machine end with %d: %v", status, err)
+		}
+	}
+}
+
 // TestARefusalIsReadByTheExactNameOfItsCode sends a signed 410 whose body has error and
 // also Error, a member that the contract does not define: the code is the one of error.
 func TestARefusalIsReadByTheExactNameOfItsCode(t *testing.T) {
@@ -1021,7 +1097,7 @@ func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
 		if !errors.As(err, &r) || r.Status != 409 || !r.Signed || r.Code != "" || errors.Is(err, provisioner.ErrLeaseExpired) || errors.Is(err, provisioner.ErrAnswerUnusable) {
 			t.Errorf("%s: %v", name, err)
 		}
-		if err != nil && !strings.HasPrefix(err.Error(), "update the provisioner to a version that reads this Qory Apiary's answers: ") {
+		if err != nil && !strings.HasPrefix(err.Error(), updateText) {
 			t.Errorf("%s: the error does not start with the fix: %v", name, err)
 		}
 		if err := c.Dispatched(context.Background(), cl.DispatchID, nil, ""); err != nil {
