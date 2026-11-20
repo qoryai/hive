@@ -21,7 +21,7 @@ import (
 // The rules that a document fails beyond a schema's rules.
 var (
 	errNotObject      = errors.New("the document must be one JSON object in UTF-8, with no member name twice")
-	errMustUnderstand = errors.New("the member must_understand lists a pointer that version 1 does not define, or is not a list")
+	errMustUnderstand = errors.New("must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers")
 	errStartData      = fmt.Errorf("the member start_data must be standard base64 of 1 to %d bytes, with padding bits of zero", contracts.MaxStartData)
 	errLog            = fmt.Errorf("the member log must be at most %d bytes of UTF-8", MaxLog)
 )
@@ -87,13 +87,10 @@ func checkObject(b []byte) error {
 	return nil
 }
 
-// check returns the first rule that b fails: one JSON object in UTF-8 with no member
-// name twice, then the schema file of machines/v1, in its closed copy when closed is
-// true and otherwise in its open form.
+// check returns the first rule of the schema file of machines/v1 that b fails, in its
+// closed copy when closed is true and otherwise in its open form. The caller has
+// checked that b is one JSON object ([checkObject]); [Encode] marshals one.
 func check(file string, b []byte, closed bool) error {
-	if err := checkObject(b); err != nil {
-		return err
-	}
 	c, err := schemas()
 	if err != nil {
 		return err
@@ -159,6 +156,11 @@ func rule(file string, e *jsonschema.ValidationError) error {
 		return fmt.Errorf("the member %s must have at most %d characters", at, k.Want)
 	case *kind.Format:
 		return fmt.Errorf("the member %s must be in the format %s", at, k.Want)
+	}
+	// The closed copies that Encode uses reach this line for a member that a contract
+	// type has and its schema does not define; at is then empty or names the parent.
+	if at == "" {
+		return fmt.Errorf("the document fails a rule of machines/v1 %s", file)
 	}
 	return fmt.Errorf("the member %s fails a rule of machines/v1 %s", at, file)
 }
