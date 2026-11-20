@@ -116,6 +116,47 @@ func TestTheRunCodeIsReadFromTheBytes(t *testing.T) {
 	}
 }
 
+// TestAClaimIgnoresMembersItDoesNotDefine reads a claim with members the contract does
+// not define, at the top and in the machine spec, and with a must_understand that lists
+// defined members: the claim is read as it is without them.
+func TestAClaimIgnoresMembersItDoesNotDefine(t *testing.T) {
+	d := aClaim()
+	d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d"
+	d["target"] = map[string]any{"system": "code.example.com", "path": "acme/shop"}
+	d["machine_spec"].(map[string]any)["size"] = "small"
+	d["must_understand"] = []string{"/run_code", "/machine_spec", "/machine_spec/arch"}
+	cl, err := readClaim(marshal(t, d))
+	if err != nil || cl.DispatchID != "dp_8w3k0q9t2v7m4r6x" || cl.RunCode.Len() != len(testCode) || cl.MachineSpec == nil || cl.MachineSpec.Arch != "amd64" {
+		t.Errorf("got %+v, %v", cl, err)
+	}
+}
+
+// TestAClaimWithAnUnmetPointerIsRefused reads claims whose must_understand lists a
+// member the client does not define, at any place, or is not a list of JSON Pointers:
+// each fails with the one text for it, which has no pointer, and has no run code.
+func TestAClaimWithAnUnmetPointerIsRefused(t *testing.T) {
+	for name, must := range map[string]any{
+		"a member at the top":        []string{"/run_id"},
+		"a member after a defined":   []string{"/run_code", "/run_id"},
+		"a member of the spec":       []string{"/machine_spec/size"},
+		"a member of a defined type": []string{"/run_code/x"},
+		"the list itself":            []string{"/must_understand"},
+		"null":                       nil,
+		"a string":                   "/run_code",
+		"no leading slash":           []string{"run_code"},
+		"a repeat":                   []string{"/run_code", "/run_code"},
+	} {
+		d := aClaim()
+		d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d"
+		d["machine_spec"].(map[string]any)["size"] = "small"
+		d["must_understand"] = must
+		cl, err := readClaim(marshal(t, d))
+		if err != errMustUnderstand || cl.RunCode.Len() != 0 {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
 // TestARunCodeOutsideItsShapeIsRefused reads claims whose run code is outside its form
 // once unescaped, is not a string, or is missing: each is an error that quotes none of
 // it. A run code with two fingerprints is read.

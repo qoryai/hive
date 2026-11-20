@@ -68,6 +68,7 @@ func TestNoSecretLeaks(t *testing.T) {
 
 	for _, edit := range []func(map[string]any){
 		func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
+		func(d map[string]any) { d["extra"] = markerCode; d["must_understand"] = []string{"/extra"} },
 		func(d map[string]any) { d["machine"] = markerCode },
 		func(d map[string]any) { d["run_code"] = strings.ToLower(markerCode) },
 		func(d map[string]any) { d["run_code"] = markerCode + "!" },
@@ -75,6 +76,8 @@ func TestNoSecretLeaks(t *testing.T) {
 		func(d map[string]any) {
 			d["gateway_url"] = "https://" + strings.ToLower(markerCode[:31]) + ".example.com"
 		},
+		func(d map[string]any) { d["run_key"] = markerKey; d["must_understand"] = []string{"/run_key"} },
+		func(d map[string]any) { d["must_understand"] = []string{"/" + markerCode} },
 	} {
 		srv.Offer(work)
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Edit: edit})

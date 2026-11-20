@@ -253,12 +253,23 @@ func readLimited(r io.Reader, length, limit int64) (b []byte, tooLarge bool, err
 // member twice.
 var errNotOneDocument = errors.New("it is not one JSON document with valid UTF-8 and no member twice")
 
-// readAnswer reads body, a signed answer's, into out: one JSON document with valid
-// UTF-8 and no member twice in any object, which passes the schema name of
-// provisioner/v1. Its error contains the schema, never a value of body.
+// errMustUnderstand is a body whose must_understand lists a member that the client does
+// not define, or is not a list of JSON Pointers. Its text has no pointer, which is a value
+// of the body.
+var errMustUnderstand = errors.New("its must_understand lists a member that this client does not read, or is not a list of JSON Pointers")
+
+// readAnswer reads body, a signed answer's, into out, a pointer to a struct of the
+// contracts package: one JSON document with valid UTF-8 and no member twice in any
+// object, whose must_understand lists only members that out defines
+// ([contracts.CheckMustUnderstand]), and which passes the schema name of provisioner/v1.
+// A member that out does not define is ignored. Its error contains the schema, never a
+// value of body.
 func readAnswer(name string, body []byte, out any) error {
 	if !jsontext.Value(body).IsValid() {
 		return errNotOneDocument
+	}
+	if contracts.CheckMustUnderstand(body, out) != nil {
+		return errMustUnderstand
 	}
 	s, err := schema(name)
 	if err != nil {

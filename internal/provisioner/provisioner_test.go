@@ -895,14 +895,25 @@ func TestARetryAfterIsBounded(t *testing.T) {
 }
 
 // TestAnAnswerThatBreaksTheContractIsNotUsed sends a claim signed 200s that break the
-// contract: another revision, a run code outside its form or missing, a gateway URL that contains a run code's prefix, a member twice;
+// contract: another revision, a must_understand that lists a member the client does not
+// define, a run code outside its form or missing, a gateway URL that contains a run
+// code's prefix, a member twice;
 // and dispatched, a release and a machine log a signed 200. Each is ErrAnswerUnusable
 // after one try, and its text quotes no value.
 func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 	edits := map[string]func(map[string]any){
-		"revision 0":                 func(d map[string]any) { d["revision"] = 0 },
-		"the next revision":          func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
-		"a revision after the next":  func(d map[string]any) { d["revision"] = provisioner.Revision + 2 },
+		"revision 0":                func(d map[string]any) { d["revision"] = 0 },
+		"the next revision":         func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
+		"a revision after the next": func(d map[string]any) { d["revision"] = provisioner.Revision + 2 },
+		"an unmet pointer": func(d map[string]any) {
+			d["extra"] = "the title of the ticket"
+			d["must_understand"] = []string{"/extra"}
+		},
+		"an unmet pointer, deeper": func(d map[string]any) {
+			d["machine_spec"].(map[string]any)["size"] = 1
+			d["must_understand"] = []string{"/run_code", "/machine_spec/size"}
+		},
+		"a must_understand of null":  func(d map[string]any) { d["must_understand"] = nil },
 		"a run code's shape":         func(d map[string]any) { d["run_code"] = d["run_code"].(string) + "!" },
 		"no run code":                func(d map[string]any) { delete(d, "run_code") },
 		"a number as run code":       func(d map[string]any) { d["run_code"] = 7 },
@@ -914,7 +925,8 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 	}
 	for name, edit := range edits {
 		srv, c, _, log := setup(t)
-		srv.Offer(provisionertest.Work{})
+		spec := contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64"}
+		srv.Offer(provisionertest.Work{Machine: "small", MachineSpec: &spec})
 		srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Edit: edit})
 		cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
 		if !errors.Is(err, provisioner.ErrAnswerUnusable) || ok || cl.RunCode.Len() != 0 || len(srv.Calls()) != 1 {
@@ -940,6 +952,62 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 		srv.Script(route, provisionertest.Reply{Status: 200, Body: `{}`})
 		if err := send(c, route, cl); !errors.Is(err, provisioner.ErrAnswerUnusable) {
 			t.Errorf("a 200 to %s: %v", route, err)
+		}
+	}
+}
+
+// TestAnAnswerIgnoresWhatItDoesNotDefine sends a claim's 200 with members the contract
+// does not define, at the top and in the machine spec, with must_understand listing only
+// defined members, and a signed 409 no_gateway with an undefined member: the client
+// uses the claim and matches the refusal.
+func TestAnAnswerIgnoresWhatItDoesNotDefine(t *testing.T) {
+	srv, c, _, _ := setup(t)
+	spec := contracts.MachineSpec{VCPUs: 2, MemoryMiB: 4096, DiskGiB: 30, Arch: "amd64"}
+	srv.Offer(provisionertest.Work{Machine: "small", MachineSpec: &spec})
+	srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Edit: func(d map[string]any) {
+		d["extra"] = "an example value"
+		d["machine_spec"].(map[string]any)["size"] = "small"
+		d["must_understand"] = []string{"/run_code", "/machine_spec/vcpus"}
+	}})
+	cl, ok, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil)
+	if err != nil || !ok || cl.RunCode.Len() == 0 || cl.MachineSpec == nil {
+		t.Errorf("a claim with undefined members: %v %v", ok, err)
+	}
+	cl.RunCode.Clear()
+	srv.Script(provisionertest.RouteClaim, provisionertest.Reply{Status: 409, Body: `{"error":"no_gateway","extra":1,"must_understand":["/error"]}`})
+	if _, _, err := c.Claim(context.Background(), provisioner.MaxWaitSeconds, nil); !errors.Is(err, provisioner.ErrNoGateway) {
+		t.Errorf("a refusal with an undefined member: %v", err)
+	}
+}
+
+// TestARefusalWithAnUnmetPointerIsReadByItsStatus sends a signed 409 lease_expired to a
+// dispatched whose must_understand lists a member the client does not define, or is not
+// a list. The client reads the status alone: the refusal has status 409 and no code,
+// matches no code of the contract, and the dispatch keeps its state, so the next
+// dispatched is sent again and gets its 204.
+func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
+	for name, body := range map[string]string{
+		"an undefined member":           `{"error":"lease_expired","extra":1,"must_understand":["/extra"]}`,
+		"a pointer after a defined one": `{"error":"lease_expired","must_understand":["/error","/extra"]}`,
+		"not a list":                    `{"error":"lease_expired","must_understand":"/error"}`,
+	} {
+		srv, c, _, _ := setup(t)
+		cl := claimed(t, srv, c, provisionertest.Work{})
+		cl.RunCode.Clear()
+		srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: 409, Body: body})
+		err := c.Dispatched(context.Background(), cl.DispatchID, nil, "")
+		var r *provisioner.Refusal
+		if !errors.As(err, &r) || r.Status != 409 || !r.Signed || r.Code != "" || errors.Is(err, provisioner.ErrLeaseExpired) || errors.Is(err, provisioner.ErrAnswerUnusable) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if d, _ := srv.Dispatch(cl.DispatchID); d.State != provisionertest.StateClaimed {
+			t.Errorf("%s: the dispatch is %s", name, d)
+		}
+		if err := c.Dispatched(context.Background(), cl.DispatchID, nil, ""); err != nil {
+			t.Errorf("%s: the next dispatched: %v", name, err)
+		}
+		if n := len(srv.Calls()); n != 3 {
+			t.Errorf("%s: the fake got %d requests, want 3: the claim, and dispatched twice", name, n)
 		}
 	}
 }
