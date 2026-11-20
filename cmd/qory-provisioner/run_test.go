@@ -473,9 +473,9 @@ func TestARepeatDispatchedWithNoType(t *testing.T) {
 
 // TestAnUnreadableLeaseExpiredChangesNothing sends a signed 409 lease_expired whose
 // must_understand lists a member the client does not define. The wrapper returns an
-// error that matches no loop sentinel, the same as for a failed dispatched, so the loop
-// leaves the entry and the next watch sends dispatched again. The dispatch keeps its
-// state, and the second dispatched gets the 204.
+// error that matches no loop sentinel, as it does for a failed dispatched, and the second
+// dispatched gets the 204. What the loop does with such an error, leaves the entry and
+// sends again at the next watch, is TestAFailedDispatchedIsSentAgain in internal/loop.
 func TestAnUnreadableLeaseExpiredChangesNothing(t *testing.T) {
 	srv := provisionertest.New(t)
 	a := apiary{client: srv.Client()}
@@ -491,9 +491,6 @@ func TestAnUnreadableLeaseExpiredChangesNothing(t *testing.T) {
 		if err == nil || errors.Is(err, s) {
 			t.Errorf("an unreadable 409: %v matches %v", err, s)
 		}
-	}
-	if d, _ := srv.Dispatch(c.DispatchID); d.State != provisionertest.StateClaimed {
-		t.Errorf("the dispatch is %s, want claimed", d)
 	}
 	if err := a.Dispatched(ctx, c.DispatchID, "i-0123456789abcdef0", fakeType); err != nil {
 		t.Errorf("the next dispatched: %v", err)

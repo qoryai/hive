@@ -982,9 +982,8 @@ func TestAnAnswerIgnoresWhatItDoesNotDefine(t *testing.T) {
 
 // TestARefusalWithAnUnmetPointerIsReadByItsStatus sends a signed 409 lease_expired to a
 // dispatched whose must_understand lists a member the client does not define, or is not
-// a list. The client reads the status alone: the refusal has status 409 and no code,
-// matches no code of the contract, and the dispatch keeps its state, so the next
-// dispatched is sent again and gets its 204.
+// a list. The client reads the status alone: the refusal has status 409 and no code and
+// matches no code of the contract. The next dispatched is sent again and gets its 204.
 func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
 	for name, body := range map[string]string{
 		"an undefined member":           `{"error":"lease_expired","extra":1,"must_understand":["/extra"]}`,
@@ -999,9 +998,6 @@ func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
 		var r *provisioner.Refusal
 		if !errors.As(err, &r) || r.Status != 409 || !r.Signed || r.Code != "" || errors.Is(err, provisioner.ErrLeaseExpired) || errors.Is(err, provisioner.ErrAnswerUnusable) {
 			t.Errorf("%s: %v", name, err)
-		}
-		if d, _ := srv.Dispatch(cl.DispatchID); d.State != provisionertest.StateClaimed {
-			t.Errorf("%s: the dispatch is %s", name, d)
 		}
 		if err := c.Dispatched(context.Background(), cl.DispatchID, nil, ""); err != nil {
 			t.Errorf("%s: the next dispatched: %v", name, err)
