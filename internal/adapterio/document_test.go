@@ -28,10 +28,10 @@ var decoders = map[string]func([]byte) error{
 	"error":         func(b []byte) error { _, err := adapterio.DecodeError(b); return err },
 }
 
-// schema compiles the schema of machines/v1 for the decoder name.
+// schema compiles the closed copy of the schema of machines/v1 for the decoder name.
 func schema(t *testing.T, name string) *jsonschema.Schema {
 	t.Helper()
-	s, err := contracts.CompileMachines(name + ".schema.json")
+	s, err := contracts.CompileMachinesClosed(name + ".schema.json")
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -243,8 +243,8 @@ func TestDecodersAndSchemasAgree(t *testing.T) {
 }
 
 // TestDecodersReadTheContractFixtures checks each decoder against the fixtures of
-// machines/v1: fixtures/<name>/ are accepted, and fixtures/invalid/<name>-*.json are
-// refused.
+// machines/v1: fixtures/<name>/ are accepted, and fixtures/invalid/<name>-*.json and
+// fixtures/closed/<name>-*.json are refused.
 func TestDecodersReadTheContractFixtures(t *testing.T) {
 	n := 0
 	err := fs.WalkDir(contracts.MachinesFS, "fixtures", func(p string, d fs.DirEntry, err error) error {
@@ -257,7 +257,7 @@ func TestDecodersReadTheContractFixtures(t *testing.T) {
 		}
 		dir, file := path.Split(p)
 		name, valid := path.Base(dir), true
-		if name == "invalid" {
+		if name == "invalid" || name == "closed" {
 			name, valid = "", false
 			for d := range decoders {
 				if strings.HasPrefix(file, d+"-") && len(d) > len(name) {

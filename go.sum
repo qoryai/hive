@@ -36,8 +36,8 @@ github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxK
 github.com/dlclark/regexp2 v1.11.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/qoryai/forager v0.7.1-0.20261119101310-5e9ca86dacd7 h1:5hBHpXWPWJvJ0ClNewCkxi8bkk3CCrGUik/RHDRcpC8=
 github.com/qoryai/forager v0.7.1-0.20261119101310-5e9ca86dacd7/go.mod h1:LQJoODbJS+dQDjDmpqU0oeTmnGU5qlT4jU0e/N9hHKQ=
-github.com/qoryai/integrations v0.3.1-0.20261119172556-6fed8c73033f h1:qFdVgaMPNrTGc2ofN3C6o9Shcal1TxP94q1AndTOW7Q=
-github.com/qoryai/integrations v0.3.1-0.20261119172556-6fed8c73033f/go.mod h1:Y2SmnIl02amrTOK/k8lfr6wnRiuIlSsj3GTUo3yop0Q=
+github.com/qoryai/integrations v0.3.1-0.20261120021401-7d18b046df5a h1:sCET8A4OA9Mb3BCPDeBtsoY321Dmq0oesrlDRCl15Tw=
+github.com/qoryai/integrations v0.3.1-0.20261120021401-7d18b046df5a/go.mod h1:Y2SmnIl02amrTOK/k8lfr6wnRiuIlSsj3GTUo3yop0Q=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 h1:1EYB5IzjZawrrnELUi78f9fPu57HuXjmddZPjrls/28=
 github.com/santhosh-tekuri/jsonschema/v6 v6.0.3/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=

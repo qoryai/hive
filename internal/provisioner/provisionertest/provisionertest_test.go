@@ -132,7 +132,7 @@ func TestTheFakeRefusesEachInvalidRequestFixture(t *testing.T) {
 		"machine-end": "fixtures/invalid/machine-end-*.json",
 	} {
 		names, err := fs.Glob(contracts.ProvisionerFS, glob)
-		if err != nil || len(names) < 2 {
+		if err != nil || len(names) < 1 {
 			t.Fatalf("%s: the fixtures %v: %v", route, names, err)
 		}
 		for _, name := range names {

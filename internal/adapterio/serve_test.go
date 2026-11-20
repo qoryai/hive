@@ -136,7 +136,7 @@ func TestServe(t *testing.T) {
 		t.Fatalf("make: %d %q", status, out)
 	}
 	want := contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: "AAEC+g=="}
-	if h.settings != "/etc/adapter.json" || h.make != want || !bytes.Equal(h.startData, []byte{0, 1, 2, 250}) {
+	if h.settings != "/etc/adapter.json" || !reflect.DeepEqual(h.make, want) || !bytes.Equal(h.startData, []byte{0, 1, 2, 250}) {
 		t.Errorf("the handler received %q, %#v, %v", h.settings, h.make, h.startData)
 	}
 	if status, out := serve(h, `{"version": 1}`, "check", "--settings", "a.json"); status != 0 || out != `{"offers":[{"vcpus":2,"memory_mib":4096,"disk_gib":30,"arch":"amd64","virtualization":false}]}`+"\n" {

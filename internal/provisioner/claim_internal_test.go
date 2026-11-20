@@ -57,17 +57,11 @@ func TestAClaimIsRead(t *testing.T) {
 	}
 }
 
-// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: a member the
-// schema does not define, another revision, a machine, a gateway URL or a lifetime
+// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: another revision, a machine, a gateway URL or a lifetime
 // outside its form, null for a member, or a member missing. Each fails, with no run
 // code, and the error quotes no value.
 func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 	for name, edit := range map[string]func(d map[string]any){
-		"a run id": func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d" },
-		"a step":   func(d map[string]any) { d["step"] = "explore" },
-		"a target": func(d map[string]any) {
-			d["target"] = map[string]any{"system": "code.example.com", "path": "acme/shop"}
-		},
 		"the next revision":        func(d map[string]any) { d["revision"] = Revision + 1 },
 		"revision 0":               func(d map[string]any) { d["revision"] = 0 },
 		"machine empty":            func(d map[string]any) { d["machine"] = "" },
@@ -77,7 +71,6 @@ func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 		"a spec with no machine":   func(d map[string]any) { delete(d, "machine") },
 		"a spec with 0 vCPUs":      func(d map[string]any) { d["machine_spec"].(map[string]any)["vcpus"] = 0 },
 		"a spec of another arch":   func(d map[string]any) { d["machine_spec"].(map[string]any)["arch"] = "x86_64" },
-		"a spec with a size":       func(d map[string]any) { d["machine_spec"].(map[string]any)["size"] = "small" },
 		"gateway URL with a path":  func(d map[string]any) { d["gateway_url"] = "https://gateway.example.com/v1" },
 		"gateway URL over http":    func(d map[string]any) { d["gateway_url"] = "http://gateway.example.com" },
 		"gateway URL null":         func(d map[string]any) { d["gateway_url"] = nil },

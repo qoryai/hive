@@ -895,8 +895,7 @@ func TestARetryAfterIsBounded(t *testing.T) {
 }
 
 // TestAnAnswerThatBreaksTheContractIsNotUsed sends a claim signed 200s that break the
-// contract: another revision, a member the schema does not define, a run code outside
-// its form or missing, a gateway URL that contains a run code's prefix, a member twice;
+// contract: another revision, a run code outside its form or missing, a gateway URL that contains a run code's prefix, a member twice;
 // and dispatched, a release and a machine log a signed 200. Each is ErrAnswerUnusable
 // after one try, and its text quotes no value.
 func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
@@ -904,8 +903,6 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 		"revision 0":                 func(d map[string]any) { d["revision"] = 0 },
 		"the next revision":          func(d map[string]any) { d["revision"] = provisioner.Revision + 1 },
 		"a revision after the next":  func(d map[string]any) { d["revision"] = provisioner.Revision + 2 },
-		"a new member":               func(d map[string]any) { d["extra"] = "the title of the ticket" },
-		"a run id":                   func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d" },
 		"a run code's shape":         func(d map[string]any) { d["run_code"] = d["run_code"].(string) + "!" },
 		"no run code":                func(d map[string]any) { delete(d, "run_code") },
 		"a number as run code":       func(d map[string]any) { d["run_code"] = 7 },

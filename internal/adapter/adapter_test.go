@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -373,7 +374,7 @@ func TestOutputBound(t *testing.T) {
 
 	f = newFixture(t, config{Mode: "biglog"})
 	log, err := f.r.Log(context.Background(), "i-1")
-	if want := bigLog(); err != nil || log != want || len(log.Log)*6 < contracts.MaxMachinesAnswer-20 {
+	if want := bigLog(); err != nil || !reflect.DeepEqual(log, want) || len(log.Log)*6 < contracts.MaxMachinesAnswer-20 {
 		t.Errorf("a log of %d bytes, escaped: %d bytes, %v", len(want.Log), len(log.Log), err)
 	}
 }
@@ -477,11 +478,11 @@ func TestFakeRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	again, err := f.r.Make(ctx, testDispatchID, testPool, testSpec, startData)
-	if err != nil || again != first {
+	if err != nil || !reflect.DeepEqual(again, first) {
 		t.Errorf("a second make with the same dispatch id returned %+v, %v; want %+v", again, err, first)
 	}
 	other, err := f.r.Make(ctx, "dp_0123456789abcdeg", testPool, testSpec, startData)
-	if err != nil || other == first {
+	if err != nil || reflect.DeepEqual(other, first) {
 		t.Errorf("a make with another dispatch id returned %+v, %v", other, err)
 	}
 	del, err := f.r.Delete(ctx, "i-ffffffffffffffff0")
