@@ -16,13 +16,12 @@
 // rules.
 //
 // A decoder of this package checks a document against its schema, compiled with
-// contracts.CompileMachinesClosed, so it refuses a member that the schema does not define,
-// and it refuses four more things that the schemas accept: a
-// member name that appears twice in one object, start data of 0 bytes, start data in
-// base64 whose padding bits are not zero, and a log of more than [MaxLog] bytes as
-// UTF-8. [Encode] checks the same rules before it writes a document. No error of this
-// package contains a value of the document, so an error never shows the start data or
-// a secret.
+// contracts.CompileMachinesClosed, so a member that the schema does not define fails the
+// check. The decoder also refuses four more things that the schemas accept: a member name
+// that appears twice in one object, start data of 0 bytes, start data in base64 whose
+// padding bits are not zero, and a log of more than [MaxLog] bytes as UTF-8. [Encode]
+// checks the same rules before it writes a document. No error of this package contains a
+// value of the document, so an error never shows the start data or a secret.
 package adapterio
 
 import (

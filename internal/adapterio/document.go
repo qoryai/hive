@@ -55,8 +55,11 @@ type compiled struct {
 // schemas compiles the schemas once, as the closed copies of machines/v1: a document with
 // a member that the schema does not define fails the check.
 //
-// shortcut: machines/v1 says a reader ignores an undefined member unless must_understand
-// lists it, and this check does neither; replace it in the work item for machines/v1.
+// shortcut: the machines/v1 readers stay strict, and no must_understand check exists in
+// them, although the CHANGELOG [Unreleased] of the pinned integrations module asks every
+// reader to ignore an undefined member unless must_understand lists it; replace it when
+// the function check in document.go reads with the open schemas and calls
+// contracts.CheckMustUnderstand.
 var schemas = sync.OnceValues(func() (compiled, error) {
 	c := compiled{files: map[string]*jsonschema.Schema{}}
 	for _, f := range []string{checkFile, checkAnswerFile, makeFile, makeAnswerFile, listFile, listAnswerFile, logFile, logAnswerFile, deleteFile, deleteAnswerFile, errorFile} {

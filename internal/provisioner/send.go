@@ -264,6 +264,10 @@ var errMustUnderstand = errors.New("its must_understand lists a member that this
 // ([contracts.CheckMustUnderstand]), and which passes the schema name of provisioner/v1.
 // A member that out does not define is ignored. Its error contains the schema, never a
 // value of body.
+//
+// With the pinned schemas, the pattern of must_understand also rejects such a body. The
+// call is the contract's reader step and insurance for a later pin whose schema lists a
+// pointer that out does not define.
 func readAnswer(name string, body []byte, out any) error {
 	if !jsontext.Value(body).IsValid() {
 		return errNotOneDocument

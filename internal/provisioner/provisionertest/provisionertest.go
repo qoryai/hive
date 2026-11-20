@@ -14,9 +14,9 @@
 // not define fails it: the client is the writer, and a misspelled member of its requests
 // fails its test. Qory Apiary itself ignores such a member. The fake marks a signature
 // as seen once the body passes its schema, as Qory Apiary does. A time more than 300
-// seconds from
-// [Server.Now] then gets the unsigned 401. After those checks the fake signs every
-// answer: a reply that [Server.Script] queued for the route, else the model's.
+// seconds from [Server.Now] then gets the unsigned 401. After those checks the fake
+// signs every answer: a reply that [Server.Script] queued for the route, else the
+// model's.
 //
 // The model keeps a queue of work, which [Server.Offer] fills, and the dispatches it
 // made of it. A claim takes the first work waiting into a new dispatch, or is held up to

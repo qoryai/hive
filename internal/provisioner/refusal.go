@@ -197,8 +197,10 @@ func (r *Refusal) Is(target error) bool {
 // [ErrAnswerUnusable] for a success status the request does not have. A code is read
 // only from a body that passes refusal.schema.json and whose must_understand lists only
 // members that the client defines; a refusal with any other body is read by its status
-// alone, as one with no body is. A code that contains what looks like a secret is
-// dropped. A 429's Retry-After is read from 1 second to 1 hour.
+// alone, as one with no body is. With the pinned schemas, the pattern of must_understand
+// also rejects such a body; [readAnswer] keeps the check for a later pin. A code that
+// contains what looks like a secret is dropped. A 429's Retry-After is read from 1
+// second to 1 hour.
 func (c *Client) refused(what string, k kind, ans *answer) error {
 	if ans.status >= 200 && ans.status < 300 {
 		return unusable(what, fmt.Sprintf("its status is %d, which the contract does not have for this request", ans.status))

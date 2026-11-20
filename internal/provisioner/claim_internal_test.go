@@ -57,9 +57,9 @@ func TestAClaimIsRead(t *testing.T) {
 	}
 }
 
-// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: another revision, a machine, a gateway URL or a lifetime
-// outside its form, null for a member, or a member missing. Each fails, with no run
-// code, and the error quotes no value.
+// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: another revision,
+// a machine, a gateway URL or a lifetime outside its form, null for a member, or a
+// member missing. Each fails, with no run code, and the error quotes no value.
 func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 	for name, edit := range map[string]func(d map[string]any){
 		"the next revision":        func(d map[string]any) { d["revision"] = Revision + 1 },
