@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -333,8 +334,11 @@ func TestDefects(t *testing.T) {
 		{"not json", 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document must be one JSON object"},
 		{`{"id": "-"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id has a value that the rule not of machines/v1 make-answer.schema.json refuses"},
 		{`{"id": "` + marker + ` x"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id must match the pattern"},
-		{`{"id": "i-1", "version": 1}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document has a member"},
-		{`{"error": {"kind": "retry", "message": "m"}}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document has a member"},
+		{`{"id": "i-1", "extra": 1, "must_understand": ["/extra"]}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
+		{`{"id": "i-1", "must_understand": "/id"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
+		{`{"error": {"kind": "retry", "message": "m"}}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the member id is missing"},
+		{`{"id": "i-1"} {"id": "i-2"}`, 0, "Fix the machine adapter: its answer to make fails a rule of version 1: the document must be one JSON object"},
+		{`{"error": {"kind": "retry", "message": "m"}, "must_understand": ["/error/code"]}`, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
 		{"", 0, "Fix the machine adapter: its answer to make fails a rule of version 1"},
 		{"oops " + marker, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: "},
 		{`{"error": {"kind": "fatal", "message": "m"}}`, 1, "Fix the machine adapter: it exited with status 1 for make, and its standard output fails a rule of the error document: the member error.kind must be limit, retry, defect or other"},
@@ -345,6 +349,24 @@ func TestDefects(t *testing.T) {
 		f := newFixture(t, config{Mode: "raw", Stdout: c.stdout, Status: c.status})
 		_, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
 		defect(t, err, "make", c.prefix)
+	}
+}
+
+// TestAnUndefinedMemberIsIgnored reads a make answer and an error document with members
+// that machines/v1 does not define, one of the error document at the top and one in
+// error: the runner uses the members that it defines, and the answer lists only members
+// that it defines in must_understand.
+func TestAnUndefinedMemberIsIgnored(t *testing.T) {
+	f := newFixture(t, config{Mode: "raw", Stdout: `{"id": "i-1", "machine_type": "m7i.large", "extra": 1, "must_understand": ["/id"]}`})
+	got, err := f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
+	if err != nil || got.ID != "i-1" || got.MachineType != "m7i.large" {
+		t.Errorf("a make answer with an undefined member: %+v, %v", got, err)
+	}
+	f = newFixture(t, config{Mode: "raw", Status: 1, Stdout: `{"error": {"kind": "retry", "message": "Run it again.", "code": 7}, "extra": 1}`})
+	_, err = f.r.Make(context.Background(), testDispatchID, testPool, testSpec, startData)
+	var e *Error
+	if !errors.As(err, &e) || *e != (Error{Command: "make", Kind: contracts.FailureRetry, Message: "Run it again."}) {
+		t.Errorf("an error document with an undefined member: %v", err)
 	}
 }
 
@@ -373,7 +395,7 @@ func TestOutputBound(t *testing.T) {
 
 	f = newFixture(t, config{Mode: "biglog"})
 	log, err := f.r.Log(context.Background(), "i-1")
-	if want := bigLog(); err != nil || log != want || len(log.Log)*6 < contracts.MaxMachinesAnswer-20 {
+	if want := bigLog(); err != nil || !reflect.DeepEqual(log, want) || len(log.Log)*6 < contracts.MaxMachinesAnswer-20 {
 		t.Errorf("a log of %d bytes, escaped: %d bytes, %v", len(want.Log), len(log.Log), err)
 	}
 }
@@ -477,11 +499,11 @@ func TestFakeRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	again, err := f.r.Make(ctx, testDispatchID, testPool, testSpec, startData)
-	if err != nil || again != first {
+	if err != nil || !reflect.DeepEqual(again, first) {
 		t.Errorf("a second make with the same dispatch id returned %+v, %v; want %+v", again, err, first)
 	}
 	other, err := f.r.Make(ctx, "dp_0123456789abcdeg", testPool, testSpec, startData)
-	if err != nil || other == first {
+	if err != nil || reflect.DeepEqual(other, first) {
 		t.Errorf("a make with another dispatch id returned %+v, %v", other, err)
 	}
 	del, err := f.r.Delete(ctx, "i-ffffffffffffffff0")

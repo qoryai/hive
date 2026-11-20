@@ -211,6 +211,27 @@ The changes to Hive that no release contains yet, in the shape of
   policy lists `qory:dispatch_id` in place of `qory:key`. The adapter does not read
   the tag `qory:key`, so `list` leaves out a machine that has only that tag, with a
   warning, and `make` does not find it.
+- The provisioner ignores a member of an answer or a refusal of Qory Apiary that
+  `contracts/provisioner/v1` does not define, unless the document's `must_understand`
+  lists it. Until this change, a claim answer with such a member was refused. A claim
+  answer whose `must_understand` lists a pointer to a member that the provisioner does
+  not read is unusable: the provisioner uses nothing in it and does not send the claim
+  again. A refusal whose `must_understand` lists such a pointer is read by its status
+  alone, as a refusal with no readable body is. A `409 lease_expired` that the
+  provisioner cannot read changes nothing, and the next watch sends `dispatched` again.
+  The machine adapter and the provisioner read the documents of `contracts/machines/v1`
+  by the same rule. A request, an answer or an error document with a member that the
+  contract does not define is read without it, unless its `must_understand` lists it.
+  Until this change, such a member failed the document. When `must_understand` lists a
+  pointer to a member that the reader does not define, the reader fails with kind
+  `defect`. The writers still refuse a member that the contract does not define. The
+  provisioner matches a member of a document of Qory Apiary by its exact name, so in a
+  claim answer `Gateway_URL` never replaces `gateway_url`. The machine adapter and the
+  provisioner match a member of a machines/v1 document by its exact name too: a member
+  whose name differs in case is another member. This includes `must_understand`: a
+  member `Must_Understand` neither lists a pointer nor replaces the list. Hive uses the
+  revision of the `contracts` package of qoryai/integrations that reads members by exact
+  case.
 
 ### Removed
 

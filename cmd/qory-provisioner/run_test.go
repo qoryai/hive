@@ -471,6 +471,35 @@ func TestARepeatDispatchedWithNoType(t *testing.T) {
 	}
 }
 
+// TestAnUnreadableLeaseExpiredChangesNothing sends a signed 409 lease_expired whose
+// must_understand lists a member the client does not define. The wrapper returns an
+// error that matches no loop sentinel, as it does for a failed dispatched, and the second
+// dispatched gets the 204. What the loop does with such an error, leaves the entry and
+// sends again at the next watch, is TestAFailedDispatchedIsSentAgain in internal/loop.
+func TestAnUnreadableLeaseExpiredChangesNothing(t *testing.T) {
+	srv := provisionertest.New(t)
+	a := apiary{client: srv.Client()}
+	ctx := context.Background()
+	srv.Offer(provisionertest.Work{})
+	c, ok, err := a.Claim(ctx, fakeOffers)
+	if !ok || err != nil {
+		t.Fatalf("claim: %v, %v", ok, err)
+	}
+	srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: 409, Body: `{"error":"lease_expired","extra":1,"must_understand":["/extra"]}`})
+	err = a.Dispatched(ctx, c.DispatchID, "i-0123456789abcdef0", fakeType)
+	for _, s := range []error{loop.ErrLeaseExpired, loop.ErrGone, loop.ErrForbidden, loop.ErrMachineExists} {
+		if err == nil || errors.Is(err, s) {
+			t.Errorf("an unreadable 409: %v matches %v", err, s)
+		}
+	}
+	if err := a.Dispatched(ctx, c.DispatchID, "i-0123456789abcdef0", fakeType); err != nil {
+		t.Errorf("the next dispatched: %v", err)
+	}
+	if d, _ := srv.Dispatch(c.DispatchID); d.State != provisionertest.StateDispatched || d.MachineType != fakeType {
+		t.Errorf("the dispatch is %s after the second dispatched, with the machine type %q", d, d.MachineType)
+	}
+}
+
 // TestApiaryRefusals sends real refusals through the wrapper and the fake Qory Apiary.
 func TestApiaryRefusals(t *testing.T) {
 	srv := provisionertest.New(t)

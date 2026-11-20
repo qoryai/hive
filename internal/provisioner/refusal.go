@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/qoryai/integrations/contracts"
 )
 
 // The results of a request the provisioner branches on, each matched with errors.Is
@@ -58,8 +60,9 @@ var (
 	// ErrUnreachable is no answer from Qory Apiary after every try.
 	ErrUnreachable = errors.New("no answer from Qory Apiary")
 	// ErrAnswerUnusable is a signed answer within its bound that breaks the contract: a
-	// success status the request does not have, a body that is not one JSON document or
-	// fails its schema, or another revision than the one sent. Nothing in it is used.
+	// success status the request does not have, a body that is not one JSON object or
+	// fails its schema, a must_understand that lists a member the client does not define,
+	// or another revision than the one sent. Nothing in it is used.
 	// The request is not sent again, since Qory Apiary acted on it.
 	ErrAnswerUnusable = errors.New("Qory Apiary's answer breaks the contract, so the client used nothing in it")
 )
@@ -120,7 +123,7 @@ type Refusal struct {
 	// a code from a signed answer alone.
 	Signed bool
 	// Code is a signed answer's refusal code, refusal.schema.json's error, or "" when
-	// its body has none.
+	// its body has none or the client cannot read it, as [Client.refused] describes.
 	Code string
 	// RetryAfter is the wait a signed 429's Retry-After sets, from 1 second to 1 hour;
 	// 0 otherwise.
@@ -136,6 +139,9 @@ type Refusal struct {
 	Resent bool
 
 	kind kind
+	// unmet is whether the answer's must_understand lists a member that the client does
+	// not define, so that the client read the status alone.
+	unmet bool
 }
 
 func (r *Refusal) Error() string {
@@ -147,6 +153,8 @@ func (r *Refusal) Error() string {
 			r.What + " returned 401 unauthorized, which the client does not take as a revoked key"
 	case !r.Signed:
 		return fmt.Sprintf("check that the Qory Apiary URL reaches Qory Apiary and that the pin is the one from the enrolment: %s: the answer with status %d has no valid signature under the pin, so the client used nothing in it", r.What, r.Status)
+	case r.Code == "" && r.unmet:
+		return fmt.Sprintf("%s%s: Qory Apiary returned %d with a must_understand that the client does not meet, so the client used the status alone", updateFix, r.What, r.Status)
 	case r.Code == "":
 		return fmt.Sprintf("%s%s: Qory Apiary returned %d", r.fix(), r.What, r.Status)
 	case r.RetryAfter > 0:
@@ -192,18 +200,21 @@ func (r *Refusal) Is(target error) bool {
 
 // refused is the [*Refusal] of a signed answer other than the one wanted, or
 // [ErrAnswerUnusable] for a success status the request does not have. A code is read
-// only from a body that passes refusal.schema.json. A code that contains what looks
-// like a secret is dropped. A 429's Retry-After is read
-// from 1 second to 1 hour.
+// only from a body that passes refusal.schema.json and whose must_understand lists only
+// members that the client defines; a refusal with any other body is read by its status
+// alone, as one with no body is. With the pinned schemas, the pattern of must_understand
+// also rejects such a body; [readAnswer] keeps the check for a later pin. A code that
+// contains what looks like a secret is dropped. A 429's Retry-After is read from 1
+// second to 1 hour.
 func (c *Client) refused(what string, k kind, ans *answer) error {
 	if ans.status >= 200 && ans.status < 300 {
 		return unusable(what, fmt.Sprintf("its status is %d, which the contract does not have for this request", ans.status))
 	}
 	r := &Refusal{What: what, Status: ans.status, Signed: ans.signed, Resent: ans.resent, kind: k}
-	var doc struct {
-		Error string `json:"error"`
-	}
-	if readAnswer("refusal.schema.json", ans.body, &doc) == nil && !secret(doc.Error) {
+	var doc contracts.Refusal
+	err := readAnswer("refusal.schema.json", ans.body, &doc)
+	r.unmet = errors.Is(err, errMustUnderstand)
+	if err == nil && !secret(doc.Error) {
 		r.Code = doc.Error
 	}
 	if ans.status == http.StatusTooManyRequests {

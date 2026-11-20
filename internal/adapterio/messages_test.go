@@ -40,7 +40,7 @@ func TestMessagesFit(t *testing.T) {
 	add(errorOf(t, &handler{}, strings.Repeat(" ", contracts.MaxMachinesAnswer+1), deleteArgs...))
 	for _, in := range []string{
 		`{"version": 2, "id": "i-0123456789abcdef0"}`,
-		`{"version": 1, "id": "i-0123456789abcdef0", "other": 1}`,
+		`{"version": 1, "id": "i-0123456789abcdef0", "other": 1, "must_understand": ["/other"]}`,
 		`{"version": 1}`,
 		`[]`,
 	} {

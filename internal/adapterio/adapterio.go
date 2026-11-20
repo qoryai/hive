@@ -15,13 +15,18 @@
 // are those of package contracts, and the schemas in contracts.MachinesFS state their
 // rules.
 //
-// A decoder of this package checks a document against its schema, compiled with
-// contracts.CompileMachines, and refuses four more things that the schemas accept: a
-// member name that appears twice in one object, start data of 0 bytes, start data in
-// base64 whose padding bits are not zero, and a log of more than [MaxLog] bytes as
-// UTF-8. [Encode] checks the same rules before it writes a document. No error of this
-// package contains a value of the document, so an error never shows the start data or
-// a secret.
+// A decoder of this package reads a document by the rule of machines/v1: it ignores a
+// member that the schema does not define, unless the must_understand of the document lists
+// it. When must_understand lists a pointer to a member that the decoder's type does not
+// define, or is not a list of pointers, the decoder returns an error, and [Serve] and the
+// provisioner's runner turn it into a failure of kind defect. The decoder checks the
+// members that it defines against the schema, compiled with contracts.CompileMachines,
+// and refuses four more things that the schemas accept: a member name that appears twice
+// in one object, start data of 0 bytes, start data in base64 whose padding bits are not
+// zero, and a log of more than [MaxLog] bytes as UTF-8. [Encode] checks the same rules
+// before it writes a document, against the closed copies of the schemas, which refuse a
+// member that the contract does not define. No error of this package contains a value of
+// the document, so an error never shows the start data or a secret.
 package adapterio
 
 import (

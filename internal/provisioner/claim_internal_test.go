@@ -57,17 +57,11 @@ func TestAClaimIsRead(t *testing.T) {
 	}
 }
 
-// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: a member the
-// schema does not define, another revision, a machine, a gateway URL or a lifetime
-// outside its form, null for a member, or a member missing. Each fails, with no run
-// code, and the error quotes no value.
+// TestAClaimOfAnotherFormIsRefused changes a claim in one place each: another revision,
+// a machine, a gateway URL or a lifetime outside its form, null for a member, or a
+// member missing. Each fails, with no run code, and the error quotes no value.
 func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 	for name, edit := range map[string]func(d map[string]any){
-		"a run id": func(d map[string]any) { d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d" },
-		"a step":   func(d map[string]any) { d["step"] = "explore" },
-		"a target": func(d map[string]any) {
-			d["target"] = map[string]any{"system": "code.example.com", "path": "acme/shop"}
-		},
 		"the next revision":        func(d map[string]any) { d["revision"] = Revision + 1 },
 		"revision 0":               func(d map[string]any) { d["revision"] = 0 },
 		"machine empty":            func(d map[string]any) { d["machine"] = "" },
@@ -77,7 +71,6 @@ func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 		"a spec with no machine":   func(d map[string]any) { delete(d, "machine") },
 		"a spec with 0 vCPUs":      func(d map[string]any) { d["machine_spec"].(map[string]any)["vcpus"] = 0 },
 		"a spec of another arch":   func(d map[string]any) { d["machine_spec"].(map[string]any)["arch"] = "x86_64" },
-		"a spec with a size":       func(d map[string]any) { d["machine_spec"].(map[string]any)["size"] = "small" },
 		"gateway URL with a path":  func(d map[string]any) { d["gateway_url"] = "https://gateway.example.com/v1" },
 		"gateway URL over http":    func(d map[string]any) { d["gateway_url"] = "http://gateway.example.com" },
 		"gateway URL null":         func(d map[string]any) { d["gateway_url"] = nil },
@@ -120,6 +113,86 @@ func TestTheRunCodeIsReadFromTheBytes(t *testing.T) {
 	_, _ = cl.RunCode.WriteTo(&w)
 	if w.String() != testCode {
 		t.Errorf("the run code %q", w.String())
+	}
+}
+
+// TestAClaimIgnoresMembersItDoesNotDefine reads a claim with members the contract does
+// not define, at the top and in the machine spec, and with a must_understand that lists
+// defined members: the claim is read as it is without them.
+func TestAClaimIgnoresMembersItDoesNotDefine(t *testing.T) {
+	d := aClaim()
+	d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d"
+	d["target"] = map[string]any{"system": "code.example.com", "path": "acme/shop"}
+	d["machine_spec"].(map[string]any)["size"] = "small"
+	d["must_understand"] = []string{"/run_code", "/machine_spec", "/machine_spec/arch"}
+	cl, err := readClaim(marshal(t, d))
+	if err != nil || cl.DispatchID != "dp_8w3k0q9t2v7m4r6x" || cl.RunCode.Len() != len(testCode) || cl.MachineSpec == nil || cl.MachineSpec.Arch != "amd64" {
+		t.Errorf("got %+v, %v", cl, err)
+	}
+}
+
+// TestAClaimReadsMembersByTheirExactName reads a claim that has gateway_url and also
+// Gateway_URL and GATEWAY_URL, members that the contract does not define: the claim has
+// the gateway_url, whichever comes last, and never the URL of a member of another case.
+func TestAClaimReadsMembersByTheirExactName(t *testing.T) {
+	good := string(marshal(t, aClaim()))
+	for name, body := range map[string]string{
+		"after":  strings.TrimSuffix(good, "}") + `,"Gateway_URL":"http://other.example.com","GATEWAY_URL":"http://other.example.com"}`,
+		"before": strings.Replace(good, "{", `{"Gateway_URL":"http://other.example.com","GATEWAY_URL":"http://other.example.com",`, 1),
+	} {
+		cl, err := readClaim([]byte(body))
+		if err != nil || cl.GatewayURL != "https://gateway.example.com:8443" {
+			t.Errorf("%s: the gateway URL is %q, %v", name, cl.GatewayURL, err)
+		}
+	}
+}
+
+// TestMustUnderstandIsReadByItsExactName reads claims with a must_understand and also a
+// member of another case, which the contract does not define. The exact member decides:
+// an empty list beside Must_Understand listing a pointer is read, and a list with an
+// unmet pointer beside MUST_UNDERSTAND with an empty list or null is still refused.
+func TestMustUnderstandIsReadByItsExactName(t *testing.T) {
+	with := func(must any, extra string) []byte {
+		d := aClaim()
+		d["must_understand"] = must
+		return append(bytes.TrimSuffix(marshal(t, d), []byte("}")), extra+"}"...)
+	}
+	if _, err := readClaim(with([]string{}, `,"Must_Understand":["/future"]`)); err != nil {
+		t.Errorf("a pointer in another case beside an empty list: %v", err)
+	}
+	for name, body := range map[string][]byte{
+		"an empty list after an unmet pointer": with([]string{"/future"}, `,"MUST_UNDERSTAND":[]`),
+		"null after an unmet pointer":          with([]string{"/future"}, `,"Must_Understand":null`),
+	} {
+		if _, err := readClaim(body); err != errMustUnderstand {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+// TestAClaimWithAnUnmetPointerIsRefused reads claims whose must_understand lists a
+// member the client does not define, at any place, or is not a list of JSON Pointers:
+// each fails with the one text for it, which has no pointer, and has no run code.
+func TestAClaimWithAnUnmetPointerIsRefused(t *testing.T) {
+	for name, must := range map[string]any{
+		"a member at the top":        []string{"/run_id"},
+		"a member after a defined":   []string{"/run_code", "/run_id"},
+		"a member of the spec":       []string{"/machine_spec/size"},
+		"a member of a defined type": []string{"/run_code/x"},
+		"the list itself":            []string{"/must_understand"},
+		"null":                       nil,
+		"a string":                   "/run_code",
+		"no leading slash":           []string{"run_code"},
+		"a repeat":                   []string{"/run_code", "/run_code"},
+	} {
+		d := aClaim()
+		d["run_id"] = "0192f0c1-7d4e-7a2b-8c3d-4e5f6a7b8c9d"
+		d["machine_spec"].(map[string]any)["size"] = "small"
+		d["must_understand"] = must
+		cl, err := readClaim(marshal(t, d))
+		if err != errMustUnderstand || cl.RunCode.Len() != 0 {
+			t.Errorf("%s: got %v", name, err)
+		}
 	}
 }
 
