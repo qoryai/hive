@@ -139,6 +139,9 @@ type Refusal struct {
 	Resent bool
 
 	kind kind
+	// unmet is whether the answer's must_understand lists a member that the client does
+	// not define, so that the client read the status alone.
+	unmet bool
 }
 
 func (r *Refusal) Error() string {
@@ -150,6 +153,8 @@ func (r *Refusal) Error() string {
 			r.What + " returned 401 unauthorized, which the client does not take as a revoked key"
 	case !r.Signed:
 		return fmt.Sprintf("check that the Qory Apiary URL reaches Qory Apiary and that the pin is the one from the enrolment: %s: the answer with status %d has no valid signature under the pin, so the client used nothing in it", r.What, r.Status)
+	case r.Code == "" && r.unmet:
+		return fmt.Sprintf("%s%s: Qory Apiary returned %d with a must_understand that the client does not meet, so the client used the status alone", updateFix, r.What, r.Status)
 	case r.Code == "":
 		return fmt.Sprintf("%s%s: Qory Apiary returned %d", r.fix(), r.What, r.Status)
 	case r.RetryAfter > 0:
@@ -207,7 +212,9 @@ func (c *Client) refused(what string, k kind, ans *answer) error {
 	}
 	r := &Refusal{What: what, Status: ans.status, Signed: ans.signed, Resent: ans.resent, kind: k}
 	var doc contracts.Refusal
-	if readAnswer("refusal.schema.json", ans.body, &doc) == nil && !secret(doc.Error) {
+	err := readAnswer("refusal.schema.json", ans.body, &doc)
+	r.unmet = errors.Is(err, errMustUnderstand)
+	if err == nil && !secret(doc.Error) {
 		r.Code = doc.Error
 	}
 	if ans.status == http.StatusTooManyRequests {

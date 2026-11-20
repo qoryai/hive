@@ -933,6 +933,9 @@ func TestAnAnswerThatBreaksTheContractIsNotUsed(t *testing.T) {
 			t.Errorf("a claim with %s: %v", name, err)
 			continue
 		}
+		if strings.Contains(name, "pointer") && !strings.HasPrefix(err.Error(), "update the provisioner to a version that reads this Qory Apiary's answers: ") {
+			t.Errorf("a claim with %s: the error does not start with the fix: %v", name, err)
+		}
 		if text := strings.ToLower(err.Error() + log.String()); strings.Contains(text, "ticket") || strings.Contains(text, "qecr_") {
 			t.Errorf("a claim with %s: the error or the log quotes a value: %v", name, err)
 		}
@@ -980,6 +983,25 @@ func TestAnAnswerIgnoresWhatItDoesNotDefine(t *testing.T) {
 	}
 }
 
+// TestARefusalIsReadByTheExactNameOfItsCode sends a signed 410 whose body has error and
+// also Error, a member that the contract does not define: the code is the one of error.
+func TestARefusalIsReadByTheExactNameOfItsCode(t *testing.T) {
+	for name, body := range map[string]string{
+		"after":  `{"error":"gone","Error":"forbidden","ERROR":"forbidden"}`,
+		"before": `{"Error":"forbidden","ERROR":"forbidden","error":"gone"}`,
+	} {
+		srv, c, _, _ := setup(t)
+		cl := claimed(t, srv, c, provisionertest.Work{})
+		cl.RunCode.Clear()
+		srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: 410, Body: body})
+		err := c.Dispatched(context.Background(), cl.DispatchID, nil, "")
+		var r *provisioner.Refusal
+		if !errors.Is(err, provisioner.ErrGone) || !errors.As(err, &r) || r.Code != "gone" {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // TestARefusalWithAnUnmetPointerIsReadByItsStatus sends a signed 409 lease_expired to a
 // dispatched whose must_understand lists a member the client does not define, or is not
 // a list. The client reads the status alone: the refusal has status 409 and no code and
@@ -998,6 +1020,9 @@ func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
 		var r *provisioner.Refusal
 		if !errors.As(err, &r) || r.Status != 409 || !r.Signed || r.Code != "" || errors.Is(err, provisioner.ErrLeaseExpired) || errors.Is(err, provisioner.ErrAnswerUnusable) {
 			t.Errorf("%s: %v", name, err)
+		}
+		if err != nil && !strings.HasPrefix(err.Error(), "update the provisioner to a version that reads this Qory Apiary's answers: ") {
+			t.Errorf("%s: the error does not start with the fix: %v", name, err)
 		}
 		if err := c.Dispatched(context.Background(), cl.DispatchID, nil, ""); err != nil {
 			t.Errorf("%s: the next dispatched: %v", name, err)

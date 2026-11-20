@@ -88,6 +88,9 @@ func (c *Client) Claim(ctx context.Context, waitSeconds int, offers []contracts.
 		return Claimed{}, false, c.refused(what, kindClaim, ans)
 	}
 	claimed, err = readClaim(ans.body)
+	if errors.Is(err, errMustUnderstand) {
+		return Claimed{}, false, fmt.Errorf("%s%s: %w: %s", updateFix, what, ErrAnswerUnusable, err)
+	}
 	if err != nil {
 		return Claimed{}, false, unusable(what, err.Error())
 	}
