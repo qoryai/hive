@@ -225,8 +225,10 @@ The changes to Hive that no release contains yet, in the shape of
   Until this change, such a member failed the document. When `must_understand` lists a
   pointer to a member that the reader does not define, the reader fails with kind
   `defect`. The writers still refuse a member that the contract does not define. The
-  provisioner and the machine adapter match a member by its exact name, so `Gateway_URL`
-  never replaces `gateway_url`.
+  provisioner matches a member of a document of Qory Apiary by its exact name, so in a
+  claim answer `Gateway_URL` never replaces `gateway_url`. The machine adapter and the
+  provisioner match a member of a machines/v1 document by its exact name too: a member
+  whose name differs in case is another member.
 
 ### Removed
 
