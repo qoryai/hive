@@ -354,7 +354,7 @@ func TestDecodeErrorsHaveNoValue(t *testing.T) {
 func TestDecodeErrors(t *testing.T) {
 	for _, c := range []struct{ name, json, want string }{
 		{"check", `{"version": 2}`, "the member version must be 1"},
-		{"check", `{"version": 1, "must_understand": ["/x"]}`, "the member must_understand lists a pointer that version 1 does not define, or is not a list"},
+		{"check", `{"version": 1, "must_understand": ["/x"]}`, "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
 		{"check", `[]`, "the document must be one JSON object in UTF-8, with no member name twice"},
 		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
 		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
@@ -363,7 +363,7 @@ func TestDecodeErrors(t *testing.T) {
 		{"make-answer", `{"id": 7}`, "the member id must be a string"},
 		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
 		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},
-		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}], "must_understand": ["/machines/0/x"]}`, "the member must_understand lists a pointer that version 1 does not define, or is not a list"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}], "must_understand": ["/machines/0/x"]}`, "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
 		{"error", `{"error": {"kind": "other", "message": ""}}`, "the member error.message must not be empty"},
 		{"error", `{"error": {"kind": "fatal", "message": "m"}}`, "the member error.kind must be limit, retry, defect or other"},
 	} {

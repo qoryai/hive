@@ -106,7 +106,7 @@ func thirtyThree() []string {
 // does not define, at the root and below it, or a must_understand that is not a list of
 // pointers: each fails with the one text for it, which quotes no pointer.
 func TestADecoderRefusesAnUnmetPointer(t *testing.T) {
-	const want = "the member must_understand lists a pointer that version 1 does not define, or is not a list"
+	const want = "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"
 	for _, c := range understandCases {
 		for name, must := range map[string]any{
 			"an undefined member": []string{"/extra"},
@@ -115,6 +115,9 @@ func TestADecoderRefusesAnUnmetPointer(t *testing.T) {
 			"the list itself":     []string{"/must_understand"},
 			"not a list":          "/" + "extra",
 			"a pointer with no /": []string{"extra"},
+			"null":                nil,
+			"a number as entry":   []any{1},
+			"an entry over 256":   []string{"/" + strings.Repeat("a", 256)},
 			"a repeat":            []string{c.defined, c.defined},
 			"a bad escape":        []string{"/a~2"},
 			"a line break":        []string{"/a\nb"},
