@@ -224,7 +224,9 @@ The changes to Hive that no release contains yet, in the shape of
   contract does not define is read without it, unless its `must_understand` lists it.
   Until this change, such a member failed the document. When `must_understand` lists a
   pointer to a member that the reader does not define, the reader fails with kind
-  `defect`. The writers still refuse a member that the contract does not define.
+  `defect`. The writers still refuse a member that the contract does not define. The
+  provisioner and the machine adapter match a member by its exact name, so `Gateway_URL`
+  never replaces `gateway_url`.
 
 ### Removed
 

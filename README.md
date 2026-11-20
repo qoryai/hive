@@ -98,7 +98,8 @@ each error document. A document with a member that the contract does not define 
 without it, unless its `must_understand` lists it. When `must_understand` lists a pointer
 to a member that the reader does not define, the reader fails with kind `defect`: the
 adapter writes an error document and exits with status 1, and the provisioner treats the
-adapter's answer as a failure of kind `defect`. A document that has data after its one
+adapter's answer as a failure of kind `defect`. Both read a member by its exact name:
+`Gateway_URL` is another member than `gateway_url` and never replaces it. A document that has data after its one
 JSON object, or a known member of the wrong type, fails the same way.
 
 The provisioner copies the adapter's standard error, line by line, to the
