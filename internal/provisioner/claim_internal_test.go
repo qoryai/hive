@@ -131,6 +131,22 @@ func TestAClaimIgnoresMembersItDoesNotDefine(t *testing.T) {
 	}
 }
 
+// TestAClaimReadsMembersByTheirExactName reads a claim that has gateway_url and also
+// Gateway_URL and GATEWAY_URL, members that the contract does not define: the claim has
+// the gateway_url, whichever comes last, and never the URL of a member of another case.
+func TestAClaimReadsMembersByTheirExactName(t *testing.T) {
+	good := string(marshal(t, aClaim()))
+	for name, body := range map[string]string{
+		"after":  strings.TrimSuffix(good, "}") + `,"Gateway_URL":"http://other.example.com","GATEWAY_URL":"http://other.example.com"}`,
+		"before": strings.Replace(good, "{", `{"Gateway_URL":"http://other.example.com","GATEWAY_URL":"http://other.example.com",`, 1),
+	} {
+		cl, err := readClaim([]byte(body))
+		if err != nil || cl.GatewayURL != "https://gateway.example.com:8443" {
+			t.Errorf("%s: the gateway URL is %q, %v", name, cl.GatewayURL, err)
+		}
+	}
+}
+
 // TestAClaimWithAnUnmetPointerIsRefused reads claims whose must_understand lists a
 // member the client does not define, at any place, or is not a list of JSON Pointers:
 // each fails with the one text for it, which has no pointer, and has no run code.

@@ -167,6 +167,33 @@ func TestADecoderStillRefusesWhatItDefines(t *testing.T) {
 	}
 }
 
+// TestADecoderReadsMembersByTheirExactName adds, to each valid document, a member whose
+// name differs from a defined member only in case, with a value that another reader
+// would take: the decoder reads the value of the exact name, and the value of the other
+// member is ignored.
+func TestADecoderReadsMembersByTheirExactName(t *testing.T) {
+	got, err := adapterio.DecodeMakeAnswer([]byte(`{"id": "i-1", "ID": "i-2", "Machine_Type": "x"}`))
+	if err != nil || got.ID != "i-1" || got.MachineType != "" {
+		t.Errorf("a make answer: %+v, %v", got, err)
+	}
+	got, err = adapterio.DecodeMakeAnswer([]byte(`{"ID": "i-2", "Id": "i-3", "id": "i-1"}`))
+	if err != nil || got.ID != "i-1" {
+		t.Errorf("a make answer with its id last: %+v, %v", got, err)
+	}
+	req, err := adapterio.DecodeLog([]byte(`{"version": 1, "id": "i-1", "ID": "i-2", "Version": 2}`))
+	if err != nil || req.ID != "i-1" || req.Version != 1 {
+		t.Errorf("a log request: %+v, %v", req, err)
+	}
+	fail, err := adapterio.DecodeError([]byte(`{"error": {"kind": "retry", "message": "m", "Kind": "defect"}, "Error": {"kind": "defect", "message": "n"}}`))
+	if err != nil || fail.Error.Kind != contracts.FailureRetry || fail.Error.Message != "m" {
+		t.Errorf("an error document: %+v, %v", fail, err)
+	}
+	// A defined member written in another case is no member: the document is missing it.
+	if _, err := adapterio.DecodeMakeAnswer([]byte(`{"ID": "i-1"}`)); err == nil {
+		t.Error("a make answer with ID in place of id is accepted")
+	}
+}
+
 // TestServeReadsAnUndefinedMemberAndRefusesAnUnmetPointer sends Serve a request with an
 // undefined member, which it serves, and one whose must_understand lists a pointer that
 // version 1 does not define, which it answers with a failure of kind defect and no call

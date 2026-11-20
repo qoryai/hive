@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -258,11 +259,16 @@ var errNotOneDocument = errors.New("it is not one JSON document with valid UTF-8
 // of the body.
 var errMustUnderstand = errors.New("its must_understand lists a member that this client does not read, or is not a list of JSON Pointers")
 
+// updateFix starts the error of a signed answer whose must_understand the client cannot
+// meet.
+const updateFix = "update the provisioner to a version that reads this Qory Apiary's answers: "
+
 // readAnswer reads body, a signed answer's, into out, a pointer to a struct of the
 // contracts package: one JSON document with valid UTF-8 and no member twice in any
 // object, whose must_understand lists only members that out defines
 // ([contracts.CheckMustUnderstand]), and which passes the schema name of provisioner/v1.
-// A member that out does not define is ignored. Its error contains the schema, never a
+// A member that out does not define is ignored, and a member is matched by its exact
+// name. Its error contains the schema, never a
 // value of body.
 //
 // With the pinned schemas, the pattern of must_understand also rejects such a body. The
@@ -283,7 +289,10 @@ func readAnswer(name string, body []byte, out any) error {
 	if err != nil || s.Validate(doc) != nil {
 		return fmt.Errorf("it fails %s", name)
 	}
-	if err := json.Unmarshal(body, out); err != nil {
+	// encoding/json/v2 matches a member by its exact name. The v1 decoder also matches
+	// Gateway_URL to gateway_url, and so lets a member that the contract does not define
+	// overwrite a defined one.
+	if err := jsonv2.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("it fails %s", name)
 	}
 	return nil
