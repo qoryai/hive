@@ -83,6 +83,17 @@ dispatch. A machine that `serve` finds by its dispatch id after a restart, or ta
 back with no journal entry, has no type, because the answer of `list` contains none,
 and its `dispatched` contains no type.
 
+`serve` reads the answers and refusals of Qory Apiary, the documents of
+`contracts/provisioner/v1`, by one rule. It ignores a member that the contract does not
+define, unless the document's `must_understand` lists it. `must_understand` lists JSON
+Pointers ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)), counted from the
+document's top level. When `must_understand` lists a pointer to a member that `serve`
+does not read, `serve` uses nothing in an answer to a claim, and reads a refusal by its
+status alone: on a `409` it changes nothing, and it sends the request again at its next
+check. The documents of `contracts/machines/v1` between the provisioner and the machine
+adapter are still read strictly: a member that the contract does not define fails the
+document.
+
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner
 cuts each line at 4096 bytes. It replaces a line with a fixed text when the line
@@ -103,10 +114,10 @@ machine type:
   lifetime, so `serve` gives the machine the longest lifetime, 1470 minutes.
 - On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, `serve` deletes the
   machine.
-- After any other failure, such as no answer, a server error or an answer with no
-  valid signature, `serve` keeps the machine and sends `dispatched` again at the next
-  watch. Once the machine has run longer than 1470 minutes and 15 minutes by its start
-  time in the list, `serve` deletes it.
+- After any other failure, such as no answer, a server error, an answer with no valid
+  signature or a refusal that `serve` cannot read, `serve` keeps the machine and sends
+  `dispatched` again at the next watch. Once the machine has run longer than 1470
+  minutes and 15 minutes by its start time in the list, `serve` deletes it.
 
 A stopped or deleting machine, and a machine whose `dispatch_id` does not have the
 shape of a dispatch id, get no `dispatched`. `serve` deletes such a machine, except a
