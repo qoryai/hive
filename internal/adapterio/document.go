@@ -52,12 +52,11 @@ type compiled struct {
 	dispatchID *jsonschema.Schema
 }
 
-// schemas compiles the schemas once. It compiles the closed copies of machines/v1, so a
-// reader of this package refuses a member that the contract does not define.
+// schemas compiles the schemas once, as the closed copies of machines/v1: a document with
+// a member that the schema does not define fails the check.
 //
-// shortcut: the machines contract asks a reader to ignore an undefined member unless
-// must_understand lists it, and this reader does neither; replace it in the work item for
-// the machines contract.
+// shortcut: machines/v1 says a reader ignores an undefined member unless must_understand
+// lists it, and this check does neither; replace it in the work item for machines/v1.
 var schemas = sync.OnceValues(func() (compiled, error) {
 	c := compiled{files: map[string]*jsonschema.Schema{}}
 	for _, f := range []string{checkFile, checkAnswerFile, makeFile, makeAnswerFile, listFile, listAnswerFile, logFile, logAnswerFile, deleteFile, deleteAnswerFile, errorFile} {

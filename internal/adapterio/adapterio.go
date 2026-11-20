@@ -16,7 +16,8 @@
 // rules.
 //
 // A decoder of this package checks a document against its schema, compiled with
-// contracts.CompileMachines, and refuses four more things that the schemas accept: a
+// contracts.CompileMachinesClosed, so it refuses a member that the schema does not define,
+// and it refuses four more things that the schemas accept: a
 // member name that appears twice in one object, start data of 0 bytes, start data in
 // base64 whose padding bits are not zero, and a log of more than [MaxLog] bytes as
 // UTF-8. [Encode] checks the same rules before it writes a document. No error of this
