@@ -228,7 +228,10 @@ The changes to Hive that no release contains yet, in the shape of
   provisioner matches a member of a document of Qory Apiary by its exact name, so in a
   claim answer `Gateway_URL` never replaces `gateway_url`. The machine adapter and the
   provisioner match a member of a machines/v1 document by its exact name too: a member
-  whose name differs in case is another member.
+  whose name differs in case is another member. This includes `must_understand`: a
+  member `Must_Understand` neither lists a pointer nor replaces the list. Hive uses the
+  revision of the `contracts` package of qoryai/integrations that reads members by exact
+  case.
 
 ### Removed
 

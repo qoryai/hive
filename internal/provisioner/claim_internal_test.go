@@ -147,6 +147,29 @@ func TestAClaimReadsMembersByTheirExactName(t *testing.T) {
 	}
 }
 
+// TestMustUnderstandIsReadByItsExactName reads claims with a must_understand and also a
+// member of another case, which the contract does not define. The exact member decides:
+// an empty list beside Must_Understand listing a pointer is read, and a list with an
+// unmet pointer beside MUST_UNDERSTAND with an empty list or null is still refused.
+func TestMustUnderstandIsReadByItsExactName(t *testing.T) {
+	with := func(must any, extra string) []byte {
+		d := aClaim()
+		d["must_understand"] = must
+		return append(bytes.TrimSuffix(marshal(t, d), []byte("}")), extra+"}"...)
+	}
+	if _, err := readClaim(with([]string{}, `,"Must_Understand":["/future"]`)); err != nil {
+		t.Errorf("a pointer in another case beside an empty list: %v", err)
+	}
+	for name, body := range map[string][]byte{
+		"an empty list after an unmet pointer": with([]string{"/future"}, `,"MUST_UNDERSTAND":[]`),
+		"null after an unmet pointer":          with([]string{"/future"}, `,"Must_Understand":null`),
+	} {
+		if _, err := readClaim(body); err != errMustUnderstand {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
 // TestAClaimWithAnUnmetPointerIsRefused reads claims whose must_understand lists a
 // member the client does not define, at any place, or is not a list of JSON Pointers:
 // each fails with the one text for it, which has no pointer, and has no run code.

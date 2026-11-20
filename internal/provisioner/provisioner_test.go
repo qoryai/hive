@@ -1109,6 +1109,31 @@ func TestARefusalWithAnUnmetPointerIsReadByItsStatus(t *testing.T) {
 	}
 }
 
+// TestARefusalReadsMustUnderstandByItsExactName sends a signed 409 whose exact
+// must_understand is empty beside Must_Understand with a pointer: the refusal is read,
+// with its code. With an unmet pointer in the exact member beside MUST_UNDERSTAND with an
+// empty list, or null, the status alone is read, as for any unmet pointer.
+func TestARefusalReadsMustUnderstandByItsExactName(t *testing.T) {
+	for name, c := range map[string]struct {
+		body string
+		code string
+	}{
+		"another case lists a pointer":   {`{"error":"lease_expired","must_understand":[],"Must_Understand":["/future"]}`, "lease_expired"},
+		"another case empties the list":  {`{"error":"lease_expired","must_understand":["/future"],"MUST_UNDERSTAND":[]}`, ""},
+		"another case follows with null": {`{"error":"lease_expired","must_understand":["/future"],"Must_Understand":null}`, ""},
+	} {
+		srv, cl, _, _ := setup(t)
+		claim := claimed(t, srv, cl, provisionertest.Work{})
+		claim.RunCode.Clear()
+		srv.Script(provisionertest.RouteDispatched, provisionertest.Reply{Status: 409, Body: c.body})
+		err := cl.Dispatched(context.Background(), claim.DispatchID, nil, "")
+		var r *provisioner.Refusal
+		if !errors.As(err, &r) || r.Status != 409 || r.Code != c.code || errors.Is(err, provisioner.ErrLeaseExpired) != (c.code != "") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 // TestAnswersAreReadUpToTheirBound sends a claim's 200 one byte over its bound, and
 // just within it, and a refusal at its bound: over is ErrTooLarge, never read as
 // signed; within is used.

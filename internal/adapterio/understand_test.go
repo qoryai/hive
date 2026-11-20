@@ -197,6 +197,23 @@ func TestADecoderReadsMembersByTheirExactName(t *testing.T) {
 	}
 }
 
+// TestMustUnderstandIsReadByItsExactName adds Must_Understand to a make answer: beside an
+// exact empty list, a pointer in it is ignored; beside an exact list with an unmet
+// pointer, an empty list or null in it does not clear the pointer.
+func TestMustUnderstandIsReadByItsExactName(t *testing.T) {
+	const want = "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"
+	got, err := adapterio.DecodeMakeAnswer([]byte(`{"id": "i-1", "must_understand": [], "Must_Understand": ["/future"]}`))
+	if err != nil || got.ID != "i-1" {
+		t.Errorf("a pointer in another case beside an empty list: %+v, %v", got, err)
+	}
+	for _, extra := range []string{`"MUST_UNDERSTAND": []`, `"Must_Understand": null`} {
+		_, err := adapterio.DecodeMakeAnswer([]byte(`{"id": "i-1", "must_understand": ["/future"], ` + extra + `}`))
+		if err == nil || err.Error() != want {
+			t.Errorf("%s after an unmet pointer: the error is %v", extra, err)
+		}
+	}
+}
+
 // TestServeReadsAnUndefinedMemberAndRefusesAnUnmetPointer sends Serve a request with an
 // undefined member, which it serves, and one whose must_understand lists a pointer that
 // version 1 does not define, which it answers with a failure of kind defect and no call
