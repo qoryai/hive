@@ -89,10 +89,10 @@ define, unless the document's `must_understand` lists it. `must_understand` list
 Pointers ([RFC 6901](https://www.rfc-editor.org/rfc/rfc6901)), counted from the
 document's top level. When `must_understand` lists a pointer to a member that `serve`
 does not read, `serve` uses nothing in an answer to a claim, and reads a refusal by its
-status alone. A `409 lease_expired` read so changes nothing: `serve` sends `dispatched`
-again at the next watch. The documents of `contracts/machines/v1` between the provisioner and the machine
-adapter are still read strictly: a member that the contract does not define fails the
-document.
+status alone. A `409 lease_expired` that `serve` cannot read changes nothing: `serve`
+sends `dispatched` again at the next watch. The documents of `contracts/machines/v1`
+between the provisioner and the machine adapter are still read strictly: a member that
+the contract does not define fails the document.
 
 The provisioner copies the adapter's standard error, line by line, to the
 provisioner's standard error, which also has the provisioner's log. The provisioner

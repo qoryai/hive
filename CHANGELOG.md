@@ -213,13 +213,13 @@ The changes to Hive that no release contains yet, in the shape of
   warning, and `make` does not find it.
 - The provisioner ignores a member of an answer or a refusal of Qory Apiary that
   `contracts/provisioner/v1` does not define, unless the document's `must_understand`
-  lists it. Before, an answer to a claim with such a member was refused. A claim answer
-  whose `must_understand` lists a pointer to a member that the provisioner does not read
-  is unusable: the provisioner uses nothing in it and does not send the claim again. A
-  refusal whose `must_understand` lists such a pointer is read by its status alone, as a
-  refusal with no readable body is. A `409 lease_expired` read so changes nothing, and
-  the next watch sends `dispatched` again. The documents of `contracts/machines/v1` are
-  still read strictly.
+  lists it. Until this change, a claim answer with such a member was refused. A claim
+  answer whose `must_understand` lists a pointer to a member that the provisioner does
+  not read is unusable: the provisioner uses nothing in it and does not send the claim
+  again. A refusal whose `must_understand` lists such a pointer is read by its status
+  alone, as a refusal with no readable body is. A `409 lease_expired` that the
+  provisioner cannot read changes nothing, and the next watch sends `dispatched` again.
+  The documents of `contracts/machines/v1` are still read strictly.
 
 ### Removed
 
