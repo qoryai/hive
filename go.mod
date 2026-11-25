@@ -10,8 +10,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.2
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.50.0
 	github.com/aws/smithy-go v1.28.5
-	github.com/qoryai/forager v0.7.1-0.20261119101310-5e9ca86dacd7
-	github.com/qoryai/integrations v0.3.1-0.20261120025829-a0a9240029c3
+	github.com/qoryai/forager v0.7.1-0.20261120100355-3a8876d85c0d
+	github.com/qoryai/integrations v0.3.1-0.20261125005846-699a22cf96ee
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 )
 
