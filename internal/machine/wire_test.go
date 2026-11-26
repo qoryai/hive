@@ -101,7 +101,7 @@ const runReply = `<?xml version="1.0" encoding="UTF-8"?>
     <tagSet>
       <item><key>qory:managed</key><value>true</value></item>
       <item><key>qory:pool</key><value>np_0123456789abcdef</value></item>
-      <item><key>qory:key</key><value>dp_0123456789abcdef</value></item>
+      <item><key>qory:dispatch_id</key><value>dp_0123456789abcdef</value></item>
     </tagSet>
   </item></instancesSet>
 </RunInstancesResponse>`
@@ -139,7 +139,7 @@ func wantRunForm(extra ...[2]string) url.Values {
 		f.Set(p+"Tag.1.Value", "true")
 		f.Set(p+"Tag.2.Key", "qory:pool")
 		f.Set(p+"Tag.2.Value", "np_0123456789abcdef")
-		f.Set(p+"Tag.3.Key", "qory:key")
+		f.Set(p+"Tag.3.Key", "qory:dispatch_id")
 		f.Set(p+"Tag.3.Value", "dp_0123456789abcdef")
 		for j, kv := range extra {
 			f.Set(fmt.Sprintf("%sTag.%d.Key", p, j+4), kv[0])
@@ -159,7 +159,7 @@ func TestWireCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.Key != testSpec().Key {
+	if m.ID != "i-0123456789abcdef0" || m.State != StatePending || m.DispatchID != testSpec().DispatchID {
 		t.Errorf("machine %+v", m)
 	}
 	want := wantRunForm()
@@ -175,9 +175,9 @@ func TestWireCreate(t *testing.T) {
 	}
 }
 
-// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool
-// and qory:key and sorted by key, on the instance and the volume, in Create's request
-// and in CheckRights' dry run.
+// TestWireTags pins the tags of the spec on the wire, after qory:managed, qory:pool and
+// qory:dispatch_id and sorted by key, on the instance and the volume, in Create's
+// request and in CheckRights' dry run.
 func TestWireTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": ""}
@@ -263,7 +263,7 @@ func TestWireCheckRights(t *testing.T) {
 	}
 	got := s.forms[0]
 	token := got.Get("ClientToken")
-	if token == "" || token == testSpec().Key {
+	if token == "" || token == testSpec().DispatchID {
 		t.Errorf("ClientToken %q, want one the SDK sets", token)
 	}
 	got.Del("ClientToken")
@@ -300,7 +300,7 @@ func TestWireListAndConsole(t *testing.T) {
 		return `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>req-1</requestId>
 <reservationSet><item><reservationId>r-1</reservationId><instancesSet><item>
 <instanceId>` + id + `</instanceId><instanceState><code>80</code><name>stopped</name></instanceState>
-<clientToken>dp_0123456789abcdef</clientToken><tagSet><item><key>qory:key</key><value>dp_0123456789abcdef</value></item></tagSet>
+<clientToken>dp_0123456789abcdef</clientToken><tagSet><item><key>qory:dispatch_id</key><value>dp_0123456789abcdef</value></item></tagSet>
 </item></instancesSet></item></reservationSet>` + next + `</DescribeInstancesResponse>`
 	}
 	c, s := newWireClient(t, reply{200, page("i-0aaaaaaaaaaaaaaa0", "<nextToken>page-2</nextToken>")}, reply{200, page("i-0bbbbbbbbbbbbbbb0", "")})
@@ -308,7 +308,7 @@ func TestWireListAndConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].Key != "dp_0123456789abcdef" {
+	if len(ms) != 2 || ms[0].ID != "i-0aaaaaaaaaaaaaaa0" || ms[1].ID != "i-0bbbbbbbbbbbbbbb0" || ms[1].State != StateStopped || ms[1].DispatchID != "dp_0123456789abcdef" {
 		t.Errorf("machines %+v", ms)
 	}
 	want := url.Values{

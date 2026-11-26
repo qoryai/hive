@@ -122,7 +122,7 @@ func apiError(code string) error {
 // testSpec returns a valid spec with neutral example values.
 func testSpec() Spec {
 	return Spec{
-		Key:             "dp_0123456789abcdef",
+		DispatchID:      "dp_0123456789abcdef",
 		PoolID:          "np_0123456789abcdef",
 		InstanceType:    "m7g.large",
 		ImageID:         "ami-0123456789abcdef0",

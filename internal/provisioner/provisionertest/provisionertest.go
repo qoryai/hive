@@ -10,10 +10,13 @@
 // [Server.Signer]: an instance id outside its pattern gets a signed 400 bad_request;
 // another revision than [provisioner.Revision] a signed 400
 // unsupported_contract_version; a body that fails its schema a signed 400
-// invalid_request. The fake marks a signature as seen once the body passes its schema,
-// as Qory Apiary does. A time more than 300 seconds from
-// [Server.Now] then gets the unsigned 401. After those checks the fake signs every
-// answer: a reply that [Server.Script] queued for the route, else the model's.
+// invalid_request. The schema is the closed copy, so a member that the contract does
+// not define fails it: the client is the writer, and a misspelled member of its requests
+// fails its test. Qory Apiary itself ignores such a member. The fake marks a signature
+// as seen once the body passes its schema, as Qory Apiary does. A time more than 300
+// seconds from [Server.Now] then gets the unsigned 401. After those checks the fake
+// signs every answer: a reply that [Server.Script] queued for the route, else the
+// model's.
 //
 // The model keeps a queue of work, which [Server.Offer] fills, and the dispatches it
 // made of it. A claim takes the first work waiting into a new dispatch, or is held up to
@@ -602,13 +605,19 @@ func timeOf(body []byte) time.Time {
 	return t
 }
 
-// schemaOf is the schema each route's body must pass.
+// schemaOf is the closed copy of the schema each route's body must pass.
 var schemaOf = map[Route]func() (*jsonschema.Schema, error){
-	RouteClaim:      sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("claim.schema.json") }),
-	RouteDispatched: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("dispatched.schema.json") }),
-	RouteRelease:    sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("release.schema.json") }),
-	RouteMachineLog: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("machine-log.schema.json") }),
-	RouteMachineEnd: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisioner("machine-end.schema.json") }),
+	RouteClaim: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisionerClosed("claim.schema.json") }),
+	RouteDispatched: sync.OnceValues(func() (*jsonschema.Schema, error) {
+		return contracts.CompileProvisionerClosed("dispatched.schema.json")
+	}),
+	RouteRelease: sync.OnceValues(func() (*jsonschema.Schema, error) { return contracts.CompileProvisionerClosed("release.schema.json") }),
+	RouteMachineLog: sync.OnceValues(func() (*jsonschema.Schema, error) {
+		return contracts.CompileProvisionerClosed("machine-log.schema.json")
+	}),
+	RouteMachineEnd: sync.OnceValues(func() (*jsonschema.Schema, error) {
+		return contracts.CompileProvisionerClosed("machine-end.schema.json")
+	}),
 }
 
 // validBody reports whether body is one JSON document with no member twice, with its

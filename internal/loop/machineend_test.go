@@ -371,10 +371,10 @@ func TestPathsWithNoDeleteToday(t *testing.T) {
 	})
 }
 
-// TestAStrayWithADispatchKeyGetsAnEntry writes a deleting entry with the shortest
+// TestAStrayWithADispatchIDGetsAnEntry writes a deleting entry with the shortest
 // lifetime for a machine with no entry whose dispatch ended, and follows the path of
 // any other entry.
-func TestAStrayWithADispatchKeyGetsAnEntry(t *testing.T) {
+func TestAStrayWithADispatchIDGetsAnEntry(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
 	h.apiary.setDispatched(dispatchC, loop.ErrGone)
@@ -395,10 +395,10 @@ func TestAStrayWithADispatchKeyGetsAnEntry(t *testing.T) {
 	}
 }
 
-// TestTwoStraysWithOneKeyKeepTheFirstEntry leaves the second machine of a key whose
-// dispatch ended for a later watch, so that the second does not replace the entry of
-// the first.
-func TestTwoStraysWithOneKeyKeepTheFirstEntry(t *testing.T) {
+// TestTwoStraysWithOneDispatchIDKeepTheFirstEntry leaves the second machine of a
+// dispatch id whose dispatch ended for a later watch, so that the second does not
+// replace the entry of the first.
+func TestTwoStraysWithOneDispatchIDKeepTheFirstEntry(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
 	h.apiary.setDispatched(dispatchC, loop.ErrGone)
@@ -416,9 +416,9 @@ func TestTwoStraysWithOneKeyKeepTheFirstEntry(t *testing.T) {
 	}
 }
 
-// TestAStrayWithAKeyOfAnotherShapeGetsOneCleanupAndNoPost keeps today's one delete,
-// with no post, for a key that is not a dispatch id.
-func TestAStrayWithAKeyOfAnotherShapeGetsOneCleanupAndNoPost(t *testing.T) {
+// TestAStrayWithADispatchIDOfAnotherShapeGetsOneCleanupAndNoPost keeps today's one
+// delete, with no post, for a dispatch_id that is not a dispatch id.
+func TestAStrayWithADispatchIDOfAnotherShapeGetsOneCleanupAndNoPost(t *testing.T) {
 	h := newHarness(t)
 	h.start()
 	h.machines.add("i-s", "not-a-dispatch", contracts.MachineRunning, epoch)
@@ -432,8 +432,9 @@ func TestAStrayWithAKeyOfAnotherShapeGetsOneCleanupAndNoPost(t *testing.T) {
 	}
 }
 
-// TestAStrayWhoseDeleteFailsGetsOneLogRead reads the log of a stray whose key is not a
-// dispatch id once, while each watch sends its delete again and the delete fails.
+// TestAStrayWhoseDeleteFailsGetsOneLogRead reads the log of a stray whose dispatch_id
+// is not a dispatch id once, while each watch sends its delete again and the delete
+// fails.
 func TestAStrayWhoseDeleteFailsGetsOneLogRead(t *testing.T) {
 	h := newHarness(t)
 	h.machines.setDeleteErr(deleteFailure, deleteFailure, deleteFailure)
@@ -547,11 +548,11 @@ func TestAPendingStrayIsDeletedUntilGone(t *testing.T) {
 	})
 }
 
-// TestADeletingStrayWithADispatchKeyGetsAnEntry writes a deleting entry for a listed
-// machine that is deleting and whose dispatch key has no entry, with no read of its
+// TestADeletingStrayWithADispatchIDGetsAnEntry writes a deleting entry for a listed
+// machine that is deleting and whose dispatch id has no entry, with no read of its
 // log. Each watch deletes it again until the delete returns gone, and then gone is
 // posted.
-func TestADeletingStrayWithADispatchKeyGetsAnEntry(t *testing.T) {
+func TestADeletingStrayWithADispatchIDGetsAnEntry(t *testing.T) {
 	h := newHarness(t)
 	h.machines.lingering = true
 	h.start()
@@ -962,8 +963,8 @@ func TestAnAcceptedPostEndsTheCount(t *testing.T) {
 }
 
 // TestARemovalEndsTheCount fails delete_failed once, then gone for 24 hours, and the
-// entry leaves once gone is accepted. A machine with the same key after that gets a new
-// entry, whose failure counts anew.
+// entry leaves once gone is accepted. A machine with the same dispatch id after that
+// gets a new entry, whose failure counts anew.
 func TestARemovalEndsTheCount(t *testing.T) {
 	h := newHarness(t)
 	h.machines.deleteErr = []error{deleteFailure}
@@ -981,7 +982,7 @@ func TestARemovalEndsTheCount(t *testing.T) {
 	h.tick()
 	h.tick()
 	equal(t, "the journal", h.entries(), nil)
-	// A machine with the key of an accepted gone counts as a stray only after the
+	// A machine with the dispatch id of an accepted gone counts as a stray only after the
 	// list grace.
 	h.clock.Advance(loop.ListGrace)
 	h.clock.waitPending(t, loop.WatchInterval)
@@ -1224,8 +1225,8 @@ func TestAWaitingEndedEntryLetsTheNextOneGo(t *testing.T) {
 }
 
 // TestRestartKeepsAnEndedEntry resumes an ended entry with no dispatched and no delete,
-// also when the list has a machine with its key. A restart starts the waits again, so
-// the first watch after it sends gone.
+// also when the list has a machine with its dispatch id. A restart starts the waits
+// again, so the first watch after it sends gone.
 func TestRestartKeepsAnEndedEntry(t *testing.T) {
 	h := newHarness(t)
 	h.apiary.setEnd("gone", endFailed)

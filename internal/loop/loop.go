@@ -22,9 +22,9 @@
 //     a machine that is deleting, or that is still not listed 5 minutes after its
 //     make, with no read of its log. It adopts the listed machine of a claimed entry
 //     that stays because its release did not return 204. For each listed machine
-//     that has no journal entry and a key in the shape of a dispatch id, it sends
-//     dispatched and, on 204, takes the machine back with a journal entry. It cleans
-//     up every other listed machine that has no journal entry.
+//     that has no journal entry and a dispatch_id in the shape of a dispatch id, it
+//     sends dispatched and, on 204, takes the machine back with a journal entry. It
+//     cleans up every other listed machine that has no journal entry.
 //
 // To clean up a machine, the loop reads the machine's log through the adapter,
 // uploads it to Qory Apiary, deletes the machine and sends machine-end, which tells
@@ -124,7 +124,8 @@ var (
 
 // Claim is a claim answer: a request for one machine.
 type Claim struct {
-	// DispatchID is the dispatch, dp_ and 16 characters. It is the key of the machine.
+	// DispatchID is the dispatch, dp_ and 16 characters. It is the dispatch id of the
+	// machine.
 	DispatchID string
 	// PoolID is the node pool whose key made the claim, np_ and 16 characters.
 	PoolID string
@@ -188,9 +189,9 @@ type Machines interface {
 	// Check shows that the adapter's rights and settings work, and returns the
 	// machines the adapter can make, its offers.
 	Check(ctx context.Context) ([]contracts.MachineSpec, error)
-	// Make makes one machine that fits spec in pool for key and delivers startData to
-	// it.
-	Make(ctx context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error)
+	// Make makes one machine that fits spec in pool for dispatchID and delivers
+	// startData to it.
+	Make(ctx context.Context, dispatchID, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error)
 	// List lists the machines of pool.
 	List(ctx context.Context, pool string) (contracts.MachinesListAnswer, error)
 	// Log reads the console text of the machine id.
@@ -325,9 +326,9 @@ type loop struct {
 	// goneDone is the time at which gone was done for each dispatch id, for
 	// [ListGrace].
 	goneDone map[string]time.Time
-	// strays are the keys of the listed machines with no journal entry that the last
-	// watch acted on, so that a key is logged once while it stays a stray. Only the
-	// watch reads and writes it.
+	// strays are the dispatch ids of the listed machines with no journal entry that the
+	// last watch acted on, so that a dispatch id is logged once while it stays a stray.
+	// Only the watch reads and writes it.
 	strays map[string]bool
 	start  time.Time
 }
@@ -436,11 +437,11 @@ func (l *loop) release(ctx context.Context, id, reason string) error {
 
 // releaseEntry releases the dispatch of a claimed entry, and returns the error of the
 // release, as release returns it. Only a release that returns 204 removes the entry.
-// After any other answer, such as 409 machine_exists, 410 gone, 409 lease_expired or
-// a failed request, a machine may exist, so the entry stays in the phase claimed. The
-// watch then adopts a machine listed with its key, and no watch deletes it as a stray.
-// When no machine is listed once the entry's lifetime and 15 minutes have passed, the
-// watch sends gone for the dispatch with no delete.
+// After any other answer, such as 409 machine_exists, 410 gone, 409 lease_expired or a
+// failed request, a machine may exist, so the entry stays in the phase claimed. The
+// watch then adopts a machine listed with its dispatch id, and no watch deletes it as a
+// stray. When no machine is listed once the entry's lifetime and 15 minutes have
+// passed, the watch sends gone for the dispatch with no delete.
 func (l *loop) releaseEntry(ctx context.Context, id, reason string) error {
 	err := l.release(ctx, id, reason)
 	if err == nil {

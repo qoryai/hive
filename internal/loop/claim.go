@@ -158,7 +158,8 @@ func (l *loop) handle(ctx context.Context, c Claim) error {
 	}
 	e := journal.Entry{DispatchID: id, Phase: journal.PhaseMade, MachineID: made.ID, MaxLifetimeMinutes: c.MaxLifetimeMinutes, MachineType: machineType}
 	if err := l.Journal.Set(e); err != nil {
-		// The journal has the claimed entry, so a restart finds the machine by its key.
+		// The journal has the claimed entry, so a restart finds the machine by its dispatch
+		// id.
 		l.Log.Error("writing the journal failed", slog.String("dispatch_id", id), slog.String("machine_id", made.ID), errorAttr(err, nil))
 		return err
 	}

@@ -27,7 +27,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 	}{
 		{contracts.MachinesCheck{Version: 1}, func(b []byte) (any, error) { return adapterio.DecodeCheck(b) }},
 		{contracts.MachinesCheckAnswer{Offers: []contracts.MachineSpec{testSpec, {VCPUs: 1024, MemoryMiB: 8388608, DiskGiB: 65536, Arch: "arm64", Virtualization: true}}}, func(b []byte) (any, error) { return adapterio.DecodeCheckAnswer(b) }},
-		{contracts.MachinesMake{Version: 1, Key: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: base64.StdEncoding.EncodeToString(data)}, func(b []byte) (any, error) {
+		{contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: base64.StdEncoding.EncodeToString(data)}, func(b []byte) (any, error) {
 			r, got, err := adapterio.DecodeMake(b)
 			if !bytes.Equal(got, data) {
 				t.Errorf("the start data is %v, want %v", got, data)
@@ -37,7 +37,7 @@ func TestEncodeRoundTrip(t *testing.T) {
 		{contracts.MachinesMakeAnswer{ID: "i-0123456789abcdef0"}, func(b []byte) (any, error) { return adapterio.DecodeMakeAnswer(b) }},
 		{contracts.MachinesMakeAnswer{ID: "i-0123456789abcdef0", MachineType: "t3.medium"}, func(b []byte) (any, error) { return adapterio.DecodeMakeAnswer(b) }},
 		{contracts.MachinesList{Version: 1, Pool: "np_0123456789abcdef"}, func(b []byte) (any, error) { return adapterio.DecodeList(b) }},
-		{contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i-1", Key: "dp_0123456789abcdef", State: contracts.MachineStopped, Started: "2026-10-22T10:00:00Z"}}}, func(b []byte) (any, error) { return adapterio.DecodeListAnswer(b) }},
+		{contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i-1", DispatchID: "dp_0123456789abcdef", State: contracts.MachineStopped, Started: "2026-10-22T10:00:00Z"}}}, func(b []byte) (any, error) { return adapterio.DecodeListAnswer(b) }},
 		{contracts.MachinesListAnswer{Machines: []contracts.Machine{}}, func(b []byte) (any, error) { return adapterio.DecodeListAnswer(b) }},
 		{contracts.MachinesLog{Version: 1, ID: "i-1"}, func(b []byte) (any, error) { return adapterio.DecodeLog(b) }},
 		{contracts.MachinesLogAnswer{Log: "boot\n"}, func(b []byte) (any, error) { return adapterio.DecodeLogAnswer(b) }},
@@ -69,19 +69,22 @@ func TestEncodeRefusesInvalid(t *testing.T) {
 		contracts.MachinesCheck{},
 		contracts.MachinesCheckAnswer{},
 		contracts.MachinesCheckAnswer{Offers: make([]contracts.MachineSpec, 65)},
-		contracts.MachinesMake{Version: 1, Key: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec},
-		contracts.MachinesMake{Version: 1, Key: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: contracts.MachineSpec{}, StartData: "eA=="},
-		contracts.MachinesMake{Version: 1, Key: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: base64.StdEncoding.EncodeToString(make([]byte, contracts.MaxStartData+1))},
+		contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec},
+		contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: contracts.MachineSpec{}, StartData: "eA=="},
+		contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: base64.StdEncoding.EncodeToString(make([]byte, contracts.MaxStartData+1))},
 		contracts.MachinesMakeAnswer{ID: "i-0123456789abcdef0", MachineType: "t3 medium"},
 		contracts.MachinesMakeAnswer{ID: adapterio.NoID},
-		contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i", Key: "dp_0123456789abcdef", State: contracts.MachineGone, Started: "2026-10-22T10:00:00Z"}}},
-		contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i", Key: "dp_0123456789abcdef", State: contracts.MachineRunning, Started: "10000-01-01T00:00:00Z"}}},
+		contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i", DispatchID: "dp_0123456789abcdef", State: contracts.MachineGone, Started: "2026-10-22T10:00:00Z"}}},
+		contracts.MachinesListAnswer{Machines: []contracts.Machine{{ID: "i", DispatchID: "dp_0123456789abcdef", State: contracts.MachineRunning, Started: "10000-01-01T00:00:00Z"}}},
 		contracts.MachinesDeleteAnswer{State: contracts.MachineRunning},
 		contracts.MachinesLogAnswer{Log: "\xff"},
 		contracts.MachinesLogAnswer{Log: "boot\x00"},
 		contracts.MachinesError{Error: contracts.MachinesFailure{Kind: "fatal", Message: "m"}},
 		contracts.MachinesError{Error: contracts.MachinesFailure{Kind: contracts.FailureOther, Message: strings.Repeat("m", adapterio.MaxMessage+1)}},
 		&contracts.MachinesCheck{Version: 1},
+		// Encode writes a document that a reader may ignore a member of, and never one
+		// whose must_understand lists a member that the contract does not define.
+		contracts.MachinesCheck{Version: 1, MustUnderstand: []string{"/extra"}},
 	} {
 		if b, err := adapterio.Encode(doc); err == nil {
 			t.Errorf("%#v encoded as %s", doc, b)
@@ -131,12 +134,12 @@ func serve(h adapterio.Handler, in string, args ...string) (int, string) {
 
 func TestServe(t *testing.T) {
 	h := &handler{}
-	status, out := serve(h, `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC+g=="}`, "make", "--settings", "/etc/adapter.json")
+	status, out := serve(h, `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC+g=="}`, "make", "--settings", "/etc/adapter.json")
 	if status != adapterio.ExitOK || out != `{"id":"i-0123456789abcdef0"}`+"\n" {
 		t.Fatalf("make: %d %q", status, out)
 	}
-	want := contracts.MachinesMake{Version: 1, Key: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: "AAEC+g=="}
-	if h.settings != "/etc/adapter.json" || h.make != want || !bytes.Equal(h.startData, []byte{0, 1, 2, 250}) {
+	want := contracts.MachinesMake{Version: 1, DispatchID: "dp_0123456789abcdef", Pool: "np_0123456789abcdef", MachineSpec: testSpec, StartData: "AAEC+g=="}
+	if h.settings != "/etc/adapter.json" || !reflect.DeepEqual(h.make, want) || !bytes.Equal(h.startData, []byte{0, 1, 2, 250}) {
 		t.Errorf("the handler received %q, %#v, %v", h.settings, h.make, h.startData)
 	}
 	if status, out := serve(h, `{"version": 1}`, "check", "--settings", "a.json"); status != 0 || out != `{"offers":[{"vcpus":2,"memory_mib":4096,"disk_gib":30,"arch":"amd64","virtualization":false}]}`+"\n" {
@@ -224,7 +227,7 @@ func TestServeFailures(t *testing.T) {
 	}
 	many := make([]contracts.Machine, 12000)
 	for i := range many {
-		many[i] = contracts.Machine{ID: "i-0123456789abcdef0", Key: "dp_0123456789abcdef", State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
+		many[i] = contracts.Machine{ID: "i-0123456789abcdef0", DispatchID: "dp_0123456789abcdef", State: contracts.MachineRunning, Started: "2026-10-22T10:00:00Z"}
 	}
 	e = errorOf(t, &handler{list: contracts.MachinesListAnswer{Machines: many}}, `{"version": 1, "pool": "np_0123456789abcdef"}`, "list", "--settings", "a.json")
 	if e.Kind != contracts.FailureDefect || e.Message != "Fix the machine adapter: its list answer is larger than 1048576 bytes" {
@@ -277,7 +280,7 @@ func TestLogAnswer(t *testing.T) {
 func TestServeRefusesSecretMessage(t *testing.T) {
 	data := []byte(`{"version":1,"run_code":"qecr_MARKERc0ffee7a1b","gateway":{"url":"https://gateway.example.com:8443","address":"10.0.1.5"}}`)
 	enc := base64.StdEncoding.EncodeToString(data)
-	in := `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "` + enc + `"}`
+	in := `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "` + enc + `"}`
 	for _, err := range []error{
 		errors.New("Check the start data " + enc[:80]),
 		errors.New("Check the start data " + string(data)),

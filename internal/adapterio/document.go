@@ -20,10 +20,10 @@ import (
 
 // The rules that a document fails beyond a schema's rules.
 var (
-	errNotObject = errors.New("the document must be one JSON object in UTF-8, with no member name twice")
-	errUnknown   = errors.New("the document has a member that version 1 does not define")
-	errStartData = fmt.Errorf("the member start_data must be standard base64 of 1 to %d bytes, with padding bits of zero", contracts.MaxStartData)
-	errLog       = fmt.Errorf("the member log must be at most %d bytes of UTF-8", MaxLog)
+	errNotObject      = errors.New("the document must be one JSON object in UTF-8, with no member name twice")
+	errMustUnderstand = errors.New("must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers")
+	errStartData      = fmt.Errorf("the member start_data must be standard base64 of 1 to %d bytes, with padding bits of zero", contracts.MaxStartData)
+	errLog            = fmt.Errorf("the member log must be at most %d bytes of UTF-8", MaxLog)
 )
 
 // The schema files of machines/v1, in contracts.MachinesFS.
@@ -41,41 +41,56 @@ const (
 	errorFile        = "error.schema.json"
 )
 
-// keyDefinition is the definition of a dispatch id in the provisioner contract, which
-// the key of a make request and of a listed machine refers to.
-const keyDefinition = "definitions.schema.json#/$defs/dispatch_id"
+// dispatchIDDefinition is the definition of a dispatch id in the provisioner contract,
+// which the dispatch_id member of a make request and of a listed machine refers to.
+const dispatchIDDefinition = "definitions.schema.json#/$defs/dispatch_id"
 
-// compiled are the schemas of machines/v1 by file name, and the definition of a key.
+// compiled are the schemas of machines/v1 by file name, and the definition of a
+// dispatch id. A reader checks a document against the open schemas, which accept a
+// member that the contract does not define. [Encode], the writer, checks against the
+// closed copies, which refuse such a member.
 type compiled struct {
-	files map[string]*jsonschema.Schema
-	key   *jsonschema.Schema
+	open       map[string]*jsonschema.Schema
+	closed     map[string]*jsonschema.Schema
+	dispatchID *jsonschema.Schema
 }
 
 // schemas compiles the schemas once.
 var schemas = sync.OnceValues(func() (compiled, error) {
-	c := compiled{files: map[string]*jsonschema.Schema{}}
+	c := compiled{open: map[string]*jsonschema.Schema{}, closed: map[string]*jsonschema.Schema{}}
 	for _, f := range []string{checkFile, checkAnswerFile, makeFile, makeAnswerFile, listFile, listAnswerFile, logFile, logAnswerFile, deleteFile, deleteAnswerFile, errorFile} {
 		s, err := contracts.CompileMachines(f)
 		if err != nil {
 			return compiled{}, fmt.Errorf("the schema machines/v1 %s does not compile: %w", f, err)
 		}
-		c.files[f] = s
+		c.open[f] = s
+		s, err = contracts.CompileMachinesClosed(f)
+		if err != nil {
+			return compiled{}, fmt.Errorf("the closed schema machines/v1 %s does not compile: %w", f, err)
+		}
+		c.closed[f] = s
 	}
-	s, err := contracts.CompileProvisioner(keyDefinition)
+	s, err := contracts.CompileProvisioner(dispatchIDDefinition)
 	if err != nil {
-		return compiled{}, fmt.Errorf("the schema provisioner/v1 %s does not compile: %w", keyDefinition, err)
+		return compiled{}, fmt.Errorf("the schema provisioner/v1 %s does not compile: %w", dispatchIDDefinition, err)
 	}
-	c.key = s
+	c.dispatchID = s
 	return c, nil
 })
 
-// check returns the first rule that b fails: one JSON object in UTF-8 with no member
-// name twice, then the schema file of machines/v1.
-func check(file string, b []byte) error {
-	v := jsontext.Value(b)
-	if !v.IsValid() || v.Kind() != '{' {
+// checkObject returns errNotObject unless b is one JSON object in UTF-8 with no member
+// name twice.
+func checkObject(b []byte) error {
+	if v := jsontext.Value(b); !v.IsValid() || v.Kind() != '{' {
 		return errNotObject
 	}
+	return nil
+}
+
+// check returns the first rule of the schema file of machines/v1 that b fails, in its
+// closed copy when closed is true and otherwise in its open form. The caller has
+// checked that b is one JSON object ([checkObject]); [Encode] marshals one.
+func check(file string, b []byte, closed bool) error {
 	c, err := schemas()
 	if err != nil {
 		return err
@@ -84,7 +99,11 @@ func check(file string, b []byte) error {
 	if err != nil {
 		return errNotObject
 	}
-	err = c.files[file].Validate(doc)
+	files := c.open
+	if closed {
+		files = c.closed
+	}
+	err = files[file].Validate(doc)
 	var failed *jsonschema.ValidationError
 	if errors.As(err, &failed) {
 		return rule(file, failed)
@@ -120,11 +139,6 @@ func rule(file string, e *jsonschema.ValidationError) error {
 		return fmt.Errorf("the member %s has a value that the rule not of machines/v1 %s refuses", at, file)
 	case *kind.Required:
 		return fmt.Errorf("the member %s is missing", place(append(slices.Clone(e.InstanceLocation), k.Missing[0])))
-	case *kind.AdditionalProperties:
-		if at == "" {
-			return errUnknown
-		}
-		return fmt.Errorf("%s: %w", at, errUnknown)
 	case *kind.Type:
 		return fmt.Errorf("the member %s must be %s", at, oneOf(k.Want, typeName))
 	case *kind.Const:
@@ -142,6 +156,11 @@ func rule(file string, e *jsonschema.ValidationError) error {
 		return fmt.Errorf("the member %s must have at most %d characters", at, k.Want)
 	case *kind.Format:
 		return fmt.Errorf("the member %s must be in the format %s", at, k.Want)
+	}
+	// The closed copies that Encode uses reach this line for a member that a contract
+	// type has and its schema does not define; at is then empty or names the parent.
+	if at == "" {
+		return fmt.Errorf("the document fails a rule of machines/v1 %s", file)
 	}
 	return fmt.Errorf("the member %s fails a rule of machines/v1 %s", at, file)
 }
@@ -201,10 +220,20 @@ var wholeNumbers = json.WithUnmarshalers(json.UnmarshalFromFunc(func(dec *jsonte
 	return nil
 }))
 
-// decode checks b against the schema file and reads it into a T.
+// decode reads b into a T. It ignores a member that the schema file does not define,
+// unless the must_understand of b lists it. It returns an error when b is not one JSON
+// object, when its must_understand lists a pointer that T does not define
+// ([contracts.CheckMustUnderstand]), or when a member that the schema defines fails the
+// schema.
 func decode[T any](file string, b []byte) (T, error) {
 	var v T
-	if err := check(file, b); err != nil {
+	if err := checkObject(b); err != nil {
+		return v, err
+	}
+	if contracts.CheckMustUnderstand(b, &v) != nil {
+		return v, errMustUnderstand
+	}
+	if err := check(file, b, false); err != nil {
 		return v, err
 	}
 	if err := json.Unmarshal(b, &v, wholeNumbers); err != nil {
@@ -232,15 +261,16 @@ func checkLog(log string) error {
 	return nil
 }
 
-// CheckKey returns an error when key is not a dispatch id, the shape of the key of a
-// make request and of a listed machine. The error contains no value of key.
-func CheckKey(key string) error {
+// CheckDispatchID returns an error when dispatchID is not a dispatch id, the shape of
+// the dispatch_id member of a make request and of a listed machine. The error contains
+// no value of dispatchID.
+func CheckDispatchID(dispatchID string) error {
 	c, err := schemas()
 	if err != nil {
 		return err
 	}
-	if c.key.Validate(key) != nil {
-		return errors.New("the key must be dp_ and 16 characters of 0-9 and a-z without i, l, o and u")
+	if c.dispatchID.Validate(dispatchID) != nil {
+		return errors.New("the dispatch id must be dp_ and 16 characters of 0-9 and a-z without i, l, o and u")
 	}
 	return nil
 }
@@ -284,7 +314,7 @@ func Encode(doc any) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("the document cannot be written as JSON in UTF-8")
 	}
-	if err := check(file, b); err != nil {
+	if err := check(file, b, true); err != nil {
 		return nil, err
 	}
 	if err := extra(); err != nil {

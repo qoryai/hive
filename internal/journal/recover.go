@@ -8,9 +8,9 @@ const stateDeleting = "deleting"
 // characters, as the provisioner contract requires.
 const ReasonRestarted = "the provisioner restarted before a machine was made"
 
-// Lookup is the result of the lookup of a dispatch's machine by its key, the dispatch
-// id, in the adapter's list of machines. Found is false when no machine in the list
-// has that key. MachineID and State are the machine's id and its adapter state:
+// Lookup is the result of the lookup of a dispatch's machine by the dispatch id in the
+// adapter's list of machines. Found is false when no machine in the list has that
+// dispatch id. MachineID and State are the machine's id and its adapter state:
 // starting, running, stopped or deleting.
 type Lookup struct {
 	Found            bool
@@ -38,7 +38,7 @@ type Action struct {
 }
 
 // Recover returns what to do with the entry e after a restart, given the lookup l of
-// its machine by its key:
+// its machine by its dispatch id:
 //   - ended or deleting: resume with the entry's machine id, whatever the lookup
 //     returned. The watch acts on the entry.
 //   - claimed, with no machine found: release with [ReasonRestarted]. A release

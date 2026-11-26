@@ -112,8 +112,8 @@ func TestMessagesFit(t *testing.T) {
 		func(s *Spec) { s.SubnetID = "" },
 		func(s *Spec) { s.SecurityGroupID = "" },
 		func(s *Spec) { s.UserData = make([]byte, MaxUserData+1) },
-		func(s *Spec) { s.Key = strings.Repeat("d", maxClientToken+1) },
-		func(s *Spec) { s.Key = strings.Repeat("d", maxClientToken-1) + "\xff" },
+		func(s *Spec) { s.DispatchID = strings.Repeat("d", maxClientToken+1) },
+		func(s *Spec) { s.DispatchID = strings.Repeat("d", maxClientToken-1) + "\xff" },
 	} {
 		spec := testSpec()
 		edit(&spec)

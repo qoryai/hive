@@ -44,11 +44,11 @@ const (
 )
 
 // The phases of a dispatch, in order. In claimed, no make has returned, so a machine
-// may exist without a machine id in the journal: a restart looks the machine up in
-// the adapter's list by its key, the dispatch id. From made on, the entry has the
-// machine id that the adapter's make returned. An entry can enter deleting or ended
-// from any phase, with the machine id that the adapter's list returned when the entry
-// had none. A claimed entry can also enter ended with no machine id.
+// may exist without a machine id in the journal: a restart looks the machine up in the
+// adapter's list by the dispatch id. From made on, the entry has the machine id that
+// the adapter's make returned. An entry can enter deleting or ended from any phase,
+// with the machine id that the adapter's list returned when the entry had none. A
+// claimed entry can also enter ended with no machine id.
 const (
 	// PhaseClaimed is a claimed dispatch for which no make has returned.
 	PhaseClaimed = "claimed"

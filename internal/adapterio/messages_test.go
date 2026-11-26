@@ -40,20 +40,20 @@ func TestMessagesFit(t *testing.T) {
 	add(errorOf(t, &handler{}, strings.Repeat(" ", contracts.MaxMachinesAnswer+1), deleteArgs...))
 	for _, in := range []string{
 		`{"version": 2, "id": "i-0123456789abcdef0"}`,
-		`{"version": 1, "id": "i-0123456789abcdef0", "other": 1}`,
+		`{"version": 1, "id": "i-0123456789abcdef0", "other": 1, "must_understand": ["/other"]}`,
 		`{"version": 1}`,
 		`[]`,
 	} {
 		add(errorOf(t, &handler{}, in, deleteArgs...))
 	}
 	for _, in := range []string{
-		`{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAE"}`,
-		`{"version": 1, "key": "dp_iiiiiiiiiiiiiiii", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC"}`,
+		`{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAE"}`,
+		`{"version": 1, "dispatch_id": "dp_iiiiiiiiiiiiiiii", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC"}`,
 	} {
 		add(errorOf(t, &handler{}, in, makeArgs...))
 	}
 
-	in := `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC"}`
+	in := `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "AAEC"}`
 	add(errorOf(t, &handler{err: errors.New("Check the code qecr_abc")}, in, makeArgs...))
 	add(errorOf(t, &handler{err: &adapterio.Failure{Kind: contracts.FailureOther}}, in, makeArgs...))
 

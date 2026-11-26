@@ -44,35 +44,34 @@ func instance(id, state, token string) types.Instance {
 		Tags: []types.Tag{
 			{Key: aws.String(TagManaged), Value: aws.String("true")},
 			{Key: aws.String(TagPool), Value: aws.String("np_0123456789abcdef")},
-			{Key: aws.String(TagKey), Value: aws.String(token)},
+			{Key: aws.String(TagDispatchID), Value: aws.String(token)},
 		},
 	}
 }
 
 // TestCreateInput pins every field of the RunInstances input that Create sends: the
-// client token of the key and the instance type, the subnet and the security group
-// only on the network interface, which has no public address, the IMDSv2 options, the
-// stop on shutdown, the encrypted gp3 root volume of the spec's size, no CpuOptions,
-// and
-// only the tags qory:managed, qory:pool and qory:key on the instance and its volume
-// when the spec has no more tags.
+// client token of the dispatch id and the instance type, the subnet and the security
+// group only on the network interface, which has no public address, the IMDSv2 options,
+// the stop on shutdown, the encrypted gp3 root volume of the spec's size, no
+// CpuOptions, and only the tags qory:managed, qory:pool and qory:dispatch_id on the
+// instance and its volume when the spec has no more tags.
 func TestCreateInput(t *testing.T) {
 	spec := testSpec()
 	f := &fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
-		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.Key)}}, nil
+		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.DispatchID)}}, nil
 	}}
 	m, err := New(f).Create(context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, Key: spec.Key, LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
+	want := Machine{ID: "i-0123456789abcdef0", State: StatePending, DispatchID: spec.DispatchID, LaunchTime: time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)}
 	if m != want {
 		t.Errorf("machine %+v, want %+v", m, want)
 	}
 	tags := []types.Tag{
 		{Key: aws.String("qory:managed"), Value: aws.String("true")},
 		{Key: aws.String("qory:pool"), Value: aws.String("np_0123456789abcdef")},
-		{Key: aws.String("qory:key"), Value: aws.String("dp_0123456789abcdef")},
+		{Key: aws.String("qory:dispatch_id"), Value: aws.String("dp_0123456789abcdef")},
 	}
 	wantIn := &ec2.RunInstancesInput{
 		ClientToken:  aws.String("dp_0123456789abcdef.m7g.large"),
@@ -119,8 +118,8 @@ func TestCreateInput(t *testing.T) {
 }
 
 // TestCreateTags pins that the tags of the spec follow qory:managed, qory:pool and
-// qory:key, sorted by key, on the instance and the volume, in Create's input and in
-// CheckRights' dry run.
+// qory:dispatch_id, sorted by key, on the instance and the volume, in Create's input
+// and in CheckRights' dry run.
 func TestCreateTags(t *testing.T) {
 	spec := testSpec()
 	spec.Tags = map[string]string{"qory:stack": "example-stack", "env": "test", "empty": ""}
@@ -128,7 +127,7 @@ func TestCreateTags(t *testing.T) {
 		if aws.ToBool(in.DryRun) {
 			return nil, apiError("DryRunOperation")
 		}
-		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.Key)}}, nil
+		return &ec2.RunInstancesOutput{Instances: []types.Instance{instance("i-0123456789abcdef0", StatePending, spec.DispatchID)}}, nil
 	}}
 	c := New(f)
 	if _, err := c.Create(context.Background(), spec); err != nil {
@@ -140,7 +139,7 @@ func TestCreateTags(t *testing.T) {
 	wantTags := []types.Tag{
 		{Key: aws.String("qory:managed"), Value: aws.String("true")},
 		{Key: aws.String("qory:pool"), Value: aws.String("np_0123456789abcdef")},
-		{Key: aws.String("qory:key"), Value: aws.String("dp_0123456789abcdef")},
+		{Key: aws.String("qory:dispatch_id"), Value: aws.String("dp_0123456789abcdef")},
 		{Key: aws.String("empty"), Value: aws.String("")},
 		{Key: aws.String("env"), Value: aws.String("test")},
 		{Key: aws.String("qory:stack"), Value: aws.String("example-stack")},
@@ -219,9 +218,9 @@ func TestCreateRefusesSpec(t *testing.T) {
 		edit func(*Spec)
 		want string
 	}{
-		{func(s *Spec) { s.Key = "" }, "Fix the EC2 machine adapter: the machine spec has no key"},
-		{func(s *Spec) { s.Key = strings.Repeat("d", 55) }, "Report this defect in the provisioner: the client token of the key has 65 bytes, and a client token has 1 to 64 characters"},
-		{func(s *Spec) { s.Key = "dp_ 1" }, "Report this defect in the provisioner: byte 3 of the client token of the key is 0x20, and a client token has only ASCII letters, digits and punctuation"},
+		{func(s *Spec) { s.DispatchID = "" }, "Fix the EC2 machine adapter: the machine spec has no dispatch id"},
+		{func(s *Spec) { s.DispatchID = strings.Repeat("d", 55) }, "Report this defect in the provisioner: the client token of the dispatch id has 65 bytes, and a client token has 1 to 64 characters"},
+		{func(s *Spec) { s.DispatchID = "dp_ 1" }, "Report this defect in the provisioner: byte 3 of the client token of the dispatch id is 0x20, and a client token has only ASCII letters, digits and punctuation"},
 		{func(s *Spec) { s.RootSizeGiB = 0 }, "Fix the EC2 machine adapter: the root volume size is 0 GiB, and a gp3 volume has 1 to 16384 GiB"},
 		{func(s *Spec) { s.RootSizeGiB = 16385 }, "Fix the EC2 machine adapter: the root volume size is 16385 GiB, and a gp3 volume has 1 to 16384 GiB"},
 		{func(s *Spec) { s.PoolID = "" }, "Fix the EC2 machine adapter: the machine spec has no pool id"},
@@ -244,18 +243,18 @@ func TestCreateRefusesSpec(t *testing.T) {
 		}
 	}
 	spec := testSpec()
-	spec.Key = strings.Repeat("d", 54)
+	spec.DispatchID = strings.Repeat("d", 54)
 	if _, err := New(&fakeAPI{run: func(*ec2.RunInstancesInput) (*ec2.RunInstancesOutput, error) {
 		return &ec2.RunInstancesOutput{Instances: []types.Instance{{}}}, nil
 	}}).Create(context.Background(), spec); err != nil {
-		t.Errorf("a key whose client token has 64 characters: %v", err)
+		t.Errorf("a dispatch id whose client token has 64 characters: %v", err)
 	}
 }
 
 // TestCreateCountMismatch pins the error when RunInstances returns no instance.
 func TestCreateCountMismatch(t *testing.T) {
 	_, err := New(&fakeAPI{}).Create(context.Background(), testSpec())
-	const want = "If this repeats, check EC2's service health in this region: RunInstances for key dp_0123456789abcdef returned 0 instances, not 1"
+	const want = "If this repeats, check EC2's service health in this region: RunInstances for dispatch id dp_0123456789abcdef returned 0 instances, not 1"
 	if err == nil || err.Error() != want || kindOf(err) != contracts.FailureOther {
 		t.Errorf("error %v, want %q of kind other", err, want)
 	}
@@ -274,8 +273,8 @@ func TestCreateErrorKinds(t *testing.T) {
 		{apiError("VcpuLimitExceeded"), contracts.FailureLimit, "Wait until machines end, or raise the account's EC2 instance or vCPU quota: RunInstances failed with VcpuLimitExceeded: api error VcpuLimitExceeded: test message for VcpuLimitExceeded"},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InsufficientInstanceCapacity")}, contracts.FailureLimit, "Wait, or set subnet_id in aws-ec2.json to a subnet in another zone: RunInstances failed with InsufficientInstanceCapacity in the subnet's zone: exceeded maximum number of attempts, 3, api error InsufficientInstanceCapacity: test message for InsufficientInstanceCapacity"},
 		{apiError("InsufficientFreeAddressesInSubnet"), contracts.FailureLimit, "Wait until machines end, or set subnet_id in aws-ec2.json to a subnet with free addresses: RunInstances failed with InsufficientFreeAddressesInSubnet: api error InsufficientFreeAddressesInSubnet: test message for InsufficientFreeAddressesInSubnet"},
-		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report a provisioner defect, unless aws-ec2.json changed since the first make: RunInstances reused a key with other parameters (IdempotentParameterMismatch): api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
-		{apiError("IdempotentInstanceTerminated"), contracts.FailureOther, "No action needed: the machine made for this key is terminated, and EC2 makes no second machine for the key: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
+		{apiError("IdempotentParameterMismatch"), contracts.FailureDefect, "Report a provisioner defect, unless aws-ec2.json changed since the first make of this dispatch id: RunInstances sent the dispatch id again with new input: api error IdempotentParameterMismatch: test message for IdempotentParameterMismatch"},
+		{apiError("IdempotentInstanceTerminated"), contracts.FailureOther, "No action needed: the machine made for this dispatch id is terminated, and EC2 makes no second machine for the dispatch id: api error IdempotentInstanceTerminated: test message for IdempotentInstanceTerminated"},
 		{apiError("RequestLimitExceeded"), contracts.FailureRetry, "If this repeats, check EC2's service health and the account's request rate in this region: RunInstances failed with an error the SDK retries: api error RequestLimitExceeded: test message for RequestLimitExceeded"},
 		{&retry.MaxAttemptsError{Attempt: 3, Err: apiError("InternalError")}, contracts.FailureRetry, "If this repeats, check EC2's service health and the account's request rate in this region: RunInstances failed after the SDK's 3 attempts: exceeded maximum number of attempts, 3, api error InternalError: test message for InternalError"},
 		{deadline, contracts.FailureRetry, "If this repeats, check the network path to EC2: RunInstances did not finish within its time limit: operation error EC2: RunInstances, context deadline exceeded"},
@@ -421,27 +420,27 @@ func TestFindByToken(t *testing.T) {
 		return &ec2.DescribeInstancesOutput{Reservations: []types.Reservation{{Instances: reply}}}, nil
 	}}
 	c := New(f)
-	const key = "dp_0123456789abcdef"
-	_, found, err := c.FindByToken(context.Background(), key)
+	const dispatchID = "dp_0123456789abcdef"
+	_, found, err := c.FindByToken(context.Background(), dispatchID)
 	if err != nil || found {
 		t.Fatalf("no machine: found %v, error %v", found, err)
 	}
 	wantIn := &ec2.DescribeInstancesInput{
-		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{key}}},
+		Filters:    []types.Filter{{Name: aws.String("client-token"), Values: []string{dispatchID}}},
 		MaxResults: aws.Int32(1000),
 	}
 	if !reflect.DeepEqual(f.describes[0], wantIn) {
 		t.Errorf("input %+v, want %+v", f.describes[0], wantIn)
 	}
 
-	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, key), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, key)}
-	m, found, err := c.FindByToken(context.Background(), key)
-	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.Key != key {
+	reply = []types.Instance{instance("i-0aaaaaaaaaaaaaaa0", StateTerminated, dispatchID), instance("i-0bbbbbbbbbbbbbbb0", StateStopped, dispatchID)}
+	m, found, err := c.FindByToken(context.Background(), dispatchID)
+	if err != nil || !found || m.ID != "i-0bbbbbbbbbbbbbbb0" || m.State != StateStopped || m.DispatchID != dispatchID {
 		t.Errorf("machine %+v, found %v, error %v", m, found, err)
 	}
 
 	reply = reply[:1]
-	m, found, err = c.FindByToken(context.Background(), key)
+	m, found, err = c.FindByToken(context.Background(), dispatchID)
 	if err != nil || !found || m.State != StateTerminated {
 		t.Errorf("terminated only: machine %+v, found %v, error %v", m, found, err)
 	}
@@ -449,7 +448,7 @@ func TestFindByToken(t *testing.T) {
 	f.describe = func(*ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 		return nil, apiError("RequestLimitExceeded")
 	}
-	if _, _, err := c.FindByToken(context.Background(), key); kindOf(err) != contracts.FailureRetry {
+	if _, _, err := c.FindByToken(context.Background(), dispatchID); kindOf(err) != contracts.FailureRetry {
 		t.Errorf("error %v, want kind retry", err)
 	}
 }
@@ -472,16 +471,16 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ids, keys []string
+	var ids, dispatchIDs []string
 	for _, m := range ms {
 		ids = append(ids, m.ID)
-		keys = append(keys, m.Key)
+		dispatchIDs = append(dispatchIDs, m.DispatchID)
 	}
 	if want := []string{"i-0aaaaaaaaaaaaaaa0", "i-0bbbbbbbbbbbbbbb0", "i-0ccccccccccccccc0"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("ids %v, want %v", ids, want)
 	}
-	if want := []string{"dp_000000000000000a", "dp_000000000000000b", "dp_000000000000000c"}; !reflect.DeepEqual(keys, want) {
-		t.Errorf("keys %v, want %v", keys, want)
+	if want := []string{"dp_000000000000000a", "dp_000000000000000b", "dp_000000000000000c"}; !reflect.DeepEqual(dispatchIDs, want) {
+		t.Errorf("dispatch ids %v, want %v", dispatchIDs, want)
 	}
 	wantFilters := []types.Filter{
 		{Name: aws.String("tag:qory:managed"), Values: []string{"true"}},

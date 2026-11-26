@@ -334,28 +334,28 @@ func (m *fakeMachines) Check(context.Context) ([]contracts.MachineSpec, error) {
 	return slices.Clone(testOffers), nil
 }
 
-func (m *fakeMachines) Make(_ context.Context, key, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
+func (m *fakeMachines) Make(_ context.Context, dispatchID, pool string, spec contracts.MachineSpec, startData []byte) (contracts.MachinesMakeAnswer, error) {
 	if m.makeStarted != nil {
 		m.makeStarted <- struct{}{}
 		<-m.makeGate
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls = append(m.calls, "make "+key+" "+pool)
+	m.calls = append(m.calls, "make "+dispatchID+" "+pool)
 	m.specs = append(m.specs, spec)
 	m.startData = bytes.Clone(startData)
 	if m.makeErr != nil {
 		return contracts.MachinesMakeAnswer{}, m.makeErr
 	}
-	// One key makes at most one machine.
+	// One dispatch id makes at most one machine.
 	for _, x := range m.machines {
-		if x.Key == key {
+		if x.DispatchID == dispatchID {
 			return contracts.MachinesMakeAnswer{ID: x.ID, MachineType: madeType}, nil
 		}
 	}
 	m.made++
 	id := machineID(m.made)
-	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
+	m.machines = append(m.machines, contracts.Machine{ID: id, DispatchID: dispatchID, State: contracts.MachineRunning, Started: contracts.FormatTime(m.clock.Now())})
 	if m.otherType != nil {
 		return contracts.MachinesMakeAnswer{ID: id, MachineType: *m.otherType}, nil
 	}
@@ -405,10 +405,10 @@ func (m *fakeMachines) Delete(_ context.Context, id string) (contracts.MachinesD
 }
 
 // add adds a machine to the adapter's list.
-func (m *fakeMachines) add(id, key, state string, started time.Time) {
+func (m *fakeMachines) add(id, dispatchID, state string, started time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.machines = append(m.machines, contracts.Machine{ID: id, Key: key, State: state, Started: contracts.FormatTime(started)})
+	m.machines = append(m.machines, contracts.Machine{ID: id, DispatchID: dispatchID, State: state, Started: contracts.FormatTime(started)})
 }
 
 // drop takes the machine id out of the adapter's list.

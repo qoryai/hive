@@ -9,7 +9,7 @@ import (
 )
 
 // TestRecover returns one action for every phase and every result of the lookup of
-// the machine by its key, the dispatch id.
+// the machine by the dispatch id.
 func TestRecover(t *testing.T) {
 	release := journal.Action{Kind: journal.Release, Reason: journal.ReasonRestarted}
 	deleting := journal.Action{Kind: journal.Deleting, MachineID: oddID}

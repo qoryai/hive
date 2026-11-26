@@ -23,10 +23,10 @@ type Handler interface {
 	// Check shows that the adapter's rights and settings work, makes no machine, and
 	// returns the machines the adapter can make with its settings, its offers.
 	Check(ctx context.Context, settings string, req contracts.MachinesCheck) (contracts.MachinesCheckAnswer, error)
-	// Make makes one machine for the key that fits the request's machine spec, and
-	// delivers startData, the request's start data decoded, to it. A second make with
-	// the same key returns the first machine's id and makes no new machine. A spec that
-	// no machine of the adapter's settings fits fails with contracts.FailureDefect.
+	// Make makes one machine for the dispatch id that fits the request's machine spec, and
+	// delivers startData, the request's start data decoded, to it. A second make with the
+	// same dispatch id returns the first machine's id and makes no new machine. A spec
+	// that no machine of the adapter's settings fits fails with contracts.FailureDefect.
 	Make(ctx context.Context, settings string, req contracts.MachinesMake, startData []byte) (contracts.MachinesMakeAnswer, error)
 	// List lists the machines of the pool.
 	List(ctx context.Context, settings string, req contracts.MachinesList) (contracts.MachinesListAnswer, error)

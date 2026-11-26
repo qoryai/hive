@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -633,24 +634,30 @@ func skipRoot(t *testing.T) {
 }
 
 // otherOwner replaces the start data file with a file that the user who runs the test
-// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
-// it makes the start data file a hard link to a root-owned file, and skips when no such
-// link can be made. The script removes only the link.
+// does not own, see [otherOwnerFile].
 func otherOwner(t *testing.T, root string) {
 	t.Helper()
-	data := root + handOff
+	otherOwnerFile(t, root+handOff)
+}
+
+// otherOwnerFile replaces the file at path with a file that the user who runs the test
+// does not own. Run as root, the test changes the file's owner to uid 65534. Otherwise,
+// it makes path a hard link to a root-owned file, and skips when no such link can be
+// made. The script removes only the link.
+func otherOwnerFile(t *testing.T, path string) {
+	t.Helper()
 	if os.Geteuid() == 0 {
-		if err := os.Chown(data, 65534, 65534); err != nil {
+		if err := os.Chown(path, 65534, 65534); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	remove(t, data)
+	remove(t, path)
 	for _, f := range []string{"/etc/hosts", "/private/etc/hosts", "/etc/passwd", "/etc/protocols", "/etc/services"} {
 		if info, err := os.Lstat(f); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		if os.Link(f, data) == nil {
+		if os.Link(f, path) == nil {
 			return
 		}
 	}
@@ -706,6 +713,339 @@ func linkFolder(t *testing.T, root string) {
 	write(t, root+"/elsewhere/start-data", startData(runCode, gatewayURL, gatewayAddress, 60))
 	write(t, root+"/elsewhere/.start-data.x", "a temporary file")
 	link(t, root+"/elsewhere", dir)
+}
+
+// runCodeLinesFile is the optional file of the machine image under the root folder.
+const runCodeLinesFile = "/etc/qory/run-code-lines"
+
+// paddedRegistry returns a registry line that, with the run code and the newline between
+// them, makes a run code file of size bytes, with or without a newline after the line.
+func paddedRegistry(size int, newline bool) string {
+	line := "registry "
+	end := ""
+	if newline {
+		end = "\n"
+	}
+	pad := size - len(runCode) - 1 - len(line) - len(".example") - len(end)
+	return line + strings.Repeat("a", pad) + ".example" + end
+}
+
+// TestStartUnitRunCodeLines checks the lines after the run code: without the file
+// /etc/qory/run-code-lines the run code file is the run code alone, and with it the file
+// is the run code, a newline and the lines of the file.
+func TestStartUnitRunCodeLines(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary, runtimes := "registry registry.example.com:5000", "apiary https://apiary.example.com", "runtimes /var/lib/qory/runtimes"
+	cases := []struct{ name, content string }{
+		{"no file", ""},
+		{"registry and apiary", registry + "\n" + apiary + "\n"},
+		{"registry and apiary, no newline at the end", registry + "\n" + apiary},
+		{"one line with a newline", registry + "\n"},
+		{"one line without a newline", apiary},
+		{"all three lines", registry + "\n" + apiary + "\n" + runtimes + "\n"},
+		{"the lines in another order", runtimes + "\n" + apiary + "\n" + registry},
+		{"registry without a port", "registry registry.example.com"},
+		{"registry localhost", "registry localhost"},
+		{"registry with a colon and no dot", "registry registry:5000"},
+		{"apiary with a port", "apiary https://apiary.example.com:8443"},
+		{"apiary on http for localhost", "apiary http://localhost:4000"},
+		{"apiary on http for a loopback address", "apiary http://127.0.0.1"},
+		{"runtimes at the root", "runtimes /"},
+		{"exactly 1 KiB with a newline", paddedRegistry(1024, true)},
+		{"exactly 1 KiB without a newline", paddedRegistry(1024, false)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if c.name != "no file" {
+				if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(t, e.root+runCodeLinesFile, c.content)
+			}
+			r := e.run(t, sh)
+			if r.status != 0 || r.stdout != "" || r.stderr != "" {
+				t.Fatalf("status %d, stdout %q, stderr %q; want 0 and only stage lines", r.status, r.stdout, r.stderr)
+			}
+			equalStages(t, r.stages, stages)
+			want := runCode
+			if c.content != "" {
+				want += "\n" + c.content
+			}
+			if got := read(t, e.keep); got != want {
+				t.Errorf("the run code file that qory read has %d bytes and is not the run code and the lines of the file, %d bytes", len(got), len(want))
+			}
+			if got := mode(t, e.keep); got != 0o600 {
+				t.Errorf("the run code file had mode %v, want 0600", got)
+			}
+			if got := read(t, e.root+"/etc/hosts"); strings.Contains(got, "registry") {
+				t.Errorf("/etc/hosts contains a line of the file: %q", got)
+			}
+			// The chown call is in the log. The stage line is checked with the other lines.
+			wantChown := "chown qory " + e.root + "/run/qory-machine/run-code " + e.root + "/run/qory-machine"
+			if !slices.Contains(r.log, wantChown) {
+				t.Errorf("the commands do not contain %q:\n%s", wantChown, strings.Join(r.log, "\n"))
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesFails checks each file that qory would refuse: the script
+// prints one line that starts with the fix and contains no line of the file, exits 1, and
+// writes no run code file, and qory does not run.
+func TestStartUnitRunCodeLinesFails(t *testing.T) {
+	sh := bash(t)
+	path := commands(t, sh)
+	registry, apiary := "registry registry.example.com", "apiary https://apiary.example.com"
+	const (
+		other   = "Write each line of {file} as registry <host>, apiary <url> or runtimes <folder>. Line %d has another form."
+		blank   = "Remove the blank line, line %d, from {file}. The run code file may have no blank line."
+		badReg  = "Fix line %d of {file}. The registry value must be a host of letters, digits, . and - with a dot, a colon or the name localhost, and an optional port from 1 to 65535."
+		badAp   = "Fix line %d of {file}. The apiary value must be https://<host> or https://<host>:<port>, or http:// for localhost or a 127.x.x.x address, with the scheme in lowercase, a port from 1 to 65535 and no user, path, query or fragment."
+		badRun  = "Fix line %d of {file}. The runtimes value must be an absolute path with no //, ., .. or trailing /, except the root /."
+		twice   = "Remove the second %s line, line %d, from {file}. Each of the lines registry, apiary and runtimes may appear once."
+		tooMany = "Keep at most 3 lines in {file}, one each of registry, apiary and runtimes. The file has more."
+		control = "Remove every control character and every byte above 126 from {file}. It may contain printable ASCII lines only."
+		secret  = "Remove the text qecr_, qak_ or qrk_, in any letter case, from {file}. It looks like a run code, a run key or an access key secret."
+		empty   = "Write the lines registry, apiary or runtimes into {file}, or remove it. The file is empty."
+		tooLong = "Shorten {file} so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
+	)
+	cases := []struct{ name, content, want string }{
+		{"empty file", "", empty},
+		{"a blank line", registry + "\n\n" + apiary + "\n", fmt.Sprintf(blank, 2)},
+		{"a blank line first", "\n" + registry + "\n", fmt.Sprintf(blank, 1)},
+		{"two newlines at the end", registry + "\n\n", fmt.Sprintf(blank, 2)},
+		{"only a newline", "\n", fmt.Sprintf(blank, 1)},
+		{"the same line twice", registry + "\n" + registry + "\n", fmt.Sprintf(twice, "registry", 2)},
+		{"the same key with another value", apiary + "\n" + registry + "\napiary https://other.example.com\n", fmt.Sprintf(twice, "apiary", 3)},
+		{"a fourth line", registry + "\n" + apiary + "\nruntimes /srv/runtimes\nruntimes /srv/other\n", tooMany},
+		{"an unknown key", "gateway https://gateway.example.com\n", fmt.Sprintf(other, 1)},
+		{"a key with no value", "registry\n", fmt.Sprintf(badReg, 1)},
+		{"a key in capitals", "REGISTRY registry.example.com\n", fmt.Sprintf(other, 1)},
+		{"a line with a leading space", " " + registry + "\n", fmt.Sprintf(other, 1)},
+		{"a registry with a path", "registry registry.example.com/v2\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with a user", "registry user@registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with an https scheme", "registry https://registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with no dot or colon", "registry registry\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 0", "registry registry.example.com:0\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with port 65536", "registry registry.example.com:65536\n", fmt.Sprintf(badReg, 1)},
+		{"a registry with two spaces", "registry  registry.example.com\n", fmt.Sprintf(badReg, 1)},
+		{"an apiary with a path", "apiary https://apiary.example.com/v1\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a slash at the end", "apiary https://apiary.example.com/\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a query", "apiary https://apiary.example.com?a=b\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a fragment", "apiary https://apiary.example.com#a\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a user", "apiary https://user@apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary on http for a remote host", "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with another scheme", "apiary ftp://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in capitals", "apiary HTTPS://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with a scheme in mixed case", "apiary Https://apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with no scheme", "apiary apiary.example.com\n", fmt.Sprintf(badAp, 1)},
+		{"an apiary with port 0", "apiary https://apiary.example.com:0\n", fmt.Sprintf(badAp, 1)},
+		{"a runtimes folder that is relative", "runtimes var/runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with a slash at the end", "runtimes /var/runtimes/\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with //", "runtimes /var//runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with ..", "runtimes /var/../runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder with .", "runtimes /var/./runtimes\n", fmt.Sprintf(badRun, 1)},
+		{"a runtimes folder that ends in ..", "runtimes /var/..\n", fmt.Sprintf(badRun, 1)},
+		{"a bad line after a good one", registry + "\n" + "apiary http://apiary.example.com\n", fmt.Sprintf(badAp, 2)},
+		{"a line ending with CR", registry + "\r\n", control},
+		{"a tab", "registry\tregistry.example.com\n", control},
+		{"a NUL byte", registry + "\x00\n", control},
+		{"a byte above 126", "runtimes /srv/caf\xc3\xa9\n", control},
+		{"a run code in the file", "registry " + runCode + "\n", secret},
+		{"a run code in capitals", "registry QECR_FOO.example.com\n", secret},
+		{"an access key secret", "registry qak_abc.example.com\n", secret},
+		{"a run key", "apiary https://qrk_abc.example.com\n", secret},
+		{"a secret in a mixed case", "registry x.QaK_1.example.com\n", secret},
+		{"1 KiB and 1 byte with a newline", paddedRegistry(1025, true), tooLong},
+		{"1 KiB and 1 byte without a newline", paddedRegistry(1025, false), tooLong},
+		{"far above 1 KiB", strings.Repeat(registry+"\n", 100), tooLong},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			e.expectRefused(t, sh, strings.ReplaceAll(c.want, "{file}", e.root+runCodeLinesFile), c.content)
+		})
+	}
+
+	file := func(e *env) string { return e.root + runCodeLinesFile }
+	t.Run("a symbolic link", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		write(t, e.root+"/elsewhere", registry+"\n")
+		link(t, e.root+"/elsewhere", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a link to nothing", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		link(t, e.root+"/missing", file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is a symbolic link.", registry)
+	})
+	t.Run("a folder", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(file(e), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Write "+file(e)+" as a regular file, or remove it. The path is not a regular file.", registry)
+	})
+	t.Run("another owner", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		otherOwnerFile(t, file(e))
+		e.expectRefused(t, sh, "Write "+file(e)+" as root, or remove it. Another user owns the file.", registry)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		t.Parallel()
+		skipRoot(t)
+		e := newEnv(t, path)
+		if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		write(t, file(e), registry+"\n")
+		if err := os.Chmod(file(e), 0); err != nil {
+			t.Fatal(err)
+		}
+		e.expectRefused(t, sh, "Check that root can read "+file(e)+". Reading the file failed.", registry)
+	})
+}
+
+// watchHead returns path with a folder before the others that has a head command. It logs
+// to $STUB_LOG one line "head-watch <state> <arguments>" for each call, where state is
+// present or absent for the file $HEAD_WATCH_FILE at the time of the call, and then runs
+// the real head. A test that sets HEAD_WATCH_FILE to the run code file sees whether the
+// script wrote the file before a call.
+func watchHead(t *testing.T, sh, path string) string {
+	t.Helper()
+	real := resolve(path, "head")
+	if real == "" {
+		t.Skip("install head to run this test")
+	}
+	dir := t.TempDir()
+	body := "#!" + sh + "\n" +
+		"if [[ -e $HEAD_WATCH_FILE ]]; then state=present; else state=absent; fi\n" +
+		"printf 'head-watch %s %s\\n' \"$state\" \"$*\" >>\"$STUB_LOG\"\n" +
+		"exec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "head"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir + string(filepath.ListSeparator) + path
+}
+
+// watched returns the lines that watchHead logged for calls that read file.
+func watched(r result, file string) []string {
+	var calls []string
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "head-watch ") && strings.HasSuffix(line, " "+file) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// TestStartUnitRunCodeLinesOrder checks that the script reads and validates the file
+// before it writes the run code file: at the time of the read, the run code file does not
+// exist, for a file that the script accepts and for one that it refuses.
+func TestStartUnitRunCodeLinesOrder(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	for _, c := range []struct {
+		name, content string
+		status        int
+	}{
+		{"accepted", "registry registry.example.com\n", 0},
+		{"refused", "registry registry\n", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t, path)
+			if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(t, e.root+runCodeLinesFile, c.content)
+			r := e.run(t, sh, "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+			if r.status != c.status {
+				t.Errorf("status %d, want %d", r.status, c.status)
+			}
+			calls := watched(r, e.root+runCodeLinesFile)
+			if len(calls) != 1 || !strings.HasPrefix(calls[0], "head-watch absent ") {
+				t.Errorf("the script read the file with %q, want one call made while the run code file does not exist", calls)
+			}
+		})
+	}
+}
+
+// TestStartUnitRunCodeLinesBoundedRead checks that the script reads at most 1025 bytes of
+// the file, one byte more than qory's limit of 1024, and so refuses a file of 1 GiB in
+// the time of a small one. The file is sparse, so it takes no disk space.
+func TestStartUnitRunCodeLinesBoundedRead(t *testing.T) {
+	sh := bash(t)
+	path := watchHead(t, sh, commands(t, sh))
+	e := newEnv(t, path)
+	if err := os.MkdirAll(e.root+"/etc/qory", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := e.root + runCodeLinesFile
+	f, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(1 << 30); err != nil {
+		f.Close()
+		t.Skipf("the file system cannot make a sparse file of 1 GiB: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	want := "Shorten " + file + " so that the run code, a newline and the file make at most 1024 bytes. The run code file would be longer."
+	r := e.expectRefused(t, sh, want, "", "HEAD_WATCH_FILE="+e.root+"/run/qory-machine/run-code")
+	if took := time.Since(start); took > 30*time.Second {
+		t.Errorf("refusing a file of 1 GiB took %v, want at most 30s: the read is not bounded", took)
+	}
+	calls := watched(r, file)
+	if len(calls) != 1 || !strings.HasSuffix(calls[0], " -c 1025 -- "+file) {
+		t.Errorf("the script read the file with %q, want one call: head -c 1025 -- %s", calls, file)
+	}
+}
+
+// expectRefused runs the script with vars added and returns the result. It checks that
+// the script refuses with the line want and no other line, exits 1, prints no stage after
+// "Docker started", runs no qory, and prints none of the lines of the file, content.
+func (e *env) expectRefused(t *testing.T, sh, want, content string, vars ...string) result {
+	t.Helper()
+	r := e.run(t, sh, append([]string{"STUB_QORY_OUTPUT=1"}, vars...)...)
+	if r.status != 1 || r.stdout != "" || r.stderr != want+"\n" {
+		t.Errorf("status %d, stdout %q, stderr %q; want 1, no stdout and the line %q", r.status, r.stdout, r.stderr, want)
+	}
+	equalStages(t, r.stages, stages[:3])
+	for _, line := range r.log {
+		if strings.HasPrefix(line, "runuser") {
+			t.Errorf("the script ran qory after a refusal: %q", line)
+		}
+	}
+	if _, err := os.Lstat(e.keep); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("qory read a run code file after a refusal: %v", err)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		_, value, _ := strings.Cut(line, " ")
+		if len(value) > 9 && strings.Contains(r.stderr+r.stdout, value) {
+			t.Errorf("the output contains the value %q of a line of the file", value)
+		}
+	}
+	return r
 }
 
 // TestStartUnitFails checks each invalid input and each failed step: the script prints
@@ -1499,13 +1839,51 @@ func TestStartUnitSecretLines(t *testing.T) {
 			`"https-proxy": ("http://qory:" + $password + "@127.0.0.1:3129"),`,
 			`printf '{"version": 1, "address": "127.0.0.1:3129", "password": "%s"}\n' "$password" 2>/dev/null >"$engine_proxy_json" ||`,
 			`printf '%s\n' "${line//"$password"/[hidden]}" >&2 2>/dev/null || true`,
+			// docker_log filters journal lines, and count_groups counts IPv6 groups. Neither
+			// reads the run code file.
+			`while IFS= read -r line || [[ -n $line ]]; do`,
+			`lower=${line,,}`,
+			`if [[ $lower == *qak_* || $lower == *qrk_* || $lower == *qecr_* ]]; then`,
+			`if [[ -n $rest ]]; then`,
+			`group=${rest%%:*}`,
+			`[[ $rest == *:* ]] || break`,
+			`rest=${rest#*:}`,
 			`printf '%s' "$run_code" 2>/dev/null >"$run_code_file" || fail "Check that root can write $run_code_dir. Writing $run_code_file failed."`,
+			// read_run_code_lines and its caller keep the content of the run code lines
+			// file in variables. These lines compare it, test it with a pattern, take its
+			// parts, count it, or append it to the run code file. None of them prints it.
+			// The failure lines show a path, a line number and a fixed key name.
+			`content=${content%x}`,
+			`if [[ -z $content ]]; then`,
+			`total=$((${#run_code} + 1 + ${#content}))`,
+			`if [[ $content =~ [^[:print:]$'\n'] ]]; then`,
+			`lower=${content,,}`,
+			`if [[ $lower == *qecr_* || $lower == *qak_* || $lower == *qrk_* ]]; then`,
+			`rest=${content%$'\n'}`,
+			`line=${rest%%$'\n'*}`,
+			`[[ -n $line ]] || fail "Remove the blank line, line $n, from $file. The run code file may have no blank line."`,
+			`key=${line%% *}`,
+			`[[ $line != *' '* ]] || value=${line#* }`,
+			`if [[ $value =~ ^[A-Za-z0-9.-]+(:([0-9]{1,5}))?$ ]] && valid_port "${BASH_REMATCH[2]}" &&`,
+			`[[ $value == *[.:]* || $value == localhost ]]; then`,
+			`if [[ $value =~ ^(https?)://([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then`,
+			`if [[ $value == /* && ( $value == / || ( $value != *//* && $value != */ && $value != */. && $value != */.. && $value != */./* && $value != */../* ) ) ]]; then`,
+			`[[ $rest == *$'\n'* ]] || break`,
+			`rest=${rest#*$'\n'}`,
+			`run_code_lines=$content`,
+			// read_uptime reads the first field of /proc/uptime into value. It reads no
+			// secret.
+			`{ IFS=' ' read -r value rest <"$uptime_file"; } 2>/dev/null || [[ -n $value ]] || return 1`,
+			`[[ $value =~ ^([0-9]{1,9})(\.([0-9]{1,6}))?$ ]] || return 1`,
+			// The length of the engine proxy password, not the password.
+			`[[ ${#password} -eq 43 ]] || fail "Check that root can read $urandom. Making the engine proxy password failed."`,
+			`printf '\n%s' "$run_code_lines" 2>/dev/null >>"$run_code_file" ||`,
 		},
 		"qory-machine-data-aws-ec2": {
 			`printf 'X-aws-ec2-metadata-token: %s\n' "$token" |`,
 		},
 	}
-	secret := regexp.MustCompile(`\$\{?(token|data|run_code|password)\b`)
+	secret := regexp.MustCompile(`\$\{?#?(token|data|run_code|password|content|run_code_lines|lower|rest|line|value)\b`)
 	for name, lines := range allowed {
 		for i, line := range strings.Split(read(t, name), "\n") {
 			line = strings.TrimSpace(line)

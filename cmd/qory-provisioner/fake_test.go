@@ -43,7 +43,8 @@ type fakeSettings struct {
 const (
 	// fakeCommands has one line per command the fake ran: its name and its arguments.
 	fakeCommands = "commands"
-	// fakeMachines is the fake's machines, a JSON object of the key to the machine id.
+	// fakeMachines is the fake's machines, a JSON object of the dispatch id to the machine
+	// id.
 	fakeMachines = "machines.json"
 	// fakeMade is the record of the last make, see [made].
 	fakeMade = "made.json"
@@ -60,7 +61,7 @@ var fakeOffers = []contracts.MachineSpec{
 // made is what the fake adapter recorded of a make request. It contains the SHA-256 of
 // the run code in the start data, never the run code.
 type made struct {
-	Key                string                `json:"key"`
+	DispatchID         string                `json:"dispatch_id"`
 	Pool               string                `json:"pool"`
 	MachineSpec        contracts.MachineSpec `json:"machine_spec"`
 	RunCodeSHA256      string                `json:"run_code_sha256"`
@@ -103,13 +104,13 @@ func fakeAdapter(args []string, stdin io.Reader, stdout io.Writer) int {
 	case "list":
 		list := []map[string]string{}
 		machines := fakeRead(s.Dir)
-		keys := make([]string, 0, len(machines))
+		dispatchIDs := make([]string, 0, len(machines))
 		for k := range machines {
-			keys = append(keys, k)
+			dispatchIDs = append(dispatchIDs, k)
 		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			list = append(list, map[string]string{"id": machines[k], "key": k, "state": "running", "started": "2026-10-22T10:00:00Z"})
+		sort.Strings(dispatchIDs)
+		for _, k := range dispatchIDs {
+			list = append(list, map[string]string{"id": machines[k], "dispatch_id": k, "state": "running", "started": "2026-10-22T10:00:00Z"})
 		}
 		answer = map[string]any{"machines": list}
 	case "log":
@@ -137,11 +138,11 @@ func fakeRead(dir string) map[string]string {
 	return m
 }
 
-// fakeMake makes one machine per key, records the request in [fakeMade], and returns
-// the make answer with the machine type [fakeType].
+// fakeMake makes one machine per dispatch id, records the request in [fakeMade], and
+// returns the make answer with the machine type [fakeType].
 func fakeMake(dir string, req []byte) (any, error) {
 	var r struct {
-		Key         string                `json:"key"`
+		DispatchID  string                `json:"dispatch_id"`
 		Pool        string                `json:"pool"`
 		MachineSpec contracts.MachineSpec `json:"machine_spec"`
 		StartData   []byte                `json:"start_data"`
@@ -162,7 +163,7 @@ func fakeMake(dir string, req []byte) (any, error) {
 	}
 	sum := sha256.Sum256([]byte(data.RunCode))
 	rec, err := json.Marshal(made{
-		Key: r.Key, Pool: r.Pool, MachineSpec: r.MachineSpec, RunCodeSHA256: hex.EncodeToString(sum[:]),
+		DispatchID: r.DispatchID, Pool: r.Pool, MachineSpec: r.MachineSpec, RunCodeSHA256: hex.EncodeToString(sum[:]),
 		GatewayURL: data.Gateway.URL, GatewayAddress: data.Gateway.Address, MaxLifetimeMinutes: data.MaxLifetimeMinutes,
 	})
 	if err != nil {
@@ -172,10 +173,10 @@ func fakeMake(dir string, req []byte) (any, error) {
 		return nil, err
 	}
 	machines := fakeRead(dir)
-	id, ok := machines[r.Key]
+	id, ok := machines[r.DispatchID]
 	if !ok {
 		id = fmt.Sprintf("i-%017x", len(machines)+1)
-		machines[r.Key] = id
+		machines[r.DispatchID] = id
 		b, err := json.Marshal(machines)
 		if err != nil {
 			return nil, err

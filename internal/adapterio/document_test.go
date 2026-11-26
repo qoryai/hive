@@ -28,7 +28,8 @@ var decoders = map[string]func([]byte) error{
 	"error":         func(b []byte) error { _, err := adapterio.DecodeError(b); return err },
 }
 
-// schema compiles the schema of machines/v1 for the decoder name.
+// schema compiles the schema of machines/v1 for the decoder name, which accepts a member
+// that the contract does not define.
 func schema(t *testing.T, name string) *jsonschema.Schema {
 	t.Helper()
 	s, err := contracts.CompileMachines(name + ".schema.json")
@@ -51,8 +52,8 @@ type fixture struct {
 func b64(n int) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'x'}, n)) }
 
 func fixtures() []fixture {
-	makeReq := func(key, pool, spec, data string) string {
-		return `{"version": 1, "key": ` + key + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
+	makeReq := func(dispatchID, pool, spec, data string) string {
+		return `{"version": 1, "dispatch_id": ` + dispatchID + `, "pool": ` + pool + `, "machine_spec": ` + spec + `, "start_data": ` + data + `}`
 	}
 	// spec is a machine_spec with the vCPUs, memory, disk, architecture and
 	// virtualization written as JSON.
@@ -62,8 +63,8 @@ func fixtures() []fixture {
 	s := spec("2", "4096", "30", `"amd64"`, "false")
 	offers := func(n int) string { return `{"offers": [` + strings.TrimSuffix(strings.Repeat(s+",", n), ",") + `]}` }
 	good := `"` + b64(10) + `"`
-	machine := func(id, key, state, started string) string {
-		return `{"machines": [{"id": ` + id + `, "key": ` + key + `, "state": ` + state + `, "started": ` + started + `}]}`
+	machine := func(id, dispatchID, state, started string) string {
+		return `{"machines": [{"id": ` + id + `, "dispatch_id": ` + dispatchID + `, "state": ` + state + `, "started": ` + started + `}]}`
 	}
 	t0 := `"2026-10-22T10:00:00Z"`
 	// both is a fixture that the schema and the decoder accept or refuse alike.
@@ -76,7 +77,7 @@ func fixtures() []fixture {
 		both("check", `{"version": "1"}`, false),
 		both("check", `{"version": null}`, false),
 		both("check", `{}`, false),
-		both("check", `{"version": 1, "extra": true}`, false),
+		both("check", `{"version": 1, "extra": true}`, true),
 		both("check", `[]`, false),
 		both("check", `null`, false),
 		both("check", `"x"`, false),
@@ -115,9 +116,9 @@ func fixtures() []fixture {
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "30", `"x86_64"`, "false"), good), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, spec("2", "4096", "30", `"amd64"`, `"no"`), good), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `{"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64"}`, good), false),
-		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, strings.Replace(s, "}", `, "gpus": 1}`, 1), good), false),
+		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, strings.Replace(s, "}", `, "gpus": 1}`, 1), good), true),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, `"standard"`, good), false),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "eA=="}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "size": "standard", "start_data": "eA=="}`, false),
 		{"make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `""`), true, false},
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(1)+`"`), true),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"`+b64(2)+`"`), true),
@@ -133,9 +134,9 @@ func fixtures() []fixture {
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHg\n="`), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eH-="`), false),
 		both("make", makeReq(`"dp_0123456789abcdef"`, `"np_0123456789abcdef"`, s, `"eHh4"`), true),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`}`, false),
-		both("make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, false),
-		both("make", `{"version": 2, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`, "start_data": "eA=="}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`}`, false),
+		both("make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, false),
+		both("make", `{"version": 2, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": `+s+`, "start_data": "eA=="}`, false),
 
 		both("make-answer", `{"id": "i-0123456789abcdef0"}`, true),
 		both("make-answer", `{"id": "-"}`, false),
@@ -145,7 +146,7 @@ func fixtures() []fixture {
 		both("make-answer", `{"id": "`+strings.Repeat("i", 128)+`"}`, true),
 		both("make-answer", `{"id": "`+strings.Repeat("i", 129)+`"}`, false),
 		both("make-answer", `{"id": "é"}`, false),
-		both("make-answer", `{"id": "i-1", "key": "d"}`, false),
+		both("make-answer", `{"id": "i-1", "key": "d"}`, true),
 		both("make-answer", `{"id": 7}`, false),
 		both("make-answer", `{"id": "i-1", "machine_type": "m7i.large"}`, true),
 		both("make-answer", `{"id": "i-1", "machine_type": "`+strings.Repeat("t", 64)+`"}`, true),
@@ -155,7 +156,7 @@ func fixtures() []fixture {
 
 		both("list", `{"version": 1, "pool": "np_0123456789abcdef"}`, true),
 		both("list", `{"version": 1}`, false),
-		both("list", `{"version": 1, "pool": "np_0123456789abcdef", "id": "i"}`, false),
+		both("list", `{"version": 1, "pool": "np_0123456789abcdef", "id": "i"}`, true),
 
 		both("list-answer", `{"machines": []}`, true),
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"starting"`, t0), true),
@@ -175,8 +176,8 @@ func fixtures() []fixture {
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `"2016-12-31T23:59:60Z"`), false),
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `"2026-10-22T10:00:00"`), false),
 		both("list-answer", machine(`"i-1"`, `"dp_0123456789abcdef"`, `"running"`, `1761127200`), false),
-		both("list-answer", `{"machines": [{"id": "i-1", "key": "dp_0123456789abcdef", "state": "running"}]}`, false),
-		both("list-answer", `{"machines": [{"id": "i-1", "key": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "size": "s"}]}`, false),
+		both("list-answer", `{"machines": [{"id": "i-1", "dispatch_id": "dp_0123456789abcdef", "state": "running"}]}`, false),
+		both("list-answer", `{"machines": [{"id": "i-1", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "size": "s"}]}`, true),
 		both("list-answer", `{"machines": [7]}`, false),
 		both("list-answer", `{"machines": null}`, false),
 		both("list-answer", `{"machines": {}}`, false),
@@ -214,8 +215,8 @@ func fixtures() []fixture {
 		both("error", `{"error": {"kind": "other", "message": "`+strings.Repeat("m", adapterio.MaxMessage+1)+`"}}`, false),
 		both("error", `{"error": {"kind": "other", "message": "m\u0000"}}`, false),
 		both("error", `{"error": {"kind": "other"}}`, false),
-		both("error", `{"error": {"kind": "other", "message": "m", "code": 1}}`, false),
-		both("error", `{"error": {"kind": "other", "message": "m"}, "id": "i-1"}`, false),
+		both("error", `{"error": {"kind": "other", "message": "m", "code": 1}}`, true),
+		both("error", `{"error": {"kind": "other", "message": "m"}, "id": "i-1"}`, true),
 		both("error", `{"error": "m"}`, false),
 	}
 }
@@ -243,8 +244,9 @@ func TestDecodersAndSchemasAgree(t *testing.T) {
 }
 
 // TestDecodersReadTheContractFixtures checks each decoder against the fixtures of
-// machines/v1: fixtures/<name>/ are accepted, and fixtures/invalid/<name>-*.json are
-// refused.
+// machines/v1: fixtures/<name>/ are accepted, and so are fixtures/closed/<name>-*.json,
+// which differ from a valid document by a member that the contract does not define. The
+// fixtures/invalid/<name>-*.json are refused.
 func TestDecodersReadTheContractFixtures(t *testing.T) {
 	n := 0
 	err := fs.WalkDir(contracts.MachinesFS, "fixtures", func(p string, d fs.DirEntry, err error) error {
@@ -257,8 +259,9 @@ func TestDecodersReadTheContractFixtures(t *testing.T) {
 		}
 		dir, file := path.Split(p)
 		name, valid := path.Base(dir), true
-		if name == "invalid" {
-			name, valid = "", false
+		if name == "invalid" || name == "closed" {
+			valid = name == "closed"
+			name = ""
 			for d := range decoders {
 				if strings.HasPrefix(file, d+"-") && len(d) > len(name) {
 					name = d
@@ -332,9 +335,9 @@ func TestDecoderRefusesLogBytes(t *testing.T) {
 func TestDecodeErrorsHaveNoValue(t *testing.T) {
 	const marker = "qecr_MARKER7f3a"
 	cases := map[string]string{
-		"make":         `{"version": 1, "key": "` + marker + `", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`,
+		"make":         `{"version": 1, "dispatch_id": "` + marker + `", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`,
 		"make-answer":  `{"id": "` + marker + ` "}`,
-		"list-answer":  `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "` + marker + `", "started": "2026-10-22T10:00:00Z"}]}`,
+		"list-answer":  `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "` + marker + `", "started": "2026-10-22T10:00:00Z"}]}`,
 		"error":        `{"error": {"kind": "` + marker + `", "message": "m"}}`,
 		"check-answer": `{"` + marker + `": 1}`,
 		"log-answer":   `{"log": 1, "` + marker + `": 2}`,
@@ -351,16 +354,16 @@ func TestDecodeErrorsHaveNoValue(t *testing.T) {
 func TestDecodeErrors(t *testing.T) {
 	for _, c := range []struct{ name, json, want string }{
 		{"check", `{"version": 2}`, "the member version must be 1"},
-		{"check", `{"version": 1, "x": 1}`, "the document has a member that version 1 does not define"},
+		{"check", `{"version": 1, "must_understand": ["/x"]}`, "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
 		{"check", `[]`, "the document must be one JSON object in UTF-8, with no member name twice"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
-		{"make", `{"version": 1, "key": "d", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`, "the member key must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
-		{"make", `{"version": 1, "key": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}}`, "the member start_data is missing"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "start_data": "eA=="}`, "the member machine_spec is missing"},
+		{"make", `{"version": 1, "dispatch_id": "d", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": "eA=="}`, "the member dispatch_id must match the pattern ^dp_[0-9a-hjkmnp-tv-z]{16}$"},
+		{"make", `{"version": 1, "dispatch_id": "dp_0123456789abcdef", "pool": "np_0123456789abcdef", "machine_spec": {"vcpus": 2, "memory_mib": 4096, "disk_gib": 30, "arch": "amd64", "virtualization": false}, "start_data": ""}`, "the member start_data must be standard base64 of 1 to 16384 bytes, with padding bits of zero"},
 		{"make-answer", `{"id": 7}`, "the member id must be a string"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},
-		{"list-answer", `{"machines": [{"id": "i", "key": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}]}`, "machines[0]: the document has a member that version 1 does not define"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "gone", "started": "2026-10-22T10:00:00Z"}]}`, "the member machines[0].state must be starting, running, stopped or deleting"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running"}]}`, "the member machines[0].started is missing"},
+		{"list-answer", `{"machines": [{"id": "i", "dispatch_id": "dp_0123456789abcdef", "state": "running", "started": "2026-10-22T10:00:00Z", "x": 1}], "must_understand": ["/machines/0/x"]}`, "must_understand lists a pointer that version 1 does not define, or is not a list of valid pointers"},
 		{"error", `{"error": {"kind": "other", "message": ""}}`, "the member error.message must not be empty"},
 		{"error", `{"error": {"kind": "fatal", "message": "m"}}`, "the member error.kind must be limit, retry, defect or other"},
 	} {
@@ -370,14 +373,14 @@ func TestDecodeErrors(t *testing.T) {
 	}
 }
 
-// TestCheckKey checks the shape of a key.
-func TestCheckKey(t *testing.T) {
-	if err := adapterio.CheckKey("dp_0123456789abcdef"); err != nil {
+// TestCheckDispatchID checks the shape of a dispatch id.
+func TestCheckDispatchID(t *testing.T) {
+	if err := adapterio.CheckDispatchID("dp_0123456789abcdef"); err != nil {
 		t.Error(err)
 	}
-	for _, key := range []string{"", "dp_0123456789abcdeu", "np_0123456789abcdef", "dp_0123456789abcdef0"} {
-		if adapterio.CheckKey(key) == nil {
-			t.Errorf("%q passes", key)
+	for _, dispatchID := range []string{"", "dp_0123456789abcdeu", "np_0123456789abcdef", "dp_0123456789abcdef0"} {
+		if adapterio.CheckDispatchID(dispatchID) == nil {
+			t.Errorf("%q passes", dispatchID)
 		}
 	}
 }

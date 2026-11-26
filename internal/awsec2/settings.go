@@ -32,7 +32,7 @@ type Settings struct {
 	ImageID string
 	// Tags maps a tag key to its value, such as qory:stack to example-stack: at most 20
 	// entries. Each machine and its volume get these tags after qory:managed,
-	// qory:pool and qory:key. Tags is nil when the member tags is
+	// qory:pool and qory:dispatch_id. Tags is nil when the member tags is
 	// absent or an empty object.
 	Tags map[string]string
 }
@@ -47,7 +47,7 @@ const tagsMember = "tags"
 const maxFile = 64 << 10
 
 // maxTags is the most entries of tags. EC2 accepts at most 50 tags on a resource, and
-// the adapter adds 3: qory:managed, qory:pool and qory:key.
+// the adapter adds 3: qory:managed, qory:pool and qory:dispatch_id.
 const maxTags = 20
 
 // The bounds of a tag key and a tag value, in characters, as EC2 accepts them.
@@ -73,7 +73,7 @@ var rules = map[string]string{
 const (
 	msgTagText    = "Write the keys and values of tags in " + settingsFile + " with only letters, digits, spaces and _ . : / = + - @."
 	msgTagAWS     = "Remove every key that starts with aws: from tags in " + settingsFile + ": AWS reserves that prefix."
-	msgTagAdapter = "Remove qory:managed, qory:pool and qory:key, in any case, from tags in " + settingsFile + ": the adapter sets these tags on every machine."
+	msgTagAdapter = "Remove qory:managed, qory:pool and qory:dispatch_id, in any case, from tags in " + settingsFile + ": the adapter sets these tags on every machine."
 )
 
 // msgUnknownMember is the error of a member that is neither required nor tags.
@@ -241,9 +241,10 @@ func tags(raw jsontext.Value) (map[string]string, string) {
 	return out, ""
 }
 
-// adapterTag reports whether key is qory:managed, qory:pool or qory:key in any case.
+// adapterTag reports whether key is qory:managed, qory:pool or qory:dispatch_id in any
+// case.
 func adapterTag(key string) bool {
-	for _, t := range []string{machine.TagManaged, machine.TagPool, machine.TagKey} {
+	for _, t := range []string{machine.TagManaged, machine.TagPool, machine.TagDispatchID} {
 		if strings.EqualFold(key, t) {
 			return true
 		}
