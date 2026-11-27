@@ -97,9 +97,9 @@ The changes to Hive that no release contains yet, in the shape of
 ### Changed
 
 - A machine's lifetime may be 15 to 10080 minutes, up from 1470. A machine that `serve`
-  took back stays listed for up to 10080 minutes and 15 minutes while sending
-  `dispatched` keeps failing, up from 1470 minutes and 15 minutes; the machine still
-  powers off at the lifetime in its start data.
+  took back stays listed for up to 10095 minutes (the lifetime 10080 plus 15) while
+  sending `dispatched` keeps failing, up from 1485 minutes; the machine still powers off
+  at the lifetime in its start data.
 - A listed machine with no journal entry, whose `dispatch_id` has the shape of a
   dispatch id, gets `dispatched`, with no machine type, before any delete, so a
   provisioner whose journal was lost, or a new provisioner after a key rotation, keeps
@@ -108,10 +108,10 @@ The changes to Hive that no release contains yet, in the shape of
   the machine for its dispatch", and then acts on it as on any other dispatched machine.
   On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, it cleans up the
   machine. After any other failure, it keeps the machine and sends `dispatched` again at
-  the next watch, until the machine has run longer than 10080 minutes and 15 minutes by
-  its start time in the list; then it cleans up the machine. A stopped or deleting
-  machine gets no `dispatched`. Of the machines with one dispatch id, a machine that is
-  not deleting gets `dispatched` before a deleting machine gets an entry. The
+  the next watch, until the machine has run longer than 10095 minutes (the lifetime 10080
+  plus 15) by its start time in the list; then it cleans up the machine. A stopped or
+  deleting machine gets no `dispatched`. Of the machines with one dispatch id, a machine
+  that is not deleting gets `dispatched` before a deleting machine gets an entry. The
   provisioner logs "found a machine with no journal entry" once for a dispatch id, at
   the first of the watches in a row that find the dispatch id with no entry.
 - `aws-ec2.json` has no `sizes`, and no list of instance types. Before, `sizes` set
