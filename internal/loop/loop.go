@@ -142,7 +142,7 @@ type Claim struct {
 	RunCode RunCode
 	// GatewayURL is the gateway's URL that the machine passes to qory run.
 	GatewayURL string
-	// MaxLifetimeMinutes is the time after which the machine powers off, 15 to 1470.
+	// MaxLifetimeMinutes is the time after which the machine powers off, 15 to 10080.
 	MaxLifetimeMinutes int
 }
 

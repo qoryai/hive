@@ -47,7 +47,7 @@ type Claimed struct {
 	// GatewayURL is the gateway the run code is bound to: https, a host and an optional
 	// port. The caller passes it to the machine with the run code.
 	GatewayURL string
-	// MaxLifetimeMinutes is the minutes, from 15 to 1470, after which the machine powers
+	// MaxLifetimeMinutes is the minutes, from 15 to 10080, after which the machine powers
 	// off, counted from its start.
 	MaxLifetimeMinutes int
 }

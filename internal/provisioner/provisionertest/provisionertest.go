@@ -71,7 +71,7 @@ const (
 const (
 	Lease              = 600 * time.Second
 	GatewayURL         = "https://gateway.example.com"
-	MaxLifetimeMinutes = 1470
+	MaxLifetimeMinutes = 10080
 )
 
 // Window is how far a request's time may be from [Server.Now], either way.

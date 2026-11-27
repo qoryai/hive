@@ -62,6 +62,24 @@ func TestAClaimMakesAMachineAndSendsDispatched(t *testing.T) {
 	}
 }
 
+// TestAClaimOfTheLongestLifetimeMakesAMachine claims a dispatch with the lifetime
+// 10080: the start data and the journal entry have that lifetime.
+func TestAClaimOfTheLongestLifetimeMakesAMachine(t *testing.T) {
+	h := newHarness(t)
+	h.start()
+	c := newClaim(dispatchA)
+	c.MaxLifetimeMinutes = 10080
+	h.claim(c)
+	want := `{"version":1,"run_code":"` + runCode + `","gateway":{"url":"` + gatewayURL + `","address":"10.0.1.5"},"max_lifetime_minutes":10080}`
+	if got := string(h.machines.lastStartData()); got != want {
+		t.Errorf("the start data is\n%s\nwant\n%s", got, want)
+	}
+	equal(t, "the journal", h.entries(), []journal.Entry{{DispatchID: dispatchA, Phase: journal.PhaseDispatched, MachineID: machineID(1), MaxLifetimeMinutes: 10080, MachineType: madeType}})
+	if err := h.stop(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestAMakeFailureOfEachKind releases the dispatch with the kind's reason, then
 // uploads the make's error as the machine log, removes the entry and waits before the
 // next claim: 60 s for limit and defect, 15 s for retry and other. A defect is logged
@@ -349,7 +367,8 @@ func TestAClaimThatCannotBeMadeIsReleased(t *testing.T) {
 		{"a run code out of shape", func(c *loop.Claim) { c.RunCode = loop.NewRunCode("qecr_short") }, loop.ReasonStartData},
 		{"no run code", func(c *loop.Claim) { c.RunCode = loop.RunCode{} }, loop.ReasonStartData},
 		{"a lifetime of 14", func(c *loop.Claim) { c.MaxLifetimeMinutes = 14 }, loop.ReasonStartData},
-		{"a lifetime of 1471", func(c *loop.Claim) { c.MaxLifetimeMinutes = 1471 }, loop.ReasonStartData},
+		{"a lifetime of 10081", func(c *loop.Claim) { c.MaxLifetimeMinutes = 10081 }, loop.ReasonStartData},
+		{"a lifetime of 6 digits", func(c *loop.Claim) { c.MaxLifetimeMinutes = 100000 }, loop.ReasonStartData},
 		{"a backslash in the gateway URL", func(c *loop.Claim) { c.GatewayURL = `https://gate\way.example.com` }, loop.ReasonStartData},
 		{"a quote in the gateway URL", func(c *loop.Claim) { c.GatewayURL = `https://gate"way.example.com` }, loop.ReasonStartData},
 		{"a gateway URL of 16 KiB", func(c *loop.Claim) { c.GatewayURL = "https://" + strings.Repeat("a", 16<<10) }, loop.ReasonStartData},

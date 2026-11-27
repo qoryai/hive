@@ -96,15 +96,19 @@ The changes to Hive that no release contains yet, in the shape of
 
 ### Changed
 
+- A machine's lifetime may be 15 to 10080 minutes, up from 1470. A machine that `serve`
+  took back stays listed for up to 10080 minutes and 15 minutes while sending
+  `dispatched` keeps failing, up from 1470 minutes and 15 minutes; the machine still
+  powers off at the lifetime in its start data.
 - A listed machine with no journal entry, whose `dispatch_id` has the shape of a
   dispatch id, gets `dispatched`, with no machine type, before any delete, so a
   provisioner whose journal was lost, or a new provisioner after a key rotation, keeps
   the machines that still run a dispatch. On 204, the provisioner adds the machine to
-  the journal in the phase `dispatched`, with the lifetime 1470 minutes, logs "took back
+  the journal in the phase `dispatched`, with the lifetime 10080 minutes, logs "took back
   the machine for its dispatch", and then acts on it as on any other dispatched machine.
   On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, it cleans up the
   machine. After any other failure, it keeps the machine and sends `dispatched` again at
-  the next watch, until the machine has run longer than 1470 minutes and 15 minutes by
+  the next watch, until the machine has run longer than 10080 minutes and 15 minutes by
   its start time in the list; then it cleans up the machine. A stopped or deleting
   machine gets no `dispatched`. Of the machines with one dispatch id, a machine that is
   not deleting gets `dispatched` before a deleting machine gets an entry. The

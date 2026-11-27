@@ -121,12 +121,12 @@ machine type:
 
 - On 204, the dispatch still runs. `serve` adds the machine to the journal and logs
   `took back the machine for its dispatch`. The journal has no record of the claim's
-  lifetime, so `serve` gives the machine the longest lifetime, 1470 minutes.
+  lifetime, so `serve` gives the machine the longest lifetime, 10080 minutes.
 - On `410 gone`, `409 lease_expired` or a signed `403 forbidden`, `serve` deletes the
   machine.
 - After any other failure, such as no answer, a server error, an answer with no valid
   signature or a refusal that `serve` cannot read, `serve` keeps the machine and sends
-  `dispatched` again at the next watch. Once the machine has run longer than 1470
+  `dispatched` again at the next watch. Once the machine has run longer than 10080
   minutes and 15 minutes by its start time in the list, `serve` deletes it.
 
 A stopped or deleting machine, and a machine whose `dispatch_id` does not have the

@@ -677,9 +677,10 @@ func TestTheNoRecordGoneCountsFromTheList(t *testing.T) {
 // list has none.
 func strayDispatched(id, machine string) string { return "dispatched " + id + " " + machine + " -" }
 
-// takenBack is the entry of a machine that the watch took back for the dispatch id.
+// takenBack is the entry of a machine that the watch took back for the dispatch id,
+// with the longest lifetime, 10080 minutes.
 func takenBack(id, machine string) journal.Entry {
-	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: journal.MaxLifetime}
+	return journal.Entry{DispatchID: id, Phase: journal.PhaseDispatched, MachineID: machine, MaxLifetimeMinutes: 10080}
 }
 
 // TestAStrayOfALiveDispatchIsTakenBack takes back a listed machine with no journal

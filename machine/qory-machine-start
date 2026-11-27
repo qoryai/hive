@@ -35,7 +35,7 @@
 # before this script runs, by the rule in the header of qory-machine.service.
 #
 # The start data, version 1, is one JSON object, with max_lifetime_minutes an integer
-# from 15 to 1470:
+# from 15 to 10080:
 #   {"version": 1, "run_code": "qecr_...", "gateway": {"url": "https://host[:port]", "address": "<IPv4 or IPv6>"}, "max_lifetime_minutes": 60}
 #
 # The run code, the engine proxy password and the start data stay in shell variables and
@@ -519,13 +519,13 @@ without_version=${data//\"version\"/}
 if [[ $problem == ok ]] && { ((${#data} - ${#without_version} != 9)) || ! [[ $data =~ $version_text ]]; }; then
 	problem=version
 fi
-# The same holds for max_lifetime_minutes: once, a plain integer, from 15 to 1470.
+# The same holds for max_lifetime_minutes: once, a plain integer, from 15 to 10080.
 lifetime=
-lifetime_text='"max_lifetime_minutes"[[:space:]]*:[[:space:]]*([1-9][0-9]{0,3})[[:space:]]*[,}]'
+lifetime_text='"max_lifetime_minutes"[[:space:]]*:[[:space:]]*([1-9][0-9]{0,4})[[:space:]]*[,}]'
 without_lifetime=${data//\"max_lifetime_minutes\"/}
 if [[ $problem == ok ]]; then
 	if ((${#data} - ${#without_lifetime} == 22)) && [[ $data =~ $lifetime_text ]] &&
-		((10#${BASH_REMATCH[1]} >= 15 && 10#${BASH_REMATCH[1]} <= 1470)); then
+		((10#${BASH_REMATCH[1]} >= 15 && 10#${BASH_REMATCH[1]} <= 10080)); then
 		lifetime=${BASH_REMATCH[1]}
 	else
 		problem=lifetime
@@ -557,7 +557,7 @@ json) fail "Launch this machine with start data that is one JSON object. The sta
 escape) fail "Write the start data without a backslash. Valid start data has no escape sequence, and the start data contains a backslash." ;;
 member) fail "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address." ;;
 version) fail "Set version to 1 in the start data. This script reads only start data version 1." ;;
-lifetime) fail "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer." ;;
+lifetime) fail "Set max_lifetime_minutes in the start data to an integer from 15 to 10080. The value is missing, out of range or not a plain integer." ;;
 run_code) fail "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>." ;;
 gateway) fail "Set gateway in the start data to an object with url and address. The gateway value is not an object." ;;
 url) fail "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid." ;;

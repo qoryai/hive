@@ -432,7 +432,7 @@ func TestStartUnitRunsQory(t *testing.T) {
 	}{
 		{name: "IPv4", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com"},
 		{name: "lifetime 15", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 15},
-		{name: "lifetime 1470", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 1470},
+		{name: "lifetime 10080", url: gatewayURL, address: gatewayAddress, hostsLine: "10.0.1.5 gateway.example.com", lifetime: 10080},
 		{name: "IPv6, no port", url: "https://gateway.example.com", address: "fd00:ec2::5", hostsLine: "fd00:ec2::5 gateway.example.com"},
 		{name: "IPv4 in IPv6", url: gatewayURL, address: "::ffff:10.0.1.5", hostsLine: "::ffff:10.0.1.5 gateway.example.com"},
 		{
@@ -1058,7 +1058,7 @@ func TestStartUnitFails(t *testing.T) {
 		escape    = "Write the start data without a backslash. Valid start data has no escape sequence, and the start data contains a backslash."
 		member    = "Remove the unknown members from the start data. Version 1 has only version, run_code, gateway and max_lifetime_minutes, and gateway has only url and address."
 		version   = "Set version to 1 in the start data. This script reads only start data version 1."
-		lifetime  = "Set max_lifetime_minutes in the start data to an integer from 15 to 1470. The value is missing, out of range or not a plain integer."
+		lifetime  = "Set max_lifetime_minutes in the start data to an integer from 15 to 10080. The value is missing, out of range or not a plain integer."
 		code      = "Set run_code in the start data to the run code from Qory Apiary. The value does not have the form qecr_<26 characters>.<22 characters>, with an optional second .<22 characters>."
 		gateway   = "Set gateway in the start data to an object with url and address. The gateway value is not an object."
 		url       = "Set gateway.url in the start data to https://<host> or https://<host>:<port>. The value has another scheme, a user name, a path or a query, or its host or port is not valid."
@@ -1115,7 +1115,8 @@ func TestStartUnitFails(t *testing.T) {
 		{name: "version as text", data: doc(`"1"`, "60"), want: version},
 		{name: "no lifetime", data: `{"version": 1, "run_code": "` + runCode + `", "gateway": {"url": "https://gateway.example.com", "address": "10.0.1.5"}}`, want: lifetime},
 		{name: "lifetime 14", data: doc("1", "14"), want: lifetime},
-		{name: "lifetime 1471", data: doc("1", "1471"), want: lifetime},
+		{name: "lifetime 10081", data: doc("1", "10081"), want: lifetime},
+		{name: "lifetime 100000", data: doc("1", "100000"), want: lifetime},
 		{name: "lifetime 0", data: doc("1", "0"), want: lifetime},
 		{name: "lifetime 60.0", data: doc("1", "60.0"), want: lifetime},
 		{name: "lifetime 6e1", data: doc("1", "6e1"), want: lifetime},

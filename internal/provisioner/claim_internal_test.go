@@ -35,8 +35,9 @@ func marshal(t *testing.T, v any) []byte {
 	return b
 }
 
-// TestAClaimIsRead reads a claim with a machine and its spec and one without them:
-// every member is the answer's, and the run code is written whole.
+// TestAClaimIsRead reads a claim with a machine and its spec, one without them, and one
+// with the lifetime 10080: every member is the answer's, and the run code is written
+// whole.
 func TestAClaimIsRead(t *testing.T) {
 	cl, err := readClaim(marshal(t, aClaim()))
 	if err != nil {
@@ -54,6 +55,11 @@ func TestAClaimIsRead(t *testing.T) {
 	delete(d, "machine_spec")
 	if cl, err := readClaim(marshal(t, d)); err != nil || cl.Machine != "" || cl.MachineSpec != nil {
 		t.Errorf("no machine: %+v %v", cl, err)
+	}
+	d = aClaim()
+	d["max_lifetime_minutes"] = 10080
+	if cl, err := readClaim(marshal(t, d)); err != nil || cl.MaxLifetimeMinutes != 10080 {
+		t.Errorf("a lifetime of 10080: %+v %v", cl, err)
 	}
 }
 
@@ -76,7 +82,8 @@ func TestAClaimOfAnotherFormIsRefused(t *testing.T) {
 		"gateway URL null":         func(d map[string]any) { d["gateway_url"] = nil },
 		"no gateway URL":           func(d map[string]any) { delete(d, "gateway_url") },
 		"a lifetime of 14":         func(d map[string]any) { d["max_lifetime_minutes"] = 14 },
-		"a lifetime of 1471":       func(d map[string]any) { d["max_lifetime_minutes"] = 1471 },
+		"a lifetime of 10081":      func(d map[string]any) { d["max_lifetime_minutes"] = 10081 },
+		"a lifetime of 6 digits":   func(d map[string]any) { d["max_lifetime_minutes"] = 100000 },
 		"a lifetime as a string":   func(d map[string]any) { d["max_lifetime_minutes"] = "120" },
 		"no lifetime":              func(d map[string]any) { delete(d, "max_lifetime_minutes") },
 		"no lease":                 func(d map[string]any) { delete(d, "lease_until") },

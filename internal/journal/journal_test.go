@@ -82,7 +82,7 @@ func TestEachPhaseIsWrittenAndReadBack(t *testing.T) {
 		{journal.PhaseMade, machine, lifetime, machineType, dispatchA + " made " + machine + " 60 " + machineType},
 		{journal.PhaseDispatched, machine, lifetime, machineType, dispatchA + " dispatched " + machine + " 60 " + machineType},
 		{journal.PhaseDispatched, oddID, 15, "", dispatchA + " dispatched " + oddID + " 15 -"},
-		{journal.PhaseMade, longID, 1470, longType, dispatchA + " made " + longID + " 1470 " + longType},
+		{journal.PhaseMade, longID, 10080, longType, dispatchA + " made " + longID + " 10080 " + longType},
 		{journal.PhaseMade, "a", 999, "b", dispatchA + " made a 999 b"},
 		{journal.PhaseDeleting, oddID, journal.MinLifetime, machineType, dispatchA + " deleting " + oddID + " 15 " + machineType},
 		{journal.PhaseEnded, oddID, journal.MinLifetime, "", dispatchA + " ended " + oddID + " 15 -"},
@@ -231,7 +231,7 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		dispatchShape = "the dispatch id is not dp_ and 16 Crockford base32 characters"
 		machineShape  = "the machine id is not 1 to 128 printable ASCII characters other than a space"
 		secret        = "the machine id contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
-		lifetimeRange = "the lifetime is not 15 to 1470 minutes"
+		lifetimeRange = "the lifetime is not 15 to 10080 minutes"
 		typeShape     = "the machine type is not 1 to 64 printable ASCII characters other than a space, or is -"
 		typeSecret    = "the machine type contains qak_, qrk_, qecr_ or qecp_, the start of a secret"
 	)
@@ -266,10 +266,13 @@ func TestAnEntryOutOfShapeIsNotWritten(t *testing.T) {
 		{"dispatched with no lifetime", func(e *journal.Entry) {
 			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseDispatched, machine, 0
 		}, lifetimeRange},
-		{"claimed with a lifetime of 1471", func(e *journal.Entry) { e.MaxLifetimeMinutes = 1471 }, lifetimeRange},
+		{"claimed with a lifetime of 10081", func(e *journal.Entry) { e.MaxLifetimeMinutes = 10081 }, lifetimeRange},
 		{"a lifetime of 14", func(e *journal.Entry) { e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, 14 }, lifetimeRange},
-		{"a lifetime of 1471", func(e *journal.Entry) {
-			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseDispatched, machine, 1471
+		{"a lifetime of 10081", func(e *journal.Entry) {
+			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseDispatched, machine, 10081
+		}, lifetimeRange},
+		{"a lifetime of 6 digits", func(e *journal.Entry) {
+			e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, 100000
 		}, lifetimeRange},
 		{"a lifetime below 0", func(e *journal.Entry) { e.Phase, e.MachineID, e.MaxLifetimeMinutes = journal.PhaseMade, machine, -60 }, lifetimeRange},
 		{"claimed with qrk_", func(e *journal.Entry) { e.MachineID = "qrk_abc" }, secret},
@@ -350,10 +353,10 @@ func TestAJournalOutOfShapeIsNotRead(t *testing.T) {
 		{name: "a machine type with qrk_", content: dispatchA + " made " + machine + " 60 qrk_abc\n", line: 1, cause: "the machine type contains qak_, qrk_, qecr_ or qecp_, the start of a secret"},
 		{name: "claimed with the lifetime -", content: dispatchA + " claimed - - -\n", line: 1, cause: lifetimeText},
 		{name: "made with the lifetime -", content: dispatchA + " made " + machine + " - -\n", line: 1, cause: lifetimeText},
-		{name: "claimed with a lifetime of 14", content: dispatchA + " claimed - 14 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 14", content: dispatchA + " made " + machine + " 14 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 1471", content: dispatchA + " dispatched " + machine + " 1471 -\n", line: 1, cause: "the lifetime is not 15 to 1470 minutes"},
-		{name: "a lifetime of 5 digits", content: dispatchA + " made " + machine + " 10000 -\n", line: 1, cause: lifetimeText},
+		{name: "claimed with a lifetime of 14", content: dispatchA + " claimed - 14 -\n", line: 1, cause: "the lifetime is not 15 to 10080 minutes"},
+		{name: "a lifetime of 14", content: dispatchA + " made " + machine + " 14 -\n", line: 1, cause: "the lifetime is not 15 to 10080 minutes"},
+		{name: "a lifetime of 10081", content: dispatchA + " dispatched " + machine + " 10081 -\n", line: 1, cause: "the lifetime is not 15 to 10080 minutes"},
+		{name: "a lifetime of 6 digits", content: dispatchA + " made " + machine + " 100000 -\n", line: 1, cause: lifetimeText},
 		{name: "a lifetime with a leading zero", content: dispatchA + " made " + machine + " 060 -\n", line: 1, cause: lifetimeText},
 		{name: "a lifetime of 0", content: dispatchA + " made " + machine + " 0 -\n", line: 1, cause: lifetimeText},
 		{name: "a lifetime with a sign", content: dispatchA + " made " + machine + " +60 -\n", line: 1, cause: lifetimeText},

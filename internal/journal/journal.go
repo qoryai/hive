@@ -40,7 +40,7 @@ const (
 	// MinLifetime is the shortest lifetime of a machine, in minutes.
 	MinLifetime = 15
 	// MaxLifetime is the longest lifetime of a machine, in minutes.
-	MaxLifetime = 1470
+	MaxLifetime = 10080
 )
 
 // The phases of a dispatch, in order. In claimed, no make has returned, so a machine
@@ -80,8 +80,8 @@ var (
 	// machineIDShape is the machine id of the adapter protocol: 1 to 128 printable
 	// ASCII characters other than a space.
 	machineIDShape = regexp.MustCompile(`^[!-~]{1,128}$`)
-	// lifetimeShape is a whole number of 1 to 4 digits with no leading zero.
-	lifetimeShape = regexp.MustCompile(`^[1-9][0-9]{0,3}$`)
+	// lifetimeShape is a whole number of 1 to 5 digits with no leading zero.
+	lifetimeShape = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 	// machineTypeShape is the machine_type of the provisioner contract: 1 to 64
 	// printable ASCII characters other than a space.
 	machineTypeShape = regexp.MustCompile(`^[!-~]{1,64}$`)
@@ -141,7 +141,7 @@ func (e Entry) check() string {
 	case e.MachineType != "" && (!machineTypeShape.MatchString(e.MachineType) || e.MachineType == noMachine):
 		return "the machine type is not 1 to 64 printable ASCII characters other than a space, or is -"
 	case e.MaxLifetimeMinutes < MinLifetime || e.MaxLifetimeMinutes > MaxLifetime:
-		return "the lifetime is not 15 to 1470 minutes"
+		return "the lifetime is not 15 to 10080 minutes"
 	case e.Phase == PhaseClaimed && e.MachineID != "":
 		return "the machine id is set in the phase claimed"
 	case e.Phase == PhaseClaimed:

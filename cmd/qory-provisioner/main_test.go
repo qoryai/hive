@@ -49,12 +49,12 @@ with the owner's name. Otherwise serve exits with status 1.
 Run one provisioner per node pool. Every 60 seconds, serve lists the node pool's
 machines. For each machine whose dispatch has no entry in the journal, serve sends
 dispatched for the dispatch:
-  - On 204, serve adds the machine to the journal, with the longest lifetime of 1470
+  - On 204, serve adds the machine to the journal, with the longest lifetime of 10080
     minutes, and logs "took back the machine for its dispatch".
   - On 410 gone, 409 lease_expired or a signed 403 forbidden, serve deletes the
     machine.
   - After any other failure, serve keeps the machine and sends dispatched again 60
-    seconds later. Once the machine has run longer than 1470 minutes and 15 minutes,
+    seconds later. Once the machine has run longer than 10080 minutes and 15 minutes,
     serve deletes it.
 A stopped or deleting machine, and a machine whose dispatch_id does not have the shape of a
 dispatch id, get no dispatched. serve deletes such a machine, except a deleting machine

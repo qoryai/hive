@@ -67,7 +67,7 @@ type gateway struct {
 }
 
 // errStartData is the error of a claim whose values do not make valid start data.
-var errStartData = errors.New("the claim's run code, gateway URL or lifetime does not fit in the start data, which takes a run code of the contract's shape, a lifetime of 15 to 1470 minutes, no backslash and at most 16384 bytes")
+var errStartData = errors.New("the claim's run code, gateway URL or lifetime does not fit in the start data, which takes a run code of the contract's shape, a lifetime of 15 to 10080 minutes, no backslash and at most 16384 bytes")
 
 // buildStartData is the start data of the claim c, with the gateway's address a:
 // {"version":1,"run_code":…,"gateway":{"url":…,"address":…},"max_lifetime_minutes":…}.
